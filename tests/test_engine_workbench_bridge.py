@@ -74,6 +74,22 @@ class DummyAdapter(BasePlatformAdapter):
 
 
 class WorkbenchBridgeTests(unittest.TestCase):
+    def setUp(self):
+        self._environ_patcher = patch.dict(
+            "os.environ",
+            {
+                "ORDO_SHARED_REPO_ROOT": "/dev/null",
+                "WECHAT_APPID": "",
+                "WECHAT_SECRET": "",
+                "WECHAT_AUTHOR": "",
+            },
+            clear=False,
+        )
+        self._environ_patcher.start()
+
+    def tearDown(self):
+        self._environ_patcher.stop()
+
     def _write_cover(self, path: Path, size=(1280, 720)):
         Image.new("RGB", size, color=(23, 45, 67)).save(path)
 
