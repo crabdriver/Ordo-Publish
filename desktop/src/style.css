@@ -68,11 +68,19 @@ button {
   font-size: 16px;
 }
 
-.logo-placeholder {
+.topbar__logo {
   width: 24px;
   height: 24px;
-  background-color: var(--color-primary);
+  display: block;
+  flex-shrink: 0;
+  object-fit: contain;
   border-radius: 6px;
+}
+
+.topbar__status {
+  font-size: 12px;
+  color: var(--color-text-subtle);
+  font-weight: 400;
 }
 
 .topbar__steps {
@@ -422,14 +430,43 @@ textarea {
 .platform-grid {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+  margin-top: 4px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  padding-right: 2px;
+}
+
+.platform-row--card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  background: var(--color-bg-app);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.platform-row__line1 {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+}
+
+.platform-row__line2 {
+  width: 100%;
+}
+
+.platform-row__line2 .cover-select {
+  max-width: 100%;
 }
 
 .platform-row {
-  display: grid;
-  grid-template-columns: 100px 1fr;
-  gap: 12px;
-  align-items: center;
+  /* legacy class hook; layout uses platform-row--card */
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .platform-toggle {
@@ -465,6 +502,9 @@ textarea {
 
 .platform-empty-slot {
   display: block;
+  font-size: 12px;
+  color: var(--color-text-subtle);
+  padding: 8px 0;
 }
 
 .job-summary {
@@ -574,6 +614,84 @@ textarea {
   box-shadow: var(--shadow-modal);
 }
 
+.modal--wide {
+  width: min(920px, 100%);
+  max-height: min(90vh, 820px);
+  overflow-y: auto;
+}
+
+.modal--settings .modal__body--settings {
+  gap: 16px;
+}
+
+.settings-tabs {
+  width: 100%;
+}
+
+.settings-tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-subheading {
+  margin: 8px 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-text-main);
+}
+
+.guide-body h4 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  color: var(--color-text-main);
+}
+
+.guide-section p {
+  margin: 0 0 8px;
+  line-height: 1.55;
+}
+
+.guide-tip {
+  font-size: 13px;
+  color: var(--color-text-subtle);
+  border-left: 3px solid var(--color-primary);
+  padding-left: 10px;
+}
+
+.guide-platform-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.guide-platform-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  background: var(--color-bg-app);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+}
+
+.guide-platform-row__label {
+  font-weight: 500;
+}
+
+.guide-platform-row__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ghost-button--small {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
 .modal__head {
   display: flex;
   justify-content: space-between;
@@ -590,6 +708,36 @@ textarea {
 .modal__body p {
   margin: 0;
   color: var(--color-text-subtle);
+}
+
+.wechat-ip-hint {
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-app);
+  border: 1px solid var(--color-border);
+  margin-bottom: 8px;
+}
+
+.wechat-ip-hint p {
+  margin: 0 0 8px;
+  line-height: 1.5;
+  font-size: 13px;
+}
+
+.wechat-ip-hint p:last-of-type {
+  margin-bottom: 10px;
+}
+
+.wechat-ip-hint__title {
+  font-weight: 600;
+  color: var(--color-text-main) !important;
+}
+
+.wechat-ip-hint code {
+  font-size: 12px;
+  background: rgba(0, 0, 0, 0.06);
+  padding: 1px 6px;
+  border-radius: 4px;
 }
 
 .segmented-control {
@@ -684,4 +832,19 @@ textarea {
 .toast--success {
   border-color: rgba(53, 212, 154, 0.5);
   background: rgba(53, 212, 154, 0.05);
+}
+
+.toast--info {
+  border-color: rgba(0, 207, 255, 0.5);
+  background: rgba(0, 207, 255, 0.05);
+}
+
+.recovery-warning {
+  display: inline-block;
+  font-size: 12px;
+  color: #D97706;
+  background: rgba(217, 119, 6, 0.08);
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-top: 4px;
 }

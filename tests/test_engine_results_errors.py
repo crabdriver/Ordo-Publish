@@ -172,6 +172,43 @@ class EngineConfigTests(unittest.TestCase):
 
         self.assertEqual(config.resolve_wechat_credentials(), ("env-app", "env-secret", "env-author"))
 
+    def test_load_engine_config_falls_back_to_shared_desktop_repo_env_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base_dir = root / "repo"
+            shared_repo = root / "shared-runtime" / "repo"
+            base_dir.mkdir(parents=True)
+            (shared_repo / "scripts").mkdir(parents=True)
+            (shared_repo / "scripts" / "workbench_bridge.py").write_text("print('ok')", encoding="utf-8")
+            (shared_repo / "secrets.env").write_text(
+                "WECHAT_APPID=shared-app\nWECHAT_SECRET=shared-secret\nWECHAT_AUTHOR=shared-author\n",
+                encoding="utf-8",
+            )
+
+            config = load_engine_config(
+                base_dir,
+                environ={"ORDO_SHARED_REPO_ROOT": str(shared_repo)},
+            )
+
+        self.assertTrue(config.env_file_exists)
+        self.assertEqual(config.resolve_wechat_credentials(), ("shared-app", "shared-secret", "shared-author"))
+
+    def test_resolve_cover_dir_prefers_ordo_cover_dir_env(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cover_dir = Path(tmpdir) / "my-covers"
+            cover_dir.mkdir()
+            base_dir = Path(tmpdir) / "repo"
+            base_dir.mkdir()
+            (base_dir / "config.json").write_text(
+                '{"assignment": {"cover_dir": "should_not_use"}}',
+                encoding="utf-8",
+            )
+            config = load_engine_config(
+                base_dir,
+                environ={"ORDO_COVER_DIR": str(cover_dir)},
+            )
+        self.assertEqual(config.resolve_cover_dir(), cover_dir.resolve())
+
 
 class EngineErrorAndResultTests(unittest.TestCase):
     def test_error_type_helpers(self):

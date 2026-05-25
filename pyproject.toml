@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ordo"
+version = "0.1.0"
+description = "Local multi-platform publishing CLI for Chinese creators."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "requests==2.31.0",
+  "markdown==3.5.2",
+  "beautifulsoup4==4.12.3",
+  "python-dotenv==1.2.1",
+  "Pillow==10.2.0",
+  "pypdf==6.9.2",
+  "python-docx",
+  "textual",
+]
+
+[project.scripts]
+ordo = "tiandi_engine.cli.app:main"
+
+[tool.setuptools.packages.find]
+include = ["tiandi_engine*"]

@@ -28,6 +28,9 @@ import type {
 } from './types'
 import { compactHistoryPayload, compactPublishResult } from './publishResultMemory'
 import { buildRetryPlanFromFailures, hasFailedResults, hasRetryableFailures, listFailedResults } from './recovery'
+import { openUrl } from '@tauri-apps/plugin-opener'
+
+import { PLATFORM_EDITOR_LINKS } from './platformLinks'
 import { buildWechatBlockingMessage } from './wechatStatus'
 import { describeBrowserSessionSummary, describePublishResult } from './workbenchFeedback'
 
@@ -88,6 +91,8 @@ interface AppState {
   }
   wechatSettingsLoading: boolean
   wechatSettingsSaving: boolean
+  /** 设置弹窗内标签：微信 / 浏览器登录 / 使用指引 */
+  settingsTab: 'wechat' | 'browser' | 'guide'
 }
 
 const state: AppState = {
@@ -128,6 +133,7 @@ const state: AppState = {
   },
   wechatSettingsLoading: false,
   wechatSettingsSaving: false,
+  settingsTab: 'wechat',
 }
 
 function escapeHtml(value: string): string {
@@ -185,6 +191,123 @@ function showToast(message: string, type: 'info' | 'warning' | 'success' | 'erro
   }, 3000)
 }
 
+async function openExternalUrl(url: string) {
+  try {
+    if (TAURI_RUNTIME) {
+      await openUrl(url)
+    } else {
+      window.open(url, '_blank', 'noopener,noreferrer')
+    }
+  } catch (e) {
+    showToast(e instanceof Error ? e.message : String(e), 'error')
+  }
+}
+
+async function copyUrlToClipboard(url: string) {
+  try {
+    await navigator.clipboard.writeText(url)
+    showToast('链接已复制到剪贴板', 'success')
+  } catch (e) {
+    showToast('复制失败，请手动复制', 'warning')
+  }
+}
+
+/** 用于微信公众平台 IP 白名单：本机访问 api.weixin.qq.com 时的公网出口 IP（随网络变化）。 */
+async function fetchAndCopyPublicIp() {
+  try {
+    const res = await fetch('https://api.ipify.org?format=json')
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`)
+    }
+    const data = (await res.json()) as { ip?: string }
+    const ip = data.ip?.trim()
+    if (!ip) {
+      throw new Error('未解析到 IP')
+    }
+    await navigator.clipboard.writeText(ip)
+    showToast(`已复制公网 IP：${ip}（请到公众平台 → IP 白名单添加）`, 'success')
+  } catch (e) {
+    showToast(
+      e instanceof Error ? e.message : '获取公网 IP 失败，请在本机浏览器搜索「我的 IP」或查看微信 40164 报错中的 IP',
+      'warning',
+    )
+  }
+}
+
+function renderBrowserLoginRows(): string {
+  return PLATFORM_EDITOR_LINKS.map(
+    (row) => `
+        <div class="guide-platform-row">
+          <span class="guide-platform-row__label">${escapeHtml(row.label)}</span>
+          <div class="guide-platform-row__actions">
+            <button type="button" class="ghost-button ghost-button--small" data-action="open-external-url" data-url="${escapeHtml(row.url)}">在浏览器打开</button>
+            <button type="button" class="ghost-button ghost-button--small" data-action="copy-url" data-url="${escapeHtml(row.url)}">复制链接</button>
+          </div>
+        </div>
+      `,
+  ).join('')
+}
+
+function renderSettingsTabContent(): string {
+  if (state.settingsTab === 'browser') {
+    return `
+      <div class="settings-tab-panel">
+        <p>知乎、头条号、简书、一点号需要在 <strong>Ordo 使用的那台 Chrome（托管浏览器，带远程调试）</strong>里完成登录。</p>
+        <p class="guide-tip">本应用不会内嵌各站网页。若「在浏览器打开」走的是系统默认浏览器，而发布用的是<strong>托管 Chrome</strong>，请用<strong>复制链接</strong>粘贴到托管 Chrome 地址栏再登录。</p>
+        <h4 class="settings-subheading">各站写作页</h4>
+        <div class="guide-platform-list">${renderBrowserLoginRows()}</div>
+      </div>
+    `
+  }
+  if (state.settingsTab === 'guide') {
+    return `
+      <div class="settings-tab-panel">
+        <section class="guide-section">
+          <h4>微信</h4>
+          <p>本应用不在窗口内嵌微信网页。在「设置 → 微信」中填写 AppID、Secret、作者，用于写入<strong>草稿箱</strong>。</p>
+        </section>
+        <section class="guide-section">
+          <h4>浏览器平台</h4>
+          <p>知乎、头条、简书、一点需在 <strong>托管 Chrome</strong> 中登录；切换到「浏览器」标签可打开各站写作页链接。</p>
+        </section>
+        <section class="guide-section">
+          <h4>各站写作页快捷方式</h4>
+          <div class="guide-platform-list">${renderBrowserLoginRows()}</div>
+        </section>
+      </div>
+    `
+  }
+  return `
+    <div class="settings-tab-panel">
+      <p>把微信发布到草稿箱需要的 AppID、Secret、Author 填在下方，保存后工作台会立即刷新状态。</p>
+      <div class="wechat-ip-hint">
+        <p class="wechat-ip-hint__title">IP 白名单（公众平台）</p>
+        <p>在 <strong>微信公众平台 → 开发 → 基本配置 → IP 白名单</strong> 中，添加<strong>本机访问微信服务器时的公网出口 IP</strong>。换 Wi‑Fi、宽带重拨后 IP 可能变化。</p>
+        <p>若接口返回 <code>40164</code>（invalid ip），以报错中写明的 IP 为准。</p>
+        <button type="button" class="ghost-button" data-action="fetch-public-ip">获取并复制当前公网 IP</button>
+      </div>
+      ${
+        state.wechatSettingsLoading
+          ? '<div class="empty-inline">正在读取当前微信配置…</div>'
+          : `
+            <label class="field">
+              <span>微信 AppID</span>
+              <input id="wechat-appid-input" type="text" value="${escapeHtml(state.wechatSettings.appId)}" placeholder="例如 wx1234567890" />
+            </label>
+            <label class="field">
+              <span>微信 Secret</span>
+              <input id="wechat-secret-input" type="password" value="${escapeHtml(state.wechatSettings.secret)}" placeholder="请输入微信 Secret" />
+            </label>
+            <label class="field">
+              <span>作者名</span>
+              <input id="wechat-author-input" type="text" value="${escapeHtml(state.wechatSettings.author)}" placeholder="发布时默认作者名" />
+            </label>
+          `
+      }
+    </div>
+  `
+}
+
 async function refreshWorkbenchData() {
   state.busy = 'refresh'
   render()
@@ -223,7 +346,8 @@ async function refreshWorkbenchData() {
   }
 }
 
-async function openSettingsModal() {
+async function openSettingsModal(tab: 'wechat' | 'browser' | 'guide' = 'wechat') {
+  state.settingsTab = tab
   state.settingsModalOpen = true
   state.wechatSettingsLoading = true
   render()
@@ -253,6 +377,7 @@ async function handleSaveWechatSettings() {
       author: state.wechatSettings.author.trim(),
     })
     state.settingsModalOpen = false
+    state.settingsTab = 'wechat'
     state.error = null
     logLine('微信配置已保存')
     await refreshWorkbenchData()
@@ -351,6 +476,14 @@ function applyImportedJob(job: ImportJob, resources: BridgeResources) {
   state.error = null
   state.manualThemeByArticle = {}
   state.manualCoverByArticlePlatform = {}
+  if (job.failure_count > 0) {
+    logLine(`导入完成：成功 ${job.article_count} 篇，失败 ${job.failure_count} 篇。`)
+    for (const item of job.failures.slice(0, 10)) {
+      logLine(`导入失败 [${item.source_kind}] ${item.source_path ?? '未知来源'}: ${item.message}`)
+    }
+    updateStatus(`已导入 ${job.article_count} 篇内容，另有 ${job.failure_count} 篇导入失败，请检查日志与 manifest。`)
+    return
+  }
   updateStatus(`已导入 ${job.article_count} 篇内容，等待模板与封面确认。`)
 }
 
@@ -368,7 +501,11 @@ function restorePlanFromHistory(failuresOnly: boolean) {
     source_path: null,
     pasted_preview: null,
     imported_at: new Date().toISOString(),
+    source_count: nextPlan.drafts.length,
+    manifest_path: null,
     article_count: nextPlan.drafts.length,
+    failure_count: 0,
+    failures: [],
     drafts: nextPlan.drafts,
   }
   state.resources = nextPlan.resources
@@ -533,11 +670,20 @@ function renderHistoryPanel() {
   const lastPlan = state.history?.last_plan
   const lastResult = state.history?.last_result
   const sessionSummary = (state.history?.session?.summary as { total_articles?: number } | undefined) ?? null
-  const canRestoreFailures = Boolean(lastPlan && lastResult && hasFailedResults(lastResult))
+  const recovery = state.history?.recovery
+  const canRestorePlan = Boolean(lastPlan && (recovery?.can_restore_plan ?? true))
+  const canRestoreFailures = Boolean(
+    lastPlan && lastResult && hasFailedResults(lastResult) && (recovery?.can_restore_failures ?? true),
+  )
 
   if (!lastPlan && records.length === 0 && !sessionSummary) {
     return ''
   }
+
+  const recoveryWarning =
+    recovery && recovery.issues && recovery.issues.length > 0
+      ? `<span class="recovery-warning" title="${escapeHtml(recovery.issues.join('; '))}">${escapeHtml(recovery.status)}</span>`
+      : ''
 
   const latestTask = lastPlan
     ? `
@@ -549,9 +695,10 @@ function renderHistoryPanel() {
               ? escapeHtml(`最近结果：成功 ${lastResult.publish_job.success_count}，失败 ${lastResult.publish_job.failure_count}`)
               : escapeHtml(`控制台 session：${sessionSummary?.total_articles ?? 0} 篇`)
           }</span>
+          ${recoveryWarning}
         </div>
         <div class="publish-actions">
-          <button class="ghost-button" data-action="restore-latest-plan">恢复上次任务</button>
+          <button class="ghost-button" data-action="restore-latest-plan" ${canRestorePlan ? '' : 'disabled'}>恢复上次任务</button>
           <button class="ghost-button" data-action="restore-failed-plan" ${canRestoreFailures ? '' : 'disabled'}>恢复失败项</button>
         </div>
       `
@@ -657,17 +804,20 @@ function renderCoverPanel(article: ArticleDraft | null) {
   return `
     <section class="panel panel--covers">
       <h3>封面预览</h3>
-      <div class="platform-grid" style="margin-top: 8px;">
+      <div class="platform-grid">
         ${ALL_PLATFORMS.map((platform) => {
           const key = article ? `${article.article_id}:${platform}` : ''
           const value = key ? state.manualCoverByArticlePlatform[key] ?? '' : ''
           return `
-            <div class="platform-row">
-              <label class="platform-toggle">
-                <input type="checkbox" data-platform-toggle="${platform}" ${state.platformSelection[platform] ? 'checked' : ''}>
-                <span class="platform-icon platform-icon--${platform}"></span>
-                <span class="platform-name">${PLATFORM_LABELS[platform]}</span>
-              </label>
+            <div class="platform-row platform-row--card">
+              <div class="platform-row__line1">
+                <label class="platform-toggle">
+                  <input type="checkbox" data-platform-toggle="${platform}" ${state.platformSelection[platform] ? 'checked' : ''}>
+                  <span class="platform-icon platform-icon--${platform}"></span>
+                  <span class="platform-name">${PLATFORM_LABELS[platform]}</span>
+                </label>
+              </div>
+              <div class="platform-row__line2">
               ${
                 COVER_CAPABLE_PLATFORMS.has(platform)
                   ? `
@@ -682,8 +832,9 @@ function renderCoverPanel(article: ArticleDraft | null) {
                         .join('')}
                     </select>
                   `
-                  : `<span class="platform-empty-slot"></span>`
+                  : `<span class="platform-empty-slot">此平台不走浏览器封面</span>`
               }
+              </div>
             </div>
           `
         }).join('')}
@@ -869,40 +1020,43 @@ function renderModal() {
   }
 
   if (state.settingsModalOpen) {
+    const wechatTab = state.settingsTab === 'wechat'
+    const footerWechat = `
+          <div class="modal__actions">
+            <button class="ghost-button" data-action="close-settings-modal" ${state.wechatSettingsSaving ? 'disabled' : ''}>关闭</button>
+            <button class="primary-button" data-action="save-wechat-settings" ${state.wechatSettingsSaving || state.wechatSettingsLoading ? 'disabled' : ''}>
+              ${state.wechatSettingsSaving ? '保存中…' : '保存'}
+            </button>
+          </div>`
+    const footerOther = `
+          <div class="modal__actions">
+            <button class="primary-button" data-action="close-settings-modal">关闭</button>
+          </div>`
     return `
       <div class="modal-backdrop">
-        <div class="modal">
+        <div class="modal modal--wide modal--settings">
           <div class="modal__head">
-            <h3>微信发布设置</h3>
+            <h3>设置</h3>
             <button class="ghost-button" data-action="close-settings-modal">关闭</button>
           </div>
-          <div class="modal__body">
-            <p>把微信发布到草稿箱需要的 AppID、Secret、Author 直接贴到这里即可，保存后工作台会立即刷新状态。</p>
-            ${
-              state.wechatSettingsLoading
-                ? '<div class="empty-inline">正在读取当前微信配置…</div>'
-                : `
-                  <label class="field">
-                    <span>微信 AppID</span>
-                    <input id="wechat-appid-input" type="text" value="${escapeHtml(state.wechatSettings.appId)}" placeholder="例如 wx1234567890" />
-                  </label>
-                  <label class="field">
-                    <span>微信 Secret</span>
-                    <input id="wechat-secret-input" type="password" value="${escapeHtml(state.wechatSettings.secret)}" placeholder="请输入微信 Secret" />
-                  </label>
-                  <label class="field">
-                    <span>作者名</span>
-                    <input id="wechat-author-input" type="text" value="${escapeHtml(state.wechatSettings.author)}" placeholder="发布时默认作者名" />
-                  </label>
-                `
-            }
+          <div class="modal__body modal__body--settings">
+            <div class="segmented-control settings-tabs">
+              <label class="segmented-control__item">
+                <input type="radio" name="settings-tab" value="wechat" ${state.settingsTab === 'wechat' ? 'checked' : ''}>
+                <span>微信</span>
+              </label>
+              <label class="segmented-control__item">
+                <input type="radio" name="settings-tab" value="browser" ${state.settingsTab === 'browser' ? 'checked' : ''}>
+                <span>浏览器</span>
+              </label>
+              <label class="segmented-control__item">
+                <input type="radio" name="settings-tab" value="guide" ${state.settingsTab === 'guide' ? 'checked' : ''}>
+                <span>指引</span>
+              </label>
+            </div>
+            ${renderSettingsTabContent()}
           </div>
-          <div class="modal__actions">
-            <button class="ghost-button" data-action="close-settings-modal" ${state.wechatSettingsSaving ? 'disabled' : ''}>取消</button>
-            <button class="primary-button" data-action="save-wechat-settings" ${state.wechatSettingsSaving || state.wechatSettingsLoading ? 'disabled' : ''}>
-              ${state.wechatSettingsSaving ? '保存中…' : '保存设置'}
-            </button>
-          </div>
+          ${wechatTab ? footerWechat : footerOther}
         </div>
       </div>
     `
@@ -917,8 +1071,9 @@ function render() {
     <div class="shell">
       <header class="topbar">
         <div class="topbar__brand">
-          <div class="logo-placeholder"></div>
+          <img class="topbar__logo" src="/logo.svg" width="24" height="24" alt="" />
           <strong>Ordo</strong>
+          ${state.status ? `<span class="topbar__status">${escapeHtml(state.status)}</span>` : ''}
         </div>
         <div class="topbar__actions">
           <button class="icon-button" data-action="open-settings-modal" title="设置">
@@ -1010,8 +1165,26 @@ function bindEvents() {
         case 'open-settings-modal':
           await openSettingsModal()
           break
+        case 'fetch-public-ip':
+          await fetchAndCopyPublicIp()
+          break
+        case 'open-external-url': {
+          const url = element.dataset.url ?? ''
+          if (url) {
+            await openExternalUrl(url)
+          }
+          break
+        }
+        case 'copy-url': {
+          const url = element.dataset.url ?? ''
+          if (url) {
+            await copyUrlToClipboard(url)
+          }
+          break
+        }
         case 'close-settings-modal':
           state.settingsModalOpen = false
+          state.settingsTab = 'wechat'
           render()
           break
         case 'save-wechat-settings':
@@ -1074,6 +1247,20 @@ function bindEvents() {
       state.wechatSettings.author = wechatAuthorInput.value
     }
   }
+
+  app.querySelectorAll<HTMLInputElement>('input[name="settings-tab"]').forEach((input) => {
+    input.onchange = () => {
+      if (!input.checked) {
+        return
+      }
+      const value = input.value as 'wechat' | 'browser' | 'guide'
+      if (value === state.settingsTab) {
+        return
+      }
+      state.settingsTab = value
+      render()
+    }
+  })
 
   app.querySelectorAll<HTMLInputElement>('input[name="template-mode"]').forEach((input) => {
     input.onchange = async () => {

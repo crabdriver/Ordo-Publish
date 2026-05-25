@@ -8,16 +8,24 @@ __pycache__/
 *.py[cod]
 *$py.class
 .venv
+.venv312/
 venv/
 ENV/
+build/
+dist/
+*.egg-info/
 
 # Local data & temporary files
+logs/
 .worktrees/
 .tiandidistribute/
 covers/
 .firecrawl/
+.superpowers/
+.cursor/
 .publish-workbench.json
 publish_records.csv
+*.bak
 .DS_Store
 *.png
 *.jpg

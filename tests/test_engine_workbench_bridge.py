@@ -93,10 +93,95 @@ class WorkbenchBridgeTests(unittest.TestCase):
             batch = import_sources(base, import_mode="folder", source_path=str(folder))
             pasted = import_sources(base, import_mode="paste", pasted_text="粘贴标题\n\n粘贴正文")
 
+            self.assertTrue(Path(batch["job"]["manifest_path"]).is_file())
+            manifest_payload = json.loads(Path(batch["job"]["manifest_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(manifest_payload["article_count"], 2)
+            self.assertEqual(manifest_payload["source_count"], 2)
+            self.assertEqual(len(manifest_payload["drafts"]), 2)
+
         self.assertEqual(single["job"]["article_count"], 1)
         self.assertEqual(batch["job"]["article_count"], 2)
         self.assertEqual(batch["job"]["drafts"][0]["title"], "标题A")
         self.assertEqual(pasted["job"]["drafts"][0]["source_kind"], "paste")
+
+    def test_import_sources_folder_keeps_successes_and_records_failures(self):
+        from tiandi_engine.workbench.bridge import import_sources
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            folder = base / "folder"
+            folder.mkdir()
+            (folder / "a.txt").write_text("标题A\n\n正文A", encoding="utf-8")
+            (folder / "broken.bin").write_bytes(b"\x00\x01\x02")
+
+            payload = import_sources(base, import_mode="folder", source_path=str(folder))
+
+        self.assertEqual(payload["job"]["source_count"], 2)
+        self.assertEqual(payload["job"]["article_count"], 1)
+        self.assertEqual(payload["job"]["failure_count"], 1)
+        self.assertEqual(payload["job"]["drafts"][0]["title"], "标题A")
+        self.assertEqual(payload["job"]["failures"][0]["source_kind"], "bin")
+        self.assertIn("unsupported", payload["job"]["failures"][0]["message"])
+
+    def test_run_publish_job_rejects_when_publish_lock_exists(self):
+        from tiandi_engine.workbench.bridge import WORKBENCH_ROOT, run_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            staged_dir = base / ".tiandidistribute" / "workbench" / "articles" / "job"
+            staged_dir.mkdir(parents=True, exist_ok=True)
+            markdown_path = staged_dir / "a1.md"
+            markdown_path.write_text("# 标题\n\n正文", encoding="utf-8")
+            lock_path = base / WORKBENCH_ROOT / "publish.lock"
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path.write_text("busy", encoding="utf-8")
+            plan = {
+                "publish_job": {
+                    "job_id": "job-1",
+                    "article_ids": ["a1"],
+                    "platforms": ["zhihu"],
+                    "status": "pending",
+                    "current_step": "",
+                    "success_count": 0,
+                    "failure_count": 0,
+                    "skip_count": 0,
+                    "recoverable": True,
+                    "error_summary": "",
+                },
+                "mode": "draft",
+                "continue_on_error": False,
+                "drafts": [
+                    {
+                        "article_id": "a1",
+                        "title": "标题",
+                        "body_markdown": "# 标题\n\n正文",
+                        "source_path": str(markdown_path),
+                        "source_kind": "markdown",
+                        "image_paths": [],
+                        "word_count": 2,
+                        "template_mode": "default",
+                        "theme_name": None,
+                        "is_config_complete": True,
+                    }
+                ],
+                "staged_articles": [{"article_id": "a1", "markdown_path": str(markdown_path)}],
+                "context_map": [
+                    {
+                        "article_id": "a1",
+                        "platform": "zhihu",
+                        "markdown_path": str(markdown_path),
+                        "theme_name": None,
+                        "template_mode": "default",
+                        "cover_path": None,
+                        "cover_mode": "auto",
+                        "ai_declaration_mode": "auto",
+                        "scheduled_publish_at": None,
+                    }
+                ],
+            }
+
+            with self.assertRaisesRegex(RuntimeError, "已有发布任务正在执行"):
+                run_publish_job(base, plan, registry={})
 
     def test_discover_resources_returns_theme_and_cover_pool_details(self):
         from tiandi_engine.workbench.bridge import discover_resources

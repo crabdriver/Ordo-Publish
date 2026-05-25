@@ -1,12 +1,12 @@
-# ordo
+# 🚀 Ordo-Publish
 
-`ordo` 是一个面向中文内容创作者的本地多平台自动发布引擎。它以 Markdown 为单一内容源，负责把同一篇文章整理并分发到微信、知乎、头条号、简书、一点号等平台，目标是减少重复登录、重复排版和重复复制粘贴。
+**Ordo-Publish** 是 Ordo Creator Suite 中的本地多平台自动发布引擎。它以 Markdown 为单一内容源，负责把同一篇文章整理并分发到微信、知乎、头条号、简书、一点号等平台，目标是减少重复登录、重复排版和重复复制粘贴。
 
 当前仓库已经包含一个可运行的桌面工作台 MVP，同时仍保留本地 CLI 工作流；项目的正式演进方向是继续把这套本地发布内核打磨稳定，并最终封装成可在 `macOS` 和 `Windows` 上一键安装的原生桌面软件。
 
 自动化边界目前定义为：默认依赖用户已经存在的登录态，系统负责文章装载、内容转换、平台注入、草稿或发布、结果记录和失败恢复；不承诺自动登录、验证码处理或风控绕过。
 
-兼容性说明：当前仓库中的部分内部路径与缓存目录仍沿用 `.tiandidistribute/` 命名，以兼容现有工作流和历史数据；对外项目名称统一为 `ordo`。
+兼容性说明：当前仓库中的部分内部路径与缓存目录仍沿用 `.tiandidistribute/` 命名，以兼容现有工作流和历史数据；对外项目及命令名称为 **Ordo-Publish** (命令行调用为 `ordo`)。
 
 [English](README_EN.md)
 
@@ -23,6 +23,8 @@
 
 ## 当前支持
 
+- `ordo`: Homebrew 风格全屏终端发布入口，当前推荐主入口
+- `scripts/terminal_wizard.py`: 源码仓库内的兼容启动脚本
 - `publish.py`: 多平台统一入口
 - `tiandi_engine/`: 本地发布引擎核心包，承载任务、配置、状态、结果、平台适配与 runner
 - `wechat_publisher.py`: 微信主发布链路
@@ -49,6 +51,10 @@
 - `markdown_utils.py`: Markdown 公共处理逻辑
 
 ## 安装
+
+如果你只是想安装并使用 `ordo` 命令，优先走上面的 Homebrew 终端版路径。
+
+下面这条只适合在源码仓库里做开发或调试：
 
 ```bash
 python3 -m pip install -r requirements.txt
@@ -126,6 +132,56 @@ cp config.example.json config.json
 ```
 
 ## 快速开始
+
+### Homebrew 风格终端版（当前推荐）
+
+终端版现在是主线入口，适合在不打开 GUI 的情况下直接完成导入、预检、发布和失败续跑；桌面工作台暂时只保留 bug 修复与已有能力维护，不再承载新功能主线。
+
+安装方式：
+
+```bash
+bash scripts/install_ordo.sh
+```
+
+或者直接：
+
+```bash
+brew install --formula ./Formula/ordo.rb
+```
+
+安装后启动：
+
+```bash
+ordo
+```
+
+当前终端版会以全屏 TUI 形式带出这些配置项：
+
+- 文章来源目录或单文件
+- 目标平台
+- `draft / publish`
+- 封面策略 `auto / force_on / force_off`
+- AI 声明策略 `auto / force_on / force_off`
+- 封面目录覆盖
+- 是否在单个平台失败后继续
+- 是否把本次配置保存为默认值
+
+运行时目录与状态文件：
+
+- 首次运行会把运行模板同步到 `~/Library/Application Support/com.ordo.cli/runtime/repo`
+- 微信凭据保存在该目录下的 `secrets.env`
+- 终端默认配置写入该目录下 `config.json` 的 `terminal_wizard.defaults`
+- 计划、结果、续跑队列继续写入该目录下的 `.tiandidistribute/`
+- 如需改目录，可设置环境变量 `ORDO_HOME`
+
+遇到问题时，终端版会直接输出：
+
+- 预检阻塞项和建议动作
+- 逐篇、逐平台执行状态
+- 自动生成的续跑队列路径
+- 如果任务被阻塞或部分失败，会直接提示下一步终端命令：重新执行 `ordo`
+
+更多细节见 `docs/terminal-wizard.md`。
 
 ### 桌面工作台 MVP
 

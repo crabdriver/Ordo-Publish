@@ -14,6 +14,8 @@ import markdown
 
 from markdown_utils import render_markdown_plain_text, render_markdown_soup
 from scripts.format import convert_image_captions, convert_lists_to_sections
+from tiandi_engine.config import load_engine_config
+from tiandi_engine.importers.normalize import strip_title_marker
 
 # Load secret credentials from secrets.env
 load_dotenv("secrets.env")
@@ -22,11 +24,16 @@ APPID = os.getenv("WECHAT_APPID")
 SECRET = os.getenv("WECHAT_SECRET")
 
 BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
-COVERS_DIR = BASE_DIR / "covers"
 WECHAT_MARKDOWN_EXTENSIONS = ["extra", "sane_lists"]
 
-# 只使用仓库里真实存在的默认封面文件
-COVER_IMAGES = [str(path) for path in sorted(COVERS_DIR.glob("cover_*.png"))]
+
+def resolve_cover_dir():
+    return load_engine_config(BASE_DIR, environ=os.environ).resolve_cover_dir()
+
+
+def list_cover_images():
+    cover_dir = resolve_cover_dir()
+    return [str(path) for path in sorted(cover_dir.glob("cover_*.png"))]
 
 # --- AI Content Enhancement Config ---
 _FN_PREFIX = f"__FN_{uuid.uuid4().hex[:8]}_"
@@ -316,7 +323,7 @@ class WeChatPublisher:
 
     def get_access_token(self):
         url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={self.appid}&secret={self.secret}"
-        response = requests.get(url).json()
+        response = requests.get(url, timeout=30).json()
         if 'access_token' in response:
             return response['access_token']
         elif response.get('errcode') == 40013:
@@ -344,7 +351,7 @@ class WeChatPublisher:
         mime_type, _ = mimetypes.guess_type(file_path)
         with open(file_path, 'rb') as f:
             files = {'media': (os.path.basename(file_path), f, mime_type)}
-            res = requests.post(url, files=files).json()
+            res = requests.post(url, files=files, timeout=60).json()
             if 'media_id' in res:
                 return res['media_id'], res.get('url', '')
             else:
@@ -606,7 +613,7 @@ class WeChatPublisher:
                 }
             ]
         }
-        res = requests.post(url, data=json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+        res = requests.post(url, data=json.dumps(payload, ensure_ascii=False).encode('utf-8'), timeout=60)
         return res.json()
 
     def submit_publish(self, media_id):
@@ -631,7 +638,7 @@ class WeChatPublisher:
 
 
 def clean_title(title):
-    return re.sub(r'^\d{1,2}-\d{1,2}_', '', title).strip()
+    return strip_title_marker(title)
 
 
 def load_single_article(markdown_path):
@@ -680,7 +687,9 @@ def create_ai_cover(title, markdown_file_path):
         
         # Call generate.py
         import subprocess
-        out_path = os.path.join(COVERS_DIR, f"ai_cover_{int(time.time())}.jpg")
+        cover_dir = resolve_cover_dir()
+        cover_dir.mkdir(parents=True, exist_ok=True)
+        out_path = os.path.join(cover_dir, f"ai_cover_{int(time.time())}.jpg")
         prompt = f"为名为《{title}》的文章创作一张公众号首屏封面配图。风格优雅简约，无文字。注意微信平台要求宽幅封面（约2.35:1），因此请将视觉主体严格居中，上下边缘留白以便最终裁剪。"
         cmd = [
             sys.executable,
@@ -689,7 +698,7 @@ def create_ai_cover(title, markdown_file_path):
             "--out", out_path,
             "--aspect-ratio", "16:9"
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(BASE_DIR))
+        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(BASE_DIR), timeout=120)
         if result.returncode == 0 and os.path.exists(out_path):
             print(f"  [AI封面] 成功为《{title}》生成AI封面图: {os.path.basename(out_path)}")
             return out_path
@@ -699,18 +708,45 @@ def create_ai_cover(title, markdown_file_path):
         print(f"  [AI封面异常] {e}")
     return None
 
-def select_cover_for_path(markdown_file_path, title=None):
+def resolve_numbered_cover(markdown_file_path):
+    name = Path(markdown_file_path).name
+    match = re.match(r"^(\d{2})_", name)
+    if not match:
+        return None
+    candidate = resolve_cover_dir() / f"cover_{match.group(1)}.png"
+    if candidate.is_file():
+        return str(candidate.resolve())
+    return None
+
+
+def select_cover_for_path(markdown_file_path, title=None, cover_override=None):
+    if cover_override:
+        path = Path(cover_override).expanduser().resolve()
+        if not path.is_file():
+            raise RuntimeError(f"封面文件不存在: {path}")
+        return str(path)
+    numbered = resolve_numbered_cover(markdown_file_path)
+    if numbered:
+        return numbered
     if title:
         ai_cover = create_ai_cover(title, markdown_file_path)
         if ai_cover:
             return ai_cover
     import random
-    if not COVER_IMAGES:
+    cover_images = list_cover_images()
+    if not cover_images:
         raise RuntimeError("未找到任何本地默认封面，且 AI 封面未生成成功")
-    return random.choice(COVER_IMAGES)
+    return random.choice(cover_images)
 
 
-def publish_one_article(publisher, markdown_file, mode, dry_run=False, theme_name="chinese"):
+def publish_one_article(
+    publisher,
+    markdown_file,
+    mode,
+    dry_run=False,
+    theme_name="chinese",
+    cover_path=None,
+):
     title, md_content, md_file_path = load_single_article(markdown_file)
     
     if dry_run:
@@ -731,7 +767,7 @@ def publish_one_article(publisher, markdown_file, mode, dry_run=False, theme_nam
         print(f"[SKIP] 微信草稿或已发布列表中已存在同标题文章: {title}")
         return
 
-    cover_path = select_cover_for_path(md_file_path, title=title)
+    cover_path = select_cover_for_path(md_file_path, title=title, cover_override=cover_path)
     cover_media_id, cover_url = publisher.upload_permanent_material(cover_path)
     
     # 自动清理临时生成的 AI 封面图
@@ -791,6 +827,7 @@ def main():
         parser.add_argument("--mode", choices=["draft", "publish"], default="draft")
         parser.add_argument("--theme", default="chinese", help="指定的预设主题名，如 chinese 或 elegant-blue")
         parser.add_argument("--dry-run", action="store_true", help="演练模式，只生成本地 html 进行预览，不推网")
+        parser.add_argument("--cover", help="指定封面图路径；默认按文章文件名前缀 01_ 匹配 cover_01.png")
         args = parser.parse_args()
 
         print("=" * 50)
@@ -806,7 +843,14 @@ def main():
             print("[OK] Token 获取成功\n")
 
         if args.markdown_file:
-            publish_one_article(publisher, args.markdown_file, args.mode, dry_run=args.dry_run, theme_name=args.theme)
+            publish_one_article(
+                publisher,
+                args.markdown_file,
+                args.mode,
+                dry_run=args.dry_run,
+                theme_name=args.theme,
+                cover_path=args.cover,
+            )
             return
 
         target_dir = os.getenv("ARTICLE_DIR", "./articles")

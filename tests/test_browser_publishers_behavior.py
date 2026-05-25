@@ -39,6 +39,56 @@ class BrowserPublisherBehaviorTests(unittest.TestCase):
         self.assertEqual(args[0], "target-1")
         self.assertIn("已设置定时发布", args[1])
 
+    def test_toutiao_click_button_with_fallback_prefers_dom_click(self):
+        with patch.object(toutiao_publisher, "click_button", return_value="clicked") as mocked_dom, patch.object(
+            toutiao_publisher,
+            "wait_for_publish_button_effect",
+            return_value=True,
+        ) as mocked_wait, patch.object(
+            toutiao_publisher,
+            "click_text_by_xy",
+        ) as mocked_xy:
+            result = toutiao_publisher.click_button_with_fallback("target-1", "预览并发布")
+
+        self.assertEqual(result, "clicked")
+        mocked_dom.assert_called_once_with("target-1", "预览并发布")
+        mocked_wait.assert_called_once_with("target-1", "预览并发布", timeout_seconds=3)
+        mocked_xy.assert_not_called()
+
+    def test_toutiao_click_button_with_fallback_uses_xy_when_dom_click_has_no_effect(self):
+        with patch.object(toutiao_publisher, "click_button", return_value="clicked"), patch.object(
+            toutiao_publisher,
+            "wait_for_publish_button_effect",
+            return_value=False,
+        ), patch.object(
+            toutiao_publisher,
+            "click_text_by_xy",
+            return_value="clicked",
+        ) as mocked_xy:
+            result = toutiao_publisher.click_button_with_fallback("target-1", "预览并发布")
+
+        self.assertEqual(result, "clicked")
+        mocked_xy.assert_called_once_with("target-1", "预览并发布")
+
+    def test_toutiao_click_button_with_fallback_uses_xy_when_dom_misses(self):
+        with patch.object(toutiao_publisher, "click_button", return_value="button-not-found"), patch.object(
+            toutiao_publisher,
+            "click_text_by_xy",
+            return_value="clicked",
+        ) as mocked_xy:
+            result = toutiao_publisher.click_button_with_fallback("target-1", "确认发布")
+
+        self.assertEqual(result, "clicked")
+        mocked_xy.assert_called_once_with("target-1", "确认发布")
+
+    def test_toutiao_detect_publish_limit_matches_daily_cap_copy(self):
+        with patch.object(
+            toutiao_publisher,
+            "run_cdp",
+            return_value="无法发布\n今日发文已达 50 篇上限，可保存草稿后明日发布\n确定",
+        ):
+            self.assertEqual(toutiao_publisher.detect_publish_limit("target-1"), "今日发文已达")
+
     def test_toutiao_select_byte_option_targets_visible_select_options(self):
         with patch.object(
             toutiao_publisher,
@@ -51,6 +101,23 @@ class BrowserPublisherBehaviorTests(unittest.TestCase):
         eval_expression = mocked_run.call_args_list[1].args[2]
         self.assertIn("byte-select-option", eval_expression)
         self.assertIn("10", eval_expression)
+
+    def test_toutiao_ensure_editor_ready_uses_fallback_selectors(self):
+        with patch.object(toutiao_publisher, "wait_until", return_value=True) as mocked_wait:
+            toutiao_publisher.ensure_editor_ready("target-1")
+
+        expression = mocked_wait.call_args.args[1]
+        self.assertIn('placeholder*=\\"标题\\"', expression)
+        self.assertIn('[contenteditable=\\"true\\"]', expression)
+
+    def test_toutiao_inject_article_uses_fallback_title_and_editor_selectors(self):
+        with patch.object(toutiao_publisher, "run_cdp", side_effect=["标题", '{"bodyLength": 2}']) as mocked_run:
+            toutiao_publisher.inject_article("target-1", "标题", "<p>正文</p>")
+
+        title_expression = mocked_run.call_args_list[0].args[2]
+        body_expression = mocked_run.call_args_list[1].args[2]
+        self.assertIn('placeholder*=\\"标题\\"', title_expression)
+        self.assertIn('[contenteditable=\\"true\\"]', body_expression)
 
     def test_toutiao_main_publish_with_schedule_uses_schedule_path(self):
         argv = [
@@ -80,7 +147,7 @@ class BrowserPublisherBehaviorTests(unittest.TestCase):
         ), patch.object(
             toutiao_publisher, "attempt_ai_declaration", return_value="checked"
         ), patch.object(
-            toutiao_publisher, "click_text_by_xy", return_value="clicked"
+            toutiao_publisher, "click_button_with_fallback", return_value="clicked"
         ) as mocked_click, patch.object(
             toutiao_publisher, "schedule_publish", return_value="scheduled"
         ) as mocked_schedule, patch.object(

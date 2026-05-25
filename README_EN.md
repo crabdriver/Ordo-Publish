@@ -1,12 +1,12 @@
-# ordo
+# 🚀 Ordo-Publish
 
-`ordo` is a local multi-platform publishing engine for Chinese-language creators. It treats Markdown as the single source of truth, then prepares and distributes the same article to WeChat, Zhihu, Toutiao, Jianshu, Yidian, and similar platforms with far less repeated login, formatting, and copy-paste work.
+**Ordo-Publish** is a local multi-platform publishing engine of the Ordo Creator Suite for Chinese-language creators. It treats Markdown as the single source of truth, then prepares and distributes the same article to WeChat, Zhihu, Toutiao, Jianshu, Yidian, and similar platforms with far less repeated login, formatting, and copy-paste work.
 
 The current repository already includes a runnable desktop workbench MVP on top of the local CLI and engine workflow, and the official direction remains to harden that core into a native desktop application for `macOS` and `Windows`.
 
 The current automation boundary is explicit: `ordo` assumes the user already has valid platform login sessions, and the system handles article loading, content transformation, editor injection, draft or publish actions, result recording, and failure recovery. It does not promise automatic login, CAPTCHA handling, or anti-risk bypass behavior.
 
-Compatibility note: some internal paths and cache directories still use `.tiandidistribute/` for backward compatibility with the existing workflow and stored state, while the public project name is now `ordo`.
+Compatibility note: some internal paths and cache directories still use `.tiandidistribute/` for backward compatibility with the existing workflow and stored state, while the public project is now **Ordo-Publish** (invoked via CLI as `ordo`).
 
 [中文说明](README.md)
 
@@ -22,6 +22,8 @@ Compatibility note: some internal paths and cache directories still use `.tiandi
 
 ## Included Tools
 
+- `ordo`: Homebrew-style fullscreen terminal publishing entry, now the recommended primary entry
+- `scripts/terminal_wizard.py`: compatibility launcher kept for source-tree usage
 - `publish.py`: unified multi-platform entry
 - `tiandi_engine/`: core local publishing engine package for tasks, config, state, results, adapters, and runner
 - `wechat_publisher.py`: WeChat-focused publishing flow
@@ -48,6 +50,10 @@ Compatibility note: some internal paths and cache directories still use `.tiandi
 - `markdown_utils.py`: shared Markdown transformation utilities
 
 ## Install
+
+If you want the end-user `ordo` command, use the Homebrew-style terminal install path described below.
+
+The command below is only for source-tree development or debugging:
 
 ```bash
 python3 -m pip install -r requirements.txt
@@ -123,6 +129,36 @@ If you want to disable AI-first behavior:
 ```
 
 ## Quick Start
+
+### Homebrew-style Terminal TUI (Recommended)
+
+The terminal flow is now the preferred primary entry. The desktop workbench remains in the repository, but new feature work is paused there and the focus moves to the terminal-first workflow.
+
+Install it with:
+
+```bash
+bash scripts/install_ordo.sh
+```
+
+or directly:
+
+```bash
+brew install --formula ./Formula/ordo.rb
+```
+
+Then run:
+
+```bash
+ordo
+```
+
+The command launches a fullscreen TUI for article path, platform selection, `draft/publish`, cover mode, AI declaration mode, failure continuation, and default persistence.
+
+On first launch, the command syncs its runtime template into `~/Library/Application Support/com.ordo.cli/runtime/repo`. Credentials stay in `secrets.env`, defaults stay in `config.json` under `terminal_wizard.defaults`, and runtime state continues under `.tiandidistribute/` inside that runtime repo. Use `ORDO_HOME` to override the base directory.
+
+If preflight blocks the task or the run ends partially failed, the TUI prints the retry-queue path and tells you to re-run `ordo` using the saved defaults and the generated queue as your narrowing guide.
+
+This terminal-first flow is currently macOS-first. Windows is only kept as a compatibility target for future follow-up, not as a full first-class delivery in this round.
 
 ### Desktop Workbench MVP
 

@@ -11,6 +11,7 @@ const PACKAGED_PYTHON_ROOT: &str = "python";
 const PACKAGED_PYTHON_EXECUTABLE: &str = "python/bin/python3";
 const PACKAGED_NODE_ARCHIVE: &str = "node-runtime.tar.gz";
 const PACKAGED_NODE_EXECUTABLE: &str = "node/bin/node";
+const PRESERVED_RUNTIME_FILES: &[&str] = &["repo/secrets.env", "repo/config.json"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RuntimeSource {
@@ -79,16 +80,21 @@ fn format_repo_root_error(path: &Path, err: String, explicit: bool) -> String {
     }
 }
 
-fn resolve_repo_root_from(manifest_dir: PathBuf, explicit_root: Option<PathBuf>) -> Result<PathBuf, String> {
+fn resolve_repo_root_from(
+    manifest_dir: PathBuf,
+    explicit_root: Option<PathBuf>,
+) -> Result<PathBuf, String> {
     if let Some(root) = explicit_root {
-        return validate_repo_root(root.clone()).map_err(|err| format_repo_root_error(&root, err, true));
+        return validate_repo_root(root.clone())
+            .map_err(|err| format_repo_root_error(&root, err, true));
     }
     let guessed_root = manifest_dir
         .parent()
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .ok_or_else(|| "无法推断仓库根目录".to_string())?;
-    validate_repo_root(guessed_root.clone()).map_err(|err| format_repo_root_error(&guessed_root, err, false))
+    validate_repo_root(guessed_root.clone())
+        .map_err(|err| format_repo_root_error(&guessed_root, err, false))
 }
 
 fn discover_packaged_python_path(python_root: &Path) -> Vec<PathBuf> {
@@ -119,7 +125,10 @@ fn discover_packaged_python_path(python_root: &Path) -> Vec<PathBuf> {
 fn runtime_metadata_matches(source_root: &Path, installed_root: &Path) -> bool {
     let source_metadata = source_root.join("runtime-metadata.json");
     let installed_metadata = installed_root.join("runtime-metadata.json");
-    match (std::fs::read(source_metadata), std::fs::read(installed_metadata)) {
+    match (
+        std::fs::read(source_metadata),
+        std::fs::read(installed_metadata),
+    ) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
     }
@@ -156,21 +165,62 @@ fn copy_directory_recursive(source: &Path, destination: &Path) -> Result<(), Str
     Ok(())
 }
 
+fn snapshot_preserved_runtime_files(
+    installed_root: &Path,
+) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
+    let mut preserved = Vec::new();
+    for relative in PRESERVED_RUNTIME_FILES {
+        let relative_path = PathBuf::from(relative);
+        let source_path = installed_root.join(&relative_path);
+        if !source_path.is_file() {
+            continue;
+        }
+        let bytes = std::fs::read(&source_path).map_err(|err| {
+            format!(
+                "读取待保留运行时文件失败：{} ({err})",
+                source_path.display()
+            )
+        })?;
+        preserved.push((relative_path, bytes));
+    }
+    Ok(preserved)
+}
+
+fn restore_preserved_runtime_files(
+    installed_root: &Path,
+    preserved: &[(PathBuf, Vec<u8>)],
+) -> Result<(), String> {
+    for (relative_path, bytes) in preserved {
+        let target_path = installed_root.join(relative_path);
+        if let Some(parent) = target_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("创建保留文件父目录失败：{} ({err})", parent.display()))?;
+        }
+        std::fs::write(&target_path, bytes)
+            .map_err(|err| format!("恢复保留运行时文件失败：{} ({err})", target_path.display()))?;
+    }
+    Ok(())
+}
+
 fn install_packaged_runtime(source_root: &Path, app_data_dir: PathBuf) -> Result<PathBuf, String> {
     let installed_root = app_data_dir.join(PACKAGED_RUNTIME_ROOT);
-    let needs_refresh = !installed_root.exists() || !runtime_metadata_matches(source_root, &installed_root);
+    let needs_refresh =
+        !installed_root.exists() || !runtime_metadata_matches(source_root, &installed_root);
     if needs_refresh {
+        let preserved = if installed_root.exists() {
+            snapshot_preserved_runtime_files(&installed_root)?
+        } else {
+            Vec::new()
+        };
         if installed_root.exists() {
             std::fs::remove_dir_all(&installed_root).map_err(|err| {
-                format!(
-                    "清理旧运行时目录失败：{} ({err})",
-                    installed_root.display()
-                )
+                format!("清理旧运行时目录失败：{} ({err})", installed_root.display())
             })?;
         }
         std::fs::create_dir_all(&app_data_dir)
             .map_err(|err| format!("创建 app data 目录失败：{} ({err})", app_data_dir.display()))?;
         copy_directory_recursive(source_root, &installed_root)?;
+        restore_preserved_runtime_files(&installed_root, &preserved)?;
     }
     extract_packaged_node_archive(&installed_root)?;
     Ok(installed_root)
@@ -182,13 +232,23 @@ fn extract_packaged_node_archive(installed_root: &Path) -> Result<(), String> {
     if !archive_path.is_file() || node_root.exists() {
         return Ok(());
     }
-    let status = Command::new("/usr/bin/tar")
+    let tar_cmd = if cfg!(target_os = "windows") {
+        "tar"
+    } else {
+        "/usr/bin/tar"
+    };
+    let status = Command::new(tar_cmd)
         .arg("-xzf")
         .arg(&archive_path)
         .arg("-C")
         .arg(installed_root)
         .status()
-        .map_err(|err| format!("解压包内 Node 运行时失败：{} ({err})", archive_path.display()))?;
+        .map_err(|err| {
+            format!(
+                "解压包内 Node 运行时失败：{} ({err})",
+                archive_path.display()
+            )
+        })?;
     if !status.success() {
         return Err(format!(
             "解压包内 Node 运行时失败：{}，退出码 {:?}",
@@ -199,7 +259,10 @@ fn extract_packaged_node_archive(installed_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn packaged_runtime_from(resource_dir: PathBuf, app_data_dir: Option<PathBuf>) -> Result<Option<RuntimeContext>, String> {
+fn packaged_runtime_from(
+    resource_dir: PathBuf,
+    app_data_dir: Option<PathBuf>,
+) -> Result<Option<RuntimeContext>, String> {
     let packaged_root = resource_dir.join(PACKAGED_RUNTIME_ROOT);
     if !packaged_root.exists() {
         return Ok(None);
@@ -271,7 +334,13 @@ fn runtime_context(app: Option<&AppHandle>) -> Result<RuntimeContext, String> {
     let explicit_python = std::env::var("ORDO_PYTHON").ok().map(PathBuf::from);
     let resource_dir = app.and_then(|handle| handle.path().resource_dir().ok());
     let app_data_dir = app.and_then(|handle| handle.path().app_data_dir().ok());
-    resolve_runtime_context_from(manifest_dir, explicit_root, explicit_python, resource_dir, app_data_dir)
+    resolve_runtime_context_from(
+        manifest_dir,
+        explicit_root,
+        explicit_python,
+        resource_dir,
+        app_data_dir,
+    )
 }
 
 fn format_python_spawn_error(binary: &str, err: &std::io::Error) -> String {
@@ -319,7 +388,8 @@ fn run_bridge_once(app: Option<&AppHandle>, payload: Value) -> Result<Value, Str
             stderr
         });
     }
-    serde_json::from_slice(&output.stdout).map_err(|err| format!("解析 Python bridge JSON 失败: {err}"))
+    serde_json::from_slice(&output.stdout)
+        .map_err(|err| format!("解析 Python bridge JSON 失败: {err}"))
 }
 
 #[tauri::command]
@@ -346,9 +416,12 @@ fn run_publish_job_stream(app: AppHandle, window: Window, plan: Value) -> Result
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     runtime.apply_runtime_env(&mut command)?;
-    let mut child = command
-        .spawn()
-        .map_err(|err| format!("启动发布任务失败：{}", format_python_spawn_error(&python, &err)))?;
+    let mut child = command.spawn().map_err(|err| {
+        format!(
+            "启动发布任务失败：{}",
+            format_python_spawn_error(&python, &err)
+        )
+    })?;
     child
         .stdin
         .as_mut()
@@ -406,6 +479,7 @@ fn run_publish_job_stream(app: AppHandle, window: Window, plan: Value) -> Result
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
@@ -416,7 +490,10 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![bridge_request, run_publish_job_stream])
+        .invoke_handler(tauri::generate_handler![
+            bridge_request,
+            run_publish_job_stream
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -424,11 +501,11 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_python_spawn_error, resolve_repo_root_from, resolve_runtime_context_from,
-        validate_repo_root, RuntimeSource,
+        format_python_spawn_error, install_packaged_runtime, resolve_repo_root_from,
+        resolve_runtime_context_from, validate_repo_root, RuntimeSource,
     };
-    use std::io;
     use std::fs;
+    use std::io;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -444,7 +521,11 @@ mod tests {
     fn validate_repo_root_accepts_directory_with_bridge_script() {
         let root = temp_path("valid-root");
         fs::create_dir_all(root.join("scripts")).expect("create scripts dir");
-        fs::write(root.join("scripts").join("workbench_bridge.py"), "print('ok')").expect("write bridge");
+        fs::write(
+            root.join("scripts").join("workbench_bridge.py"),
+            "print('ok')",
+        )
+        .expect("write bridge");
 
         let validated = validate_repo_root(root.clone()).expect("valid repo root");
 
@@ -497,21 +578,46 @@ mod tests {
         let installed_node_root = installed_root.join("node");
         let packaged_node_executable = packaged_node_root.join("bin").join("node");
         let installed_node_executable = installed_node_root.join("bin").join("node");
-        let installed_site_packages = installed_python_root.join("lib").join("python3.11").join("site-packages");
+        let installed_site_packages = installed_python_root
+            .join("lib")
+            .join("python3.11")
+            .join("site-packages");
 
-        fs::create_dir_all(packaged_repo_root.join("scripts")).expect("create packaged scripts dir");
-        fs::create_dir_all(packaged_python_root.join("lib").join("python3.11").join("site-packages"))
-            .expect("create site packages dir");
-        fs::create_dir_all(packaged_python_executable.parent().expect("python parent")).expect("create python bin dir");
-        fs::create_dir_all(packaged_node_executable.parent().expect("node parent")).expect("create node bin dir");
-        fs::write(packaged_repo_root.join("scripts").join("workbench_bridge.py"), "print('ok')").expect("write packaged bridge");
+        fs::create_dir_all(packaged_repo_root.join("scripts"))
+            .expect("create packaged scripts dir");
+        fs::create_dir_all(
+            packaged_python_root
+                .join("lib")
+                .join("python3.11")
+                .join("site-packages"),
+        )
+        .expect("create site packages dir");
+        fs::create_dir_all(packaged_python_executable.parent().expect("python parent"))
+            .expect("create python bin dir");
+        fs::create_dir_all(packaged_node_executable.parent().expect("node parent"))
+            .expect("create node bin dir");
+        fs::write(
+            packaged_repo_root
+                .join("scripts")
+                .join("workbench_bridge.py"),
+            "print('ok')",
+        )
+        .expect("write packaged bridge");
         fs::write(&packaged_python_executable, "").expect("write packaged python");
         fs::write(&packaged_node_executable, "").expect("write packaged node");
-        fs::write(packaged_root.join("runtime-metadata.json"), "{\"source_fingerprint\":\"one\"}").expect("write metadata");
+        fs::write(
+            packaged_root.join("runtime-metadata.json"),
+            "{\"source_fingerprint\":\"one\"}",
+        )
+        .expect("write metadata");
 
         let explicit_root = temp_path("explicit-root");
         fs::create_dir_all(explicit_root.join("scripts")).expect("create explicit scripts dir");
-        fs::write(explicit_root.join("scripts").join("workbench_bridge.py"), "print('ok')").expect("write explicit bridge");
+        fs::write(
+            explicit_root.join("scripts").join("workbench_bridge.py"),
+            "print('ok')",
+        )
+        .expect("write explicit bridge");
 
         let context = resolve_runtime_context_from(
             PathBuf::from("/tmp/unused/desktop/src-tauri"),
@@ -531,11 +637,79 @@ mod tests {
     }
 
     #[test]
+    fn install_packaged_runtime_preserves_saved_repo_settings_on_refresh() {
+        let source_root = temp_path("packaged-source-root");
+        let app_data_root = temp_path("packaged-app-data-root");
+        let installed_root = app_data_root.join("ordo-runtime");
+
+        fs::create_dir_all(source_root.join("repo").join("scripts"))
+            .expect("create packaged repo scripts dir");
+        fs::write(
+            source_root
+                .join("repo")
+                .join("scripts")
+                .join("workbench_bridge.py"),
+            "print('ok')",
+        )
+        .expect("write packaged bridge");
+        fs::write(
+            source_root.join("repo").join("publish.py"),
+            "print('publish')",
+        )
+        .expect("write packaged publish");
+        fs::write(
+            source_root.join("runtime-metadata.json"),
+            "{\"source_fingerprint\":\"new\"}",
+        )
+        .expect("write source metadata");
+
+        fs::create_dir_all(installed_root.join("repo").join("scripts"))
+            .expect("create installed repo scripts dir");
+        fs::write(
+            installed_root
+                .join("repo")
+                .join("scripts")
+                .join("workbench_bridge.py"),
+            "print('old')",
+        )
+        .expect("write installed bridge");
+        fs::write(
+            installed_root.join("repo").join("secrets.env"),
+            "WECHAT_APPID=saved\nWECHAT_SECRET=saved-secret\n",
+        )
+        .expect("write installed secrets");
+        fs::write(
+            installed_root.join("runtime-metadata.json"),
+            "{\"source_fingerprint\":\"old\"}",
+        )
+        .expect("write installed metadata");
+
+        let refreshed_root = install_packaged_runtime(&source_root, app_data_root.clone())
+            .expect("refresh packaged runtime");
+
+        assert_eq!(refreshed_root, installed_root);
+        assert_eq!(
+            fs::read_to_string(installed_root.join("repo").join("secrets.env"))
+                .expect("read preserved secrets"),
+            "WECHAT_APPID=saved\nWECHAT_SECRET=saved-secret\n"
+        );
+        assert_eq!(
+            fs::read_to_string(installed_root.join("repo").join("publish.py"))
+                .expect("read refreshed publish"),
+            "print('publish')"
+        );
+    }
+
+    #[test]
     fn resolve_runtime_context_falls_back_to_explicit_dev_paths() {
         let explicit_root = temp_path("explicit-runtime-root");
         let explicit_python = PathBuf::from("/tmp/custom-python");
         fs::create_dir_all(explicit_root.join("scripts")).expect("create explicit scripts dir");
-        fs::write(explicit_root.join("scripts").join("workbench_bridge.py"), "print('ok')").expect("write explicit bridge");
+        fs::write(
+            explicit_root.join("scripts").join("workbench_bridge.py"),
+            "print('ok')",
+        )
+        .expect("write explicit bridge");
 
         let context = resolve_runtime_context_from(
             PathBuf::from("/tmp/unused/desktop/src-tauri"),

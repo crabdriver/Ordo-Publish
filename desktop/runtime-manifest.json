@@ -21,6 +21,7 @@
     "toutiao_publisher.py",
     "yidian_publisher.py",
     "jianshu_publisher.py",
+    "wechat_publisher.py",
     "tiandi_engine",
     "themes",
     "templates"

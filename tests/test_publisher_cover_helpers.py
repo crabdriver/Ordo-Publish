@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import jianshu_publisher
 import toutiao_publisher
+import wechat_publisher
 import yidian_publisher
 import zhihu_publisher
 
@@ -111,7 +112,7 @@ class ZhihuDeclarationTests(unittest.TestCase):
             zhihu_publisher.declare_ai_creation("zhihu-target")
 
         expressions = [call.args[2] for call in run_cdp_mock.call_args_list if call.args[0] == "eval"]
-        self.assertTrue(any("内容包含AI辅助创作" in expression for expression in expressions))
+        self.assertTrue(any(zhihu_publisher.ZHIHU_AI_DECLARATION in expression for expression in expressions))
 
 
 class ToutiaoStrictSettingTests(unittest.TestCase):
@@ -222,6 +223,42 @@ class ToutiaoStrictSettingTests(unittest.TestCase):
         finally:
             Path(cover_path).unlink(missing_ok=True)
 
+    def test_apply_cover_retries_confirm_with_xy_when_dialog_stays_open(self):
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
+            handle.write(b"x")
+            cover_path = handle.name
+        try:
+            with patch.object(toutiao_publisher, "choose_cover_mode", return_value="checked"), patch.object(
+                toutiao_publisher,
+                "cover_mode_is_selected",
+                return_value=True,
+            ), patch.object(
+                toutiao_publisher,
+                "wait_until",
+                side_effect=[True, False, True],
+            ), patch.object(
+                toutiao_publisher,
+                "run_cdp",
+                return_value="ok",
+            ), patch.object(
+                toutiao_publisher,
+                "click_visible_button",
+                return_value="clicked",
+            ), patch.object(
+                toutiao_publisher,
+                "click_text_by_xy",
+                return_value="clicked",
+            ) as xy_click, patch.object(
+                toutiao_publisher.time,
+                "sleep",
+                return_value=None,
+            ):
+                toutiao_publisher.apply_cover("toutiao-target", cover_path)
+
+            xy_click.assert_called_once_with("toutiao-target", "确定")
+        finally:
+            Path(cover_path).unlink(missing_ok=True)
+
     def test_apply_cover_raises_when_upload_verification_times_out(self):
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
             handle.write(b"x")
@@ -297,6 +334,22 @@ class YidianStrictSettingTests(unittest.TestCase):
         ):
             with self.assertRaises(RuntimeError):
                 yidian_publisher.attempt_ai_declaration("yidian-target")
+
+
+class WechatCoverResolutionTests(unittest.TestCase):
+    def test_select_cover_for_path_uses_ordo_cover_dir_override(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cover_dir = Path(tmpdir)
+            cover_path = cover_dir / "cover_01.png"
+            cover_path.write_bytes(b"x")
+            with patch.dict("os.environ", {"ORDO_COVER_DIR": str(cover_dir)}, clear=False), patch.object(
+                wechat_publisher,
+                "create_ai_cover",
+                return_value=None,
+            ):
+                selected = wechat_publisher.select_cover_for_path("/tmp/article.md", title="Title")
+
+        self.assertEqual(Path(selected), cover_path.resolve())
 
 
 if __name__ == "__main__":

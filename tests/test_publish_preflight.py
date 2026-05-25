@@ -109,6 +109,33 @@ class PublishPreflightTests(unittest.TestCase):
         self.assertEqual(blockers, [])
         self.assertTrue(any("AI 封面" in item for item in warnings))
 
+    def test_run_preflight_checks_respects_cover_override_for_wechat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            override_dir = base / "external-covers"
+            override_dir.mkdir()
+            self._write_cover(override_dir / "cover_01.png")
+            with patch.object(
+                publish,
+                "get_wechat_config_status",
+                return_value={
+                    "appid_ready": True,
+                    "secret_ready": True,
+                    "covers_ready": False,
+                    "ai_cover_ready": False,
+                },
+            ):
+                blockers, warnings = publish.run_preflight_checks(
+                    platforms=["wechat"],
+                    mode="draft",
+                    workbench={},
+                    base_dir=base,
+                    cover_dir_override=override_dir,
+                )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(blockers, [])
+
     def test_run_preflight_checks_requires_browser_tabs_for_browser_platforms(self):
         with patch.object(
             publish,
@@ -127,6 +154,31 @@ class PublishPreflightTests(unittest.TestCase):
             )
 
         self.assertIn("未找到 `toutiao` 的可用标签页，请先在当前远程调试 Chrome 中打开并登录", blockers)
+
+    def test_run_preflight_checks_still_inspects_existing_tabs_when_some_targets_missing(self):
+        with patch.object(
+            publish,
+            "inspect_browser_platform_state",
+            return_value={
+                "editor_ready": False,
+                "page_state": "login_required",
+                "current_url": "https://www.zhihu.com/signin",
+                "detail": "当前标签页仍处于登录或校验状态",
+            },
+        ), patch.object(
+            publish,
+            "persist_browser_session_health",
+            return_value={},
+        ):
+            blockers, warnings = publish.run_preflight_checks(
+                platforms=["zhihu", "toutiao"],
+                mode="draft",
+                workbench={"zhihu": "target-1"},
+            )
+
+        self.assertEqual(warnings, [])
+        self.assertTrue(any("未找到 `toutiao`" in item for item in blockers))
+        self.assertTrue(any("知乎预检未通过" in item for item in blockers))
 
     def test_run_preflight_checks_blocks_when_browser_page_is_not_editor_ready(self):
         with patch.object(
@@ -246,6 +298,15 @@ class PublishPreflightTests(unittest.TestCase):
                 "secret_ready": True,
                 "covers_ready": True,
                 "ai_cover_ready": False,
+            },
+        ), patch.object(
+            publish,
+            "inspect_browser_platform_state",
+            return_value={
+                "editor_ready": True,
+                "page_state": "editor_ready",
+                "current_url": "https://www.jianshu.com/writer#/notebooks/1/notes/1",
+                "detail": "写作编辑器已就绪",
             },
         ):
             blockers, warnings = publish.run_preflight_checks(

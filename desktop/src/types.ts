@@ -17,13 +17,24 @@ export interface ArticleDraft {
   is_config_complete: boolean
 }
 
+export interface ImportFailure {
+  source_path: string | null
+  source_kind: string
+  error_type: string
+  message: string
+}
+
 export interface ImportJob {
   job_id: string
   import_mode: string
   source_path: string | null
   pasted_preview: string | null
   imported_at: string
+  source_count: number
+  manifest_path: string | null
   article_count: number
+  failure_count: number
+  failures: ImportFailure[]
   drafts: ArticleDraft[]
 }
 

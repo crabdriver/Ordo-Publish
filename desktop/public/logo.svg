@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2D8CFF" />
+      <stop offset="100%" stop-color="#0052CC" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-opacity="0.25" />
+    </filter>
+  </defs>
+  <!-- Squircle background -->
+  <rect x="64" y="64" width="896" height="896" rx="224" fill="url(#bg)" />
+  
+  <!-- Layered squares inside -->
+  <g filter="url(#shadow)">
+    <!-- Back square (light blue) -->
+    <rect x="256" y="256" width="384" height="384" rx="64" fill="#80BFFF" opacity="0.8" />
+    <!-- Middle square (lighter blue) -->
+    <rect x="320" y="320" width="384" height="384" rx="64" fill="#B3D9FF" opacity="0.9" />
+    <!-- Front square (white) -->
+    <rect x="384" y="384" width="384" height="384" rx="64" fill="#FFFFFF" />
+  </g>
+</svg>

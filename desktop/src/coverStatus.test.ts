@@ -24,6 +24,6 @@ describe('cover pool status helper', () => {
         count: 0,
         error: '封面目录不存在: /tmp/covers',
       }),
-    ).toContain('请把默认封面放到 /tmp/covers')
+    ).toContain('未就绪')
   })
 })

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import hashlib
 import shutil
@@ -27,6 +28,7 @@ DEFAULT_REQUIRED_SITE_PACKAGE_NAMES = {
     "requests",
     "soupsieve",
     "urllib3",
+    "pypdf",
     "docx",
     "lxml",
     "yaml",
@@ -48,10 +50,24 @@ def build_repo_copy_jobs(repo_root: Path, manifest: Mapping[str, object]) -> lis
     return jobs
 
 
-def copy_path(src: Path, dest: Path) -> None:
+def _make_ignore_fn(exclude_globs: list[str]):
+    def _ignore(directory: str, entries: list[str]) -> set[str]:
+        ignored = set()
+        for entry in entries:
+            rel = str(Path(directory) / entry)
+            for pattern in exclude_globs:
+                if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(entry, pattern):
+                    ignored.add(entry)
+                    break
+        return ignored
+    return _ignore
+
+
+def copy_path(src: Path, dest: Path, exclude_globs: list[str] | None = None) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     if src.is_dir():
-        shutil.copytree(src, dest, dirs_exist_ok=True)
+        ignore_fn = _make_ignore_fn(exclude_globs) if exclude_globs else None
+        shutil.copytree(src, dest, dirs_exist_ok=True, ignore=ignore_fn)
     else:
         shutil.copy2(src, dest)
 
@@ -205,8 +221,9 @@ def prepare_runtime(
     runtime_dir.mkdir(parents=True, exist_ok=True)
 
     bundled_repo_root = runtime_dir / str(manifest["bundled_repo_root"])
+    exclude_globs = list(manifest.get("exclude_globs") or [])
     for src, relative in build_repo_copy_jobs(repo_root, manifest):
-        copy_path(src, bundled_repo_root / relative)
+        copy_path(src, bundled_repo_root / relative, exclude_globs=exclude_globs)
 
     python_info = prepare_python_runtime(runtime_dir, manifest, python_metadata or current_python_metadata())
     node_info = prepare_node_runtime(runtime_dir, manifest, node_metadata or current_node_metadata())

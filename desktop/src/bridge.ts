@@ -135,11 +135,15 @@ async function mockBridgeRequest<T>(payload: Record<string, unknown>): Promise<T
     return {
       job: {
         job_id: 'mock-import',
-        import_mode: 'paste',
-        source_path: null,
+        import_mode: String(payload.import_mode ?? 'paste'),
+        source_path: typeof payload.source_path === 'string' ? payload.source_path : null,
         pasted_preview: pastedText.slice(0, 120),
         imported_at: new Date().toISOString(),
+        source_count: 1,
+        manifest_path: null,
         article_count: 1,
+        failure_count: 0,
+        failures: [],
         drafts: [
           {
             article_id: 'mock-article',
@@ -341,7 +345,7 @@ export async function openArticleFileDialog(): Promise<string | null> {
     filters: [
       {
         name: 'Article',
-        extensions: ['md', 'txt', 'docx'],
+        extensions: ['md', 'txt', 'docx', 'pdf', 'png', 'jpg', 'jpeg', 'webp', 'gif'],
       },
     ],
   })

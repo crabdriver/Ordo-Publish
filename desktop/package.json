@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "prepare:runtime": "python3 scripts/prepare_runtime.py",
+    "prepare:runtime": "../scripts/python_exec.sh scripts/prepare_runtime.py",
     "test": "vitest run",
     "preview": "vite preview",
     "tauri:dev": "tauri dev",
@@ -23,6 +23,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",
-    "@tauri-apps/plugin-dialog": "^2.6.0"
+    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "@tauri-apps/plugin-opener": "^2.5.3"
   }
 }

@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ARTICLE_TITLE}} - 发布主控台</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    background: #f5f5f7;
+    color: #1d1d1f;
+}
+.toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    padding: 16px 24px;
+    background: rgba(255,255,255,0.92);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid #e5e5e5;
+}
+.toolbar-top {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    align-items: center;
+    margin-bottom: 10px;
+}
+.toolbar-title {
+    font-size: 18px;
+    font-weight: 700;
+}
+.toolbar-meta {
+    color: #6b7280;
+    font-size: 13px;
+}
+.progress-track {
+    width: 100%;
+    height: 10px;
+    border-radius: 999px;
+    background: #e5e7eb;
+    overflow: hidden;
+}
+.progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #07c160, #0ea5e9);
+    transition: width 0.25s ease;
+}
+.layout {
+    display: grid;
+    grid-template-columns: 340px minmax(0, 1fr);
+    gap: 24px;
+    padding: 24px;
+}
+.sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+.card {
+    background: #fff;
+    border-radius: 18px;
+    padding: 18px;
+    box-shadow: 0 8px 30px rgba(15, 23, 42, 0.06);
+}
+.section-title {
+    font-size: 14px;
+    font-weight: 700;
+    margin-bottom: 12px;
+}
+.queue-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-height: 420px;
+    overflow: auto;
+}
+.queue-item {
+    border: 1px solid #e5e7eb;
+    border-radius: 14px;
+    padding: 12px;
+    background: #fafafa;
+}
+.queue-item.current {
+    border-color: #07c160;
+    background: rgba(7, 193, 96, 0.06);
+}
+.queue-item-title {
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    word-break: break-word;
+}
+.queue-item-meta {
+    font-size: 12px;
+    color: #6b7280;
+}
+.status-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.status-pill {
+    border-radius: 999px;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    background: #f3f4f6;
+    color: #4b5563;
+}
+.status-pill.success { background: rgba(22,163,74,0.12); color: #15803d; }
+.status-pill.failed { background: rgba(239,68,68,0.12); color: #b91c1c; }
+.status-pill.reviewing { background: rgba(14,165,233,0.12); color: #0369a1; }
+.status-pill.publishing { background: rgba(245,158,11,0.12); color: #b45309; }
+.status-pill.partial_failed { background: rgba(249,115,22,0.12); color: #c2410c; }
+.status-pill.skipped { background: rgba(107,114,128,0.12); color: #4b5563; }
+.main {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+.current-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+}
+.current-title {
+    font-size: 22px;
+    font-weight: 700;
+}
+.current-subtitle {
+    color: #6b7280;
+    font-size: 13px;
+    margin-top: 4px;
+}
+.notice {
+    display: none;
+    border-radius: 14px;
+    padding: 12px 14px;
+    font-size: 13px;
+    font-weight: 600;
+}
+.notice.show { display: block; }
+.notice.info { background: rgba(14,165,233,0.12); color: #0369a1; }
+.notice.success { background: rgba(22,163,74,0.12); color: #15803d; }
+.notice.warn { background: rgba(249,115,22,0.12); color: #c2410c; }
+.theme-buttons {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.theme-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+.group-label {
+    font-size: 12px;
+    color: #6b7280;
+    font-weight: 700;
+    min-width: 60px;
+}
+.theme-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+    background: #fff;
+    border: 2px solid #e5e7eb;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #333;
+    cursor: pointer;
+}
+.theme-btn.active {
+    border-color: #07c160;
+    background: rgba(7,193,96,0.06);
+    color: #07c160;
+}
+.theme-btn.recommended { position: relative; }
+.theme-btn.recommended .rec-badge {
+    position: absolute;
+    top: -8px;
+    right: -6px;
+    background: #ff9500;
+    color: #fff;
+    font-size: 10px;
+    padding: 2px 5px;
+    border-radius: 6px;
+}
+.theme-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+.preview-shell {
+    background: #fff;
+    border-radius: 18px;
+    overflow: hidden;
+    box-shadow: 0 10px 34px rgba(15, 23, 42, 0.08);
+}
+.preview-head {
+    padding: 12px 16px;
+    background: #ededed;
+    color: #6b7280;
+    font-size: 13px;
+    text-align: center;
+}
+.preview-scroll {
+    max-height: 720px;
+    overflow: auto;
+    padding: 18px;
+}
+.theme-preview {
+    font-family: -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+.actions {
+    display: flex;
+    gap: 12px;
+}
+.action-btn {
+    flex: 1;
+    border: none;
+    border-radius: 14px;
+    padding: 14px 16px;
+    font-size: 15px;
+    font-weight: 700;
+    cursor: pointer;
+}
+.action-btn.primary {
+    background: #07c160;
+    color: #fff;
+}
+.action-btn.primary[disabled] {
+    opacity: 0.65;
+    cursor: wait;
+}
+.action-btn.secondary {
+    background: #eef2f7;
+    color: #334155;
+}
+@media (max-width: 980px) {
+    .layout {
+        grid-template-columns: 1fr;
+    }
+}
+</style>
+</head>
+<body>
+<div class="toolbar">
+    <div class="toolbar-top">
+        <div>
+            <div class="toolbar-title">批量发布主控台</div>
+            <div class="toolbar-meta" id="toolbarMeta">准备中</div>
+        </div>
+        <div class="toolbar-meta" id="summaryMeta"></div>
+    </div>
+    <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+</div>
+
+<div class="layout">
+    <aside class="sidebar">
+        <section class="card">
+            <div class="section-title">文章队列</div>
+            <div class="queue-list" id="queueList"></div>
+        </section>
+        <section class="card">
+            <div class="section-title">平台状态</div>
+            <div class="status-row" id="platformStatusRow"></div>
+        </section>
+    </aside>
+
+    <main class="main">
+        <section class="card">
+            <div class="current-meta">
+                <div>
+                    <div class="current-title" id="articleTitle">{{ARTICLE_TITLE}}</div>
+                    <div class="current-subtitle"><span id="articleWordCount">{{WORD_COUNT}}</span> 字 · 当前仅切换微信模板，确认后全平台发布</div>
+                </div>
+                <div class="status-pill reviewing" id="currentStatusPill">reviewing</div>
+            </div>
+            <div class="notice" id="noticeBox"></div>
+        </section>
+
+        <section class="card">
+            <div class="section-title">切换微信模板</div>
+            <div class="theme-buttons">
+{{THEME_BUTTONS}}
+            </div>
+        </section>
+
+        <section class="preview-shell">
+            <div class="preview-head">微信公众号预览</div>
+            <div class="preview-scroll" id="previewScroll">
+{{THEME_PREVIEWS}}
+            </div>
+        </section>
+
+        <section class="actions">
+            <button class="action-btn secondary" type="button" id="selectedThemeBtn">当前模板：{{DEFAULT_THEME}}</button>
+            <button class="action-btn primary" type="button" id="confirmBtn" onclick="confirmPublish()">确认并发布当前文章</button>
+        </section>
+    </main>
+</div>
+
+<script>
+var initialState = {{SESSION_JSON}};
+var state = initialState;
+var selectedTheme = (initialState && initialState.current_theme) || '{{DEFAULT_THEME}}';
+var lastNoticeId = null;
+
+function normalizeStatus(status) {
+    return status || 'pending';
+}
+
+function switchTheme(themeId) {
+    selectedTheme = themeId;
+    document.querySelectorAll('.theme-preview').forEach(function(preview) {
+        preview.style.display = preview.getAttribute('data-theme') === themeId ? 'block' : 'none';
+    });
+    document.querySelectorAll('.theme-btn').forEach(function(btn) {
+        btn.classList.toggle('active', btn.getAttribute('data-theme') === themeId);
+    });
+    var selectedThemeBtn = document.getElementById('selectedThemeBtn');
+    if (selectedThemeBtn) {
+        selectedThemeBtn.textContent = '当前模板：' + themeId;
+    }
+    var previewScroll = document.getElementById('previewScroll');
+    if (previewScroll) {
+        previewScroll.scrollTop = 0;
+    }
+}
+
+function renderQueue() {
+    var queueList = document.getElementById('queueList');
+    var items = (state && state.items) || [];
+    queueList.innerHTML = items.map(function(item, index) {
+        var currentClass = index === state.current_index ? ' current' : '';
+        return (
+            '<div class="queue-item' + currentClass + '">' +
+            '<div class="queue-item-title">' + item.title + '</div>' +
+            '<div class="queue-item-meta">#' + (index + 1) + ' · ' + item.status + (item.message ? ' · ' + item.message : '') + '</div>' +
+            '</div>'
+        );
+    }).join('');
+}
+
+function renderPlatforms() {
+    var row = document.getElementById('platformStatusRow');
+    var item = state.items && state.items[state.current_index];
+    var platforms = (item && item.platforms) || {};
+    row.innerHTML = Object.keys(platforms).map(function(platform) {
+        var current = platforms[platform];
+        return '<span class="status-pill ' + normalizeStatus(current.status) + '">' + platform + ': ' + current.status + '</span>';
+    }).join('');
+}
+
+function renderSummary() {
+    var summary = state.summary || {};
+    var total = summary.total_articles || 0;
+    var completed = summary.completed_articles || 0;
+    var percent = total ? Math.round((completed / total) * 100) : 0;
+    document.getElementById('progressFill').style.width = percent + '%';
+    document.getElementById('toolbarMeta').textContent = '第 ' + (state.current_index + 1) + ' / ' + total + ' 篇';
+    document.getElementById('summaryMeta').textContent =
+        '已完成 ' + completed + ' · 成功 ' + (summary.success_articles || 0) +
+        ' · 部分失败 ' + (summary.partial_failed_articles || 0) +
+        ' · 失败 ' + (summary.failed_articles || 0);
+}
+
+function renderCurrent() {
+    var item = state.items && state.items[state.current_index];
+    if (!item) {
+        return;
+    }
+    document.getElementById('articleTitle').textContent = item.title || '{{ARTICLE_TITLE}}';
+    var statusPill = document.getElementById('currentStatusPill');
+    statusPill.className = 'status-pill ' + normalizeStatus(item.status);
+    statusPill.textContent = item.status;
+}
+
+function renderNotice() {
+    var noticeBox = document.getElementById('noticeBox');
+    if (!state.notice) {
+        noticeBox.className = 'notice';
+        noticeBox.textContent = '';
+        return;
+    }
+    if (state.notice.id !== lastNoticeId) {
+        lastNoticeId = state.notice.id;
+    }
+    noticeBox.className = 'notice show ' + (state.notice.level || 'info');
+    noticeBox.textContent = state.notice.message || '';
+}
+
+function renderAll() {
+    renderQueue();
+    renderPlatforms();
+    renderSummary();
+    renderCurrent();
+    renderNotice();
+    switchTheme(state.current_theme || selectedTheme);
+    var confirmBtn = document.getElementById('confirmBtn');
+    confirmBtn.disabled = state.phase === 'publishing';
+    confirmBtn.textContent = state.phase === 'publishing' ? '发布中，请稍候…' : '确认并发布当前文章';
+}
+
+function confirmPublish() {
+    window.__PUBLISH_CONSOLE_ACTION__ = JSON.stringify({
+        type: 'confirm',
+        article_index: state.current_index,
+        theme: selectedTheme,
+        at: Date.now()
+    });
+    var confirmBtn = document.getElementById('confirmBtn');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = '已确认，等待开始发布…';
+}
+
+window.publishConsole = {
+    setState: function(nextState) {
+        state = nextState;
+        renderAll();
+        return 'ok';
+    },
+    getAction: function() {
+        return window.__PUBLISH_CONSOLE_ACTION__ || '';
+    },
+    clearAction: function() {
+        window.__PUBLISH_CONSOLE_ACTION__ = '';
+        return 'ok';
+    }
+};
+
+document.addEventListener('DOMContentLoaded', function() {
+    renderAll();
+});
+</script>
+</body>
+</html>
