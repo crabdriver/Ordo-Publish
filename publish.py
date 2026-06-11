@@ -123,7 +123,11 @@ def collect_markdown_files(raw_path, offset=0, limit=None):
     if path.is_file():
         files = [path]
     else:
-        files = sorted(item for item in path.iterdir() if item.is_file() and item.suffix.lower() == ".md")
+        # 支持递归检索所有子目录中的 Markdown 文件，排除任何以 '.' 开头的隐藏目录或隐藏文件
+        files = sorted(
+            item for item in path.rglob("*.md")
+            if item.is_file() and not any(part.startswith(".") for part in item.relative_to(path).parts)
+        )
 
     if not files:
         raise ValueError(f"没有找到 Markdown 文件: {path}")
@@ -544,6 +548,7 @@ def run_preflight_checks(
     cover_dir_override=None,
     cdp_connection=None,
     cover_mode="auto",
+    article_paths=None,
 ):
     blockers = []
     warnings = []
@@ -563,6 +568,61 @@ def run_preflight_checks(
                 }
         if not wechat["appid_ready"] or not wechat["secret_ready"]:
             blockers.append("微信公众号缺少 `WECHAT_APPID` 或 `WECHAT_SECRET`，请先配置 `secrets.env`")
+        else:
+            # 实时检查微信外网 IP 白名单配置
+            try:
+                env = load_simple_env_file(root / "secrets.env")
+                vps_ip = env.get("VPS_IP")
+                if vps_ip:
+                    # 在 VPS 上远程执行微信 Access Token 验证检查，检测白名单状态
+                    vps_port = env.get("VPS_PORT", "22")
+                    vps_user = env.get("VPS_USER", "root")
+                    vps_ssh_key = env.get("VPS_SSH_KEY")
+                    appid = env.get("WECHAT_APPID") or os.environ.get("WECHAT_APPID")
+                    secret = env.get("WECHAT_SECRET") or os.environ.get("WECHAT_SECRET")
+                    
+                    ssh_opts = ["-p", vps_port, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
+                    if vps_ssh_key:
+                        ssh_opts.extend(["-i", str(Path(vps_ssh_key).expanduser())])
+                        
+                    test_cmd = (
+                        f"cd ~/ordo-publish && "
+                        f"if [ -f .venv/bin/python ]; then python_bin=.venv/bin/python; else python_bin=python3; fi; "
+                        f"$python_bin -c 'from wechat_publisher import WeChatPublisher; p = WeChatPublisher(\"{appid}\", \"{secret}\"); p.ensure_access_token()'"
+                    )
+                    chk_cmd = ["ssh"] + ssh_opts + [f"{vps_user}@{vps_ip}", test_cmd]
+                    res = subprocess.run(chk_cmd, capture_output=True, text=True, timeout=30)
+                    if res.returncode != 0:
+                        err_msg = res.stderr.strip() or res.stdout.strip()
+                        raise Exception(f"VPS 上的微信接口预检失败：{err_msg}")
+                else:
+                    # 本地执行验证检查（兼容标准/代理模式）
+                    wechat_proxy = env.get("WECHAT_PROXY") or os.environ.get("WECHAT_PROXY")
+                    if wechat_proxy:
+                        os.environ["HTTP_PROXY"] = wechat_proxy
+                        os.environ["HTTPS_PROXY"] = wechat_proxy
+
+                    from wechat_publisher import WeChatPublisher
+                    appid = env.get("WECHAT_APPID") or os.environ.get("WECHAT_APPID")
+                    secret = env.get("WECHAT_SECRET") or os.environ.get("WECHAT_SECRET")
+                    if appid and secret:
+                        publisher = WeChatPublisher(appid, secret)
+                        # 尝试拉取 token 以验证 IP 白名单是否已生效
+                        publisher.ensure_access_token()
+
+
+            except Exception as exc:
+                err_str = str(exc)
+                if "IP白名单未配置" in err_str or "40164" in err_str:
+                    import re
+                    m = re.search(r"invalid ip ([\d.]+)", err_str)
+                    ip_str = m.group(1) if m else "未知IP"
+                    blockers.append(
+                        f"微信公众号 IP 白名单校验失败！您的当前网络外网 IP 「{ip_str}」 未加入微信公众平台白名单。请先登录微信后台将该 IP 添加到白名单中！"
+                    )
+                else:
+                    blockers.append(f"微信公众号 API 预检失败：{exc}")
+
         if not wechat["covers_ready"] and not wechat["ai_cover_ready"]:
             blockers.append("微信公众号缺少可用封面：请配置 AI 封面所需的 `config.json`，或准备 `covers/cover_*.png`")
         elif not wechat["covers_ready"] and wechat["ai_cover_ready"]:
@@ -574,13 +634,31 @@ def run_preflight_checks(
         if config.project_config_warning:
             warnings.append(config.project_config_warning)
 
+    # 严格标题完整性审核与前缀过滤检查（拒绝发布带有无意义编号/日期的文章）
+    if article_paths:
+        import re
+        from tiandi_engine.importers.sources import import_file
+        # 匹配无意义日期/期号/序号前缀，如 "20250728-01_"、"01_"、"1. "、"20250728." 等
+        invalid_prefix_re = re.compile(r"^\s*\d{1,8}(?:[-_.]\d{1,4})*[-_.\s:：、，]+")
+        for path in article_paths:
+            try:
+                draft = import_file(path)
+                title = draft.title
+                if invalid_prefix_re.search(title):
+                    blockers.append(
+                        f"文章标题审核失败！文件 《{path.name}》 解析出的发布标题为 《{title}》，"
+                        f"其中依然含有未成功剥离的无意义数字/编号/日期前缀！发布已被拒绝阻断。"
+                    )
+            except Exception as e:
+                warnings.append(f"文章 《{path.name}》 标题预检读取异常: {e}")
+
     if mode == "publish" and "jianshu" in platforms:
         jianshu_target = workbench.get("jianshu")
         if jianshu_target:
             try:
                 body = get_page_text_snippet(jianshu_target, limit=3000)
                 if "每天只能发布 2 篇公开文章" in body:
-                    blockers.append("简书今天已达到公开文章发布上限（每天最多 2 篇）")
+                    warnings.append("简书今天已达到公开文章发布上限（每天最多 2 篇），本轮将自动降级为保存草稿执行。")
             except subprocess.CalledProcessError:
                 warnings.append("简书预检读取失败，发布时再做实际判断")
 
@@ -603,7 +681,10 @@ def run_preflight_checks(
                     detail = state.get("detail") or "页面未进入可写编辑器态"
                     current_url = state.get("current_url") or ""
                     location_detail = f" 当前页面：{current_url}" if current_url else ""
-                    blockers.append(f"{label}预检未通过：{detail}.{location_detail}".strip())
+                    if state.get("page_state") == "login_required":
+                        blockers.append(f"{label}预检未通过（需重新登录）：{detail}.{location_detail}".strip())
+                    else:
+                        warnings.append(f"{label}当前未就绪，脚本将尝试自动导航/切换进入编辑器页：{detail}.{location_detail}".strip())
 
     if cdp_connection and any(platform in BROWSER_PLATFORMS for platform in platforms):
         detail = cdp_connection.get("detail")
@@ -1254,6 +1335,11 @@ def main():
         help="任务级封面策略：auto 使用默认逻辑；force_on 强制要求封面；force_off 跳过封面设置",
     )
     parser.add_argument(
+        "--cover",
+        default=None,
+        help="手动指定封面图路径，覆盖自动生成或默认选择的封面",
+    )
+    parser.add_argument(
         "--ai-declaration-mode",
         choices=list(PUBLISH_OPTION_MODES),
         default="auto",
@@ -1310,6 +1396,7 @@ def main():
         workbench,
         cdp_connection=cdp_connection,
         cover_mode=args.cover_mode,
+        article_paths=article_paths,
     )
     for warning in warnings:
         print(f"[WARN] {warning}")
@@ -1366,7 +1453,24 @@ def main():
     template_assignments = build_template_assignments_for_articles(BASE_DIR, article_ids)
     cover_assignments = ()
     if args.cover_mode != "force_off":
-        cover_assignments = build_cover_assignments_for_articles(BASE_DIR, article_ids, platforms)
+        if args.cover:
+            from tiandi_engine.models.workbench import CoverAssignment
+            cover_path = Path(args.cover).expanduser().resolve()
+            if not cover_path.is_file():
+                raise FileNotFoundError(f"封面文件不存在: {cover_path}")
+            cover_assignments = tuple(
+                CoverAssignment(
+                    article_id=aid,
+                    platform=platform,
+                    cover_path=cover_path,
+                    cover_source="manual",
+                    is_random=False,
+                    is_manual_override=True,
+                )
+                for aid in article_ids for platform in platforms
+            )
+        else:
+            cover_assignments = build_cover_assignments_for_articles(BASE_DIR, article_ids, platforms)
     context_resolver = build_publish_context_resolver(
         article_paths,
         platforms,

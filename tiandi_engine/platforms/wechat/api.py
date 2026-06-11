@@ -8,9 +8,18 @@ import time
 from pathlib import Path
 
 import requests
-
+from dotenv import load_dotenv
 
 REPO_DIR = Path(__file__).resolve().parents[3]
+
+# Load secret credentials from secrets.env
+load_dotenv(REPO_DIR / "secrets.env")
+
+# Apply proxy if configured
+wechat_proxy = os.getenv("WECHAT_PROXY")
+if wechat_proxy:
+    os.environ["HTTP_PROXY"] = wechat_proxy
+    os.environ["HTTPS_PROXY"] = wechat_proxy
 
 
 def load_config():

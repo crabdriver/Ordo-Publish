@@ -22,10 +22,19 @@ import time
 import requests
 from pathlib import Path
 from datetime import datetime
+from dotenv import load_dotenv
 
 SCRIPT_DIR = Path(__file__).parent
 STATE_PATH = SCRIPT_DIR.parent / "comment_state.json"
 LOG_PATH = SCRIPT_DIR.parent / "comment_reply.log"
+
+# Load secret credentials from secrets.env and configure proxy
+load_dotenv(SCRIPT_DIR.parent / "secrets.env")
+wechat_proxy = os.getenv("WECHAT_PROXY")
+if wechat_proxy:
+    os.environ["HTTP_PROXY"] = wechat_proxy
+    os.environ["HTTPS_PROXY"] = wechat_proxy
+
 
 
 def resolve_config_path():
