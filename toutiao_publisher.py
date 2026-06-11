@@ -49,7 +49,7 @@ def strip_unsupported_local_images(markdown_text):
         if markdown_image:
             image_path = markdown_image.group(1).strip()
             lower = image_path.lower()
-            if lower.startswith("../") or lower.startswith("./") or lower.startswith("/") or lower.startswith("covers/"):
+            if not (lower.startswith("http://") or lower.startswith("https://") or lower.startswith("data:image/")):
                 continue
         cleaned_lines.append(raw_line)
 
@@ -122,8 +122,8 @@ def load_article(markdown_path):
 
     for line in raw_text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("# "):
-            title = clean_title(stripped[2:].strip())
+        if stripped.startswith("# ") or (stripped.startswith("## ") and not stripped.startswith("###")):
+            title = clean_title(stripped.lstrip("#").strip())
             body = raw_text.replace(line, "", 1).lstrip()
             break
 

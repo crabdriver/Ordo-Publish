@@ -73,8 +73,8 @@ def load_article(markdown_path):
 
     for line in raw_text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("# "):
-            title = clean_title(stripped[2:].strip())
+        if stripped.startswith("# ") or (stripped.startswith("## ") and not stripped.startswith("###")):
+            title = clean_title(stripped.lstrip("#").strip())
             body = raw_text.replace(line, "", 1).lstrip()
             break
 

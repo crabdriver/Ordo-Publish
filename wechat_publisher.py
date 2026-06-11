@@ -17,13 +17,20 @@ from scripts.format import convert_image_captions, convert_lists_to_sections
 from tiandi_engine.config import load_engine_config
 from tiandi_engine.importers.normalize import strip_title_marker
 
+BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+
 # Load secret credentials from secrets.env
-load_dotenv("secrets.env")
+load_dotenv(BASE_DIR / "secrets.env")
 
 APPID = os.getenv("WECHAT_APPID")
 SECRET = os.getenv("WECHAT_SECRET")
 
-BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
+# Apply proxy if configured
+wechat_proxy = os.getenv("WECHAT_PROXY")
+if wechat_proxy:
+    os.environ["HTTP_PROXY"] = wechat_proxy
+    os.environ["HTTPS_PROXY"] = wechat_proxy
+
 WECHAT_MARKDOWN_EXTENSIONS = ["extra", "sane_lists"]
 
 
@@ -647,12 +654,22 @@ def load_single_article(markdown_path):
     title = clean_title(path.stem)
     body = raw_text
 
+    found_h1 = False
     for line in raw_text.splitlines():
         stripped = line.strip()
-        if stripped.startswith('# '):
+        if stripped.startswith('# ') and not stripped.startswith('##'):
             title = clean_title(stripped[2:].strip())
             body = raw_text.replace(line, '', 1).lstrip()
+            found_h1 = True
             break
+
+    if not found_h1:
+        for line in raw_text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith('## ') and not stripped.startswith('###'):
+                title = clean_title(stripped[3:].strip())
+                body = raw_text.replace(line, '', 1).lstrip()
+                break
 
     return title, body, str(path)
 
@@ -710,7 +727,7 @@ def create_ai_cover(title, markdown_file_path):
 
 def resolve_numbered_cover(markdown_file_path):
     name = Path(markdown_file_path).name
-    match = re.match(r"^(\d{2})_", name)
+    match = re.search(r"(?:^|[-_.]|\D)(\d{2})_", name)
     if not match:
         return None
     candidate = resolve_cover_dir() / f"cover_{match.group(1)}.png"

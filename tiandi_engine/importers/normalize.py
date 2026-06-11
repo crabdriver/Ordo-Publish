@@ -2,7 +2,7 @@ import re
 from typing import Tuple
 
 
-_TITLE_MARKER_RE = re.compile(r"^\s*\d{1,2}(?:[-_.]\d{1,2})?[-_.\s:：、，]+")
+_TITLE_MARKER_RE = re.compile(r"^\s*\d{1,8}(?:[-_.]\d{1,4})*[-_.\s:：、，]+")
 
 
 def strip_title_marker(title: str) -> str:
@@ -61,11 +61,17 @@ def split_markdown_title_body(content: str, fallback_title: str) -> Tuple[str, s
     lines = content.splitlines()
     for index, line in enumerate(lines):
         title = parse_markdown_h1(line)
-        if title is None:
-            continue
-        body_lines = lines[:index] + lines[index + 1 :]
-        body = "\n".join(body_lines)
-        return title or fallback_title, body
+        if title is not None:
+            body_lines = lines[:index] + lines[index + 1 :]
+            body = "\n".join(body_lines)
+            return title or fallback_title, body
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("## ") and not stripped.startswith("###"):
+            title = stripped[3:].strip()
+            body_lines = lines[:index] + lines[index + 1 :]
+            body = "\n".join(body_lines)
+            return title or fallback_title, body
     return fallback_title, content
 
 

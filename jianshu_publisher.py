@@ -31,7 +31,7 @@ def strip_unsupported_local_images(markdown_text):
         if markdown_image:
             image_path = markdown_image.group(1).strip()
             lower = image_path.lower()
-            if lower.startswith("../") or lower.startswith("./") or lower.startswith("/") or lower.startswith("covers/"):
+            if not (lower.startswith("http://") or lower.startswith("https://") or lower.startswith("data:image/")):
                 continue
         cleaned_lines.append(raw_line)
 
@@ -101,8 +101,8 @@ def load_article(markdown_path):
 
     for line in raw_text.splitlines():
         stripped = line.strip()
-        if stripped.startswith("# "):
-            title = clean_title(stripped[2:].strip())
+        if stripped.startswith("# ") or (stripped.startswith("## ") and not stripped.startswith("###")):
+            title = clean_title(stripped.lstrip("#").strip())
             body = raw_text.replace(line, "", 1).lstrip()
             break
 
@@ -291,7 +291,7 @@ def click_publish_article(target_id):
     return rect.width > 0 && rect.height > 0;
   };
   const el = Array.from(document.querySelectorAll('a,button')).find(
-      node => (node.innerText || '').replace(/\s+/g, '') === '发布文章' && isVisible(node)
+      node => (node.innerText || '').replace(/\\s+/g, '') === '发布文章' && isVisible(node)
     )
     || document.querySelector('a[data-action="publicize"]');
   if (!el) return 'publish-not-found';
@@ -512,7 +512,9 @@ def main():
         raise RuntimeError("未检测到简书发布后的页面变化，请检查页面状态")
 
     if wait_for_text(target_id, "每天只能发布 2 篇公开文章", timeout_seconds=2) or wait_for_text(target_id, "达到发布上限", timeout_seconds=2):
-        raise RuntimeError("简书今日公开文章发布次数已达上限（每天最多 2 篇）")
+        print(f"[WARN] 简书今日公开文章发布次数已达上限，已自动保留为草稿箱草稿")
+        print(f"[OK] 已生成简书草稿: {article_path}")
+        return
 
     print(f"[OK] 已发布到简书: {article_path}")
 
