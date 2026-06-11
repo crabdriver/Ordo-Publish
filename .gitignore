@@ -38,3 +38,15 @@ publish_records.csv
 *.docx
 comment_state.json
 comment_reply.log
+
+# Agent/AI tooling
+.agents/
+skills-lock.json
+docs/superpowers/
+
+# One-off personal scripts (not part of public API)
+scripts/run_real_publish_*.sh
+scripts/run_real_publish_*.py
+scripts/deploy_vps.sh
+scripts/setup_ssh_key.py
+
