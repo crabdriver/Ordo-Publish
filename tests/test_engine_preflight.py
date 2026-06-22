@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tiandi_engine.workbench.preflight import build_real_publish_preflight
+from ordo_engine.workbench.preflight import build_real_publish_preflight
 
 
 class RealPublishPreflightTests(unittest.TestCase):
@@ -15,12 +15,12 @@ class RealPublishPreflightTests(unittest.TestCase):
             source_dir.mkdir()
             cover_dir = base / "covers"
             cover_dir.mkdir()
-            matrix_path = base / ".tiandidistribute" / "workbench" / "matrices" / "mx.json"
+            matrix_path = base / ".ordo" / "workbench" / "matrices" / "mx.json"
             matrix_path.parent.mkdir(parents=True, exist_ok=True)
             matrix_path.write_text("{}", encoding="utf-8")
 
             with patch(
-                "tiandi_engine.workbench.preflight.import_sources",
+                "ordo_engine.workbench.preflight.import_sources",
                 return_value={
                     "job": {
                         "job_id": "import-1",
@@ -34,32 +34,32 @@ class RealPublishPreflightTests(unittest.TestCase):
                     "resources": {"theme_pool": {"count": 3}, "cover_pool": {"count": 14}},
                 },
             ), patch(
-                "tiandi_engine.workbench.preflight.build_publish_matrix",
+                "ordo_engine.workbench.preflight.build_publish_matrix",
                 return_value={
                     "matrix_path": str(matrix_path),
                     "representative_article_ids": ["a1"],
                     "production_strategy": {"template_mode": "custom", "manual_theme_by_article": {"a1": "alpha"}, "manual_cover_by_article_platform": {"a1:zhihu": "/tmp/c.png"}},
                 },
             ), patch(
-                "tiandi_engine.workbench.preflight.publish.list_tabs_or_none",
+                "ordo_engine.workbench.preflight.publish.list_tabs_or_none",
                 return_value=[{"id": "tab-1"}],
             ), patch(
-                "tiandi_engine.workbench.preflight.publish.ensure_chrome_ready",
+                "ordo_engine.workbench.preflight.publish.ensure_chrome_ready",
                 return_value=([{"id": "tab-1"}], "Google Chrome"),
             ), patch(
-                "tiandi_engine.workbench.preflight.publish.open_missing_platform_tabs",
+                "ordo_engine.workbench.preflight.publish.open_missing_platform_tabs",
                 return_value=["zhihu"],
             ), patch(
-                "tiandi_engine.workbench.preflight.publish.list_tabs",
+                "ordo_engine.workbench.preflight.publish.list_tabs",
                 return_value=[{"id": "tab-1"}],
             ), patch(
-                "tiandi_engine.workbench.preflight.publish.bind_workbench",
+                "ordo_engine.workbench.preflight.publish.bind_workbench",
                 return_value={"zhihu": "tab-1"},
             ), patch(
-                "tiandi_engine.workbench.preflight.publish.get_cdp_connection_metadata",
+                "ordo_engine.workbench.preflight.publish.get_cdp_connection_metadata",
                 return_value={"detail": "cdp ok"},
             ), patch(
-                "tiandi_engine.workbench.preflight.publish.run_preflight_checks",
+                "ordo_engine.workbench.preflight.publish.run_preflight_checks",
                 return_value=(["登录失效"], ["头条标签页刚恢复"]),
             ):
                 payload = build_real_publish_preflight(
@@ -88,40 +88,40 @@ class RealPublishPreflightTests(unittest.TestCase):
             source_dir.mkdir()
             cover_dir = base / "covers"
             cover_dir.mkdir()
-            matrix_path = base / ".tiandidistribute" / "workbench" / "matrices" / "mx.json"
+            matrix_path = base / ".ordo" / "workbench" / "matrices" / "mx.json"
             matrix_path.parent.mkdir(parents=True, exist_ok=True)
             matrix_path.write_text("{}", encoding="utf-8")
 
             with patch(
-                "tiandi_engine.workbench.preflight.import_sources",
+                "ordo_engine.workbench.preflight.import_sources",
                 return_value={
                     "job": {"job_id": "import-1", "article_count": 1, "failure_count": 0, "source_count": 1, "manifest_path": str(base / "manifest.json"), "drafts": [], "failures": []},
                     "resources": {},
                 },
             ), patch(
-                "tiandi_engine.workbench.preflight.build_publish_matrix",
+                "ordo_engine.workbench.preflight.build_publish_matrix",
                 return_value={
                     "matrix_path": str(matrix_path),
                     "representative_article_ids": [],
                     "production_strategy": {"template_mode": "custom", "manual_theme_by_article": {}, "manual_cover_by_article_platform": {}},
                 },
             ), patch(
-                "tiandi_engine.workbench.preflight.publish.ensure_chrome_ready",
+                "ordo_engine.workbench.preflight.publish.ensure_chrome_ready",
                 return_value=([{"id": "tab-1"}], "Google Chrome"),
             ) as ensure_ready, patch(
-                "tiandi_engine.workbench.preflight.publish.open_missing_platform_tabs",
+                "ordo_engine.workbench.preflight.publish.open_missing_platform_tabs",
                 return_value=["zhihu", "toutiao"],
             ) as open_tabs, patch(
-                "tiandi_engine.workbench.preflight.publish.list_tabs",
+                "ordo_engine.workbench.preflight.publish.list_tabs",
                 return_value=[{"id": "tab-1"}],
             ), patch(
-                "tiandi_engine.workbench.preflight.publish.bind_workbench",
+                "ordo_engine.workbench.preflight.publish.bind_workbench",
                 return_value={"zhihu": "tab-1", "toutiao": "tab-1"},
             ), patch(
-                "tiandi_engine.workbench.preflight.publish.get_cdp_connection_metadata",
+                "ordo_engine.workbench.preflight.publish.get_cdp_connection_metadata",
                 return_value=None,
             ), patch(
-                "tiandi_engine.workbench.preflight.publish.run_preflight_checks",
+                "ordo_engine.workbench.preflight.publish.run_preflight_checks",
                 return_value=([], []),
             ):
                 payload = build_real_publish_preflight(

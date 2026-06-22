@@ -1,5 +1,0 @@
-#!/opt/homebrew/Cellar/python@3.12/3.12.13/Frameworks/Python.framework/Versions/3.12/bin/python3.12
-
-import pydoc
-if __name__ == '__main__':
-    pydoc.cli()

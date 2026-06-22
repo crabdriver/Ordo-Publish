@@ -47,7 +47,7 @@ class DummyAdapter:
         return "draft_only" if mode == "draft" else "published"
 
     def collect_result(self, process_result, mode):
-        from tiandi_engine.results.record import ExecutionResult
+        from ordo_engine.results.record import ExecutionResult
 
         return ExecutionResult(
             platform=self.platform,
@@ -62,7 +62,7 @@ class DummyAdapter:
 
 class TerminalServiceTests(unittest.TestCase):
     def test_read_terminal_defaults_from_service_module(self):
-        from tiandi_engine.workbench.terminal_service import read_terminal_defaults
+        from ordo_engine.workbench.terminal_service import read_terminal_defaults
 
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -76,7 +76,7 @@ class TerminalServiceTests(unittest.TestCase):
         self.assertEqual(settings.source_path, "/tmp/articles")
 
     def test_save_terminal_defaults_from_service_module(self):
-        from tiandi_engine.workbench.terminal_service import TerminalWizardSettings, save_terminal_defaults
+        from ordo_engine.workbench.terminal_service import TerminalWizardSettings, save_terminal_defaults
 
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -93,7 +93,7 @@ class TerminalServiceTests(unittest.TestCase):
         self.assertEqual(payload["terminal_wizard"]["defaults"]["mode"], "publish")
 
     def test_execute_publish_flow_from_service_module(self):
-        from tiandi_engine.workbench.terminal_service import TerminalWizardSettings, execute_publish_flow
+        from ordo_engine.workbench.terminal_service import TerminalWizardSettings, execute_publish_flow
 
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -103,7 +103,7 @@ class TerminalServiceTests(unittest.TestCase):
             output = io.StringIO()
 
             with patch(
-                "tiandi_engine.workbench.terminal_service.publish.run_preflight_checks",
+                "ordo_engine.workbench.terminal_service.publish.run_preflight_checks",
                 return_value=([], []),
             ):
                 result = execute_publish_flow(

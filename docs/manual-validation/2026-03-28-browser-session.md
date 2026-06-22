@@ -12,8 +12,8 @@
 
 ## 默认落点
 
-- 托管 profile：`.tiandidistribute/browser-session/profile`
-- 会话状态：`.tiandidistribute/browser-session/state.json`
+- 托管 profile：`.ordo/browser-session/profile`
+- 会话状态：`.ordo/browser-session/state.json`
 - 默认调试端口：`9333`
 
 ## 本轮收口结果
@@ -69,7 +69,7 @@
 
 ### 3. 临近失效提醒
 
-1. 手动把 `.tiandidistribute/browser-session/state.json` 中某个平台的 `last_healthy_at` 改成早于提醒阈值很多天。
+1. 手动把 `.ordo/browser-session/state.json` 中某个平台的 `last_healthy_at` 改成早于提醒阈值很多天。
 2. 重新打开工作台并刷新资源。
 
 预期结果：

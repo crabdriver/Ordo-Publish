@@ -1,8 +1,5 @@
 import io
 import json
-import shutil
-import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,7 +7,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from tiandi_engine.platforms.base import BasePlatformAdapter
+from ordo_engine.platforms.base import BasePlatformAdapter
 
 
 class DummyAdapter(BasePlatformAdapter):
@@ -60,7 +57,7 @@ class DummyAdapter(BasePlatformAdapter):
         return "draft_only" if mode == "draft" else "published"
 
     def collect_result(self, process_result, mode):
-        from tiandi_engine.results.record import ExecutionResult
+        from ordo_engine.results.record import ExecutionResult
 
         return ExecutionResult(
             platform=self.platform,
@@ -94,7 +91,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         Image.new("RGB", size, color=(23, 45, 67)).save(path)
 
     def test_import_sources_supports_file_folder_and_paste(self):
-        from tiandi_engine.workbench.bridge import import_sources
+        from ordo_engine.workbench.bridge import import_sources
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -121,7 +118,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(pasted["job"]["drafts"][0]["source_kind"], "paste")
 
     def test_import_sources_folder_keeps_successes_and_records_failures(self):
-        from tiandi_engine.workbench.bridge import import_sources
+        from ordo_engine.workbench.bridge import import_sources
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -140,11 +137,11 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertIn("unsupported", payload["job"]["failures"][0]["message"])
 
     def test_run_publish_job_rejects_when_publish_lock_exists(self):
-        from tiandi_engine.workbench.bridge import WORKBENCH_ROOT, run_publish_job
+        from ordo_engine.workbench.bridge import WORKBENCH_ROOT, run_publish_job
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            staged_dir = base / ".tiandidistribute" / "workbench" / "articles" / "job"
+            staged_dir = base / ".ordo" / "workbench" / "articles" / "job"
             staged_dir.mkdir(parents=True, exist_ok=True)
             markdown_path = staged_dir / "a1.md"
             markdown_path.write_text("# 标题\n\n正文", encoding="utf-8")
@@ -200,7 +197,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
                 run_publish_job(base, plan, registry={})
 
     def test_discover_resources_returns_theme_and_cover_pool_details(self):
-        from tiandi_engine.workbench.bridge import discover_resources
+        from ordo_engine.workbench.bridge import discover_resources
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -217,9 +214,10 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(payload["cover_pool"]["count"], 1)
         self.assertTrue(payload["browser"]["remote_debugging_required"])
         self.assertIn("zhihu", payload["browser"]["browser_platforms"])
+        self.assertIn("bilibili", payload["browser"]["browser_platforms"])
 
     def test_discover_resources_includes_runtime_root_and_python(self):
-        from tiandi_engine.workbench.bridge import discover_resources
+        from ordo_engine.workbench.bridge import discover_resources
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -229,7 +227,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertTrue(payload["runtime"]["python_executable"])
 
     def test_discover_resources_includes_browser_session_settings(self):
-        from tiandi_engine.workbench.bridge import discover_resources
+        from ordo_engine.workbench.bridge import discover_resources
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -237,14 +235,14 @@ class WorkbenchBridgeTests(unittest.TestCase):
 
         self.assertTrue(payload["browser"]["managed_session"]["enabled"])
         self.assertEqual(payload["browser"]["managed_session"]["debug_port"], 9333)
-        self.assertIn(".tiandidistribute", payload["browser"]["managed_session"]["profile_dir"])
+        self.assertIn(".ordo", payload["browser"]["managed_session"]["profile_dir"])
 
     def test_discover_resources_reads_browser_session_state(self):
-        from tiandi_engine.workbench.bridge import discover_resources
+        from ordo_engine.workbench.bridge import discover_resources
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            session_dir = base / ".tiandidistribute" / "browser-session"
+            session_dir = base / ".ordo" / "browser-session"
             session_dir.mkdir(parents=True)
             (session_dir / "state.json").write_text(
                 json.dumps(
@@ -269,7 +267,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(payload["browser"]["session_state"]["platforms"]["zhihu"]["status"], "expiring_soon")
 
     def test_discover_resources_marks_stale_healthy_session_as_expiring_soon(self):
-        from tiandi_engine.workbench.bridge import discover_resources
+        from ordo_engine.workbench.bridge import discover_resources
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -283,7 +281,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
 """.strip(),
                 encoding="utf-8",
             )
-            session_dir = base / ".tiandidistribute" / "browser-session"
+            session_dir = base / ".ordo" / "browser-session"
             session_dir.mkdir(parents=True)
             (session_dir / "state.json").write_text(
                 json.dumps(
@@ -300,13 +298,13 @@ class WorkbenchBridgeTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("tiandi_engine.workbench.bridge.time.time", return_value=1774785600):
+            with patch("ordo_engine.workbench.bridge.time.time", return_value=1774785600):
                 payload = discover_resources(base)
 
         self.assertEqual(payload["browser"]["session_state"]["platforms"]["zhihu"]["status"], "expiring_soon")
 
     def test_discover_resources_returns_config_warning_when_config_json_invalid(self):
-        from tiandi_engine.workbench.bridge import discover_resources
+        from ordo_engine.workbench.bridge import discover_resources
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -317,7 +315,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertIn("config.json", payload["config_warning"] or "")
 
     def test_plan_publish_job_creates_assignments_and_staged_markdown(self):
-        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
+        from ordo_engine.workbench.bridge import import_sources, plan_publish_job
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -337,14 +335,14 @@ class WorkbenchBridgeTests(unittest.TestCase):
 
             self.assertEqual(plan["publish_job"]["platforms"], ["wechat", "zhihu"])
             self.assertEqual(len(plan["template_assignments"]), 1)
-            self.assertEqual(len(plan["cover_assignments"]), 1)
+            self.assertEqual(len(plan["cover_assignments"]), 2)
             staged_path = Path(plan["staged_articles"][0]["markdown_path"])
             self.assertTrue(staged_path.is_file())
             self.assertIn("桥接标题", staged_path.read_text(encoding="utf-8"))
             self.assertTrue(any(item["platform"] == "zhihu" for item in plan["context_map"]))
 
     def test_plan_publish_job_includes_publish_option_modes_in_context_map(self):
-        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
+        from ordo_engine.workbench.bridge import import_sources, plan_publish_job
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -368,7 +366,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(plan["context_map"][0]["ai_declaration_mode"], "force_off")
 
     def test_plan_publish_job_includes_scheduled_publish_at_for_toutiao_publish(self):
-        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
+        from ordo_engine.workbench.bridge import import_sources, plan_publish_job
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -390,7 +388,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertIsNone(zhihu_context["scheduled_publish_at"])
 
     def test_plan_publish_job_skips_cover_assignment_for_jianshu_boundary(self):
-        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
+        from ordo_engine.workbench.bridge import import_sources, plan_publish_job
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -410,7 +408,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertIsNone(plan["context_map"][0]["cover_path"])
 
     def test_plan_publish_job_blocks_force_on_cover_when_pool_missing(self):
-        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
+        from ordo_engine.workbench.bridge import import_sources, plan_publish_job
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -426,7 +424,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
                 )
 
     def test_run_publish_job_emits_structured_events(self):
-        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job, run_publish_job
+        from ordo_engine.workbench.bridge import import_sources, plan_publish_job, run_publish_job
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -454,7 +452,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["status"], "draft_only")
 
     def test_run_publish_job_supports_sparse_context_map_for_retry_plans(self):
-        from tiandi_engine.workbench.bridge import run_publish_job
+        from ordo_engine.workbench.bridge import run_publish_job
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -515,7 +513,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual([item["platform"] for item in result["results"]], ["zhihu", "wechat"])
 
     def test_run_publish_job_passes_scheduled_publish_at_to_adapter(self):
-        from tiandi_engine.workbench.bridge import run_publish_job
+        from ordo_engine.workbench.bridge import run_publish_job
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -569,7 +567,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(result["results"][0]["scheduled_publish_at"], "2026-03-30T09:30")
 
     def test_run_publish_job_uses_failed_summary_when_continue_on_error_finishes_late_success(self):
-        from tiandi_engine.workbench.bridge import run_publish_job
+        from ordo_engine.workbench.bridge import run_publish_job
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -624,7 +622,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertIn("wechat failed", result["publish_job"]["error_summary"])
 
     def test_read_recent_history_reads_records_and_session_snapshot(self):
-        from tiandi_engine.workbench.bridge import read_recent_history
+        from ordo_engine.workbench.bridge import read_recent_history
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -634,7 +632,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
                 "2026-03-27 12:00:00,/tmp/a.md,a1,zhihu,draft,night,default,/tmp/c.png,draft_only,,0,ok,\n",
                 encoding="utf-8",
             )
-            session_dir = base / ".tiandidistribute" / "publish-console"
+            session_dir = base / ".ordo" / "publish-console"
             session_dir.mkdir(parents=True)
             (session_dir / "publish-console-session.json").write_text(
                 '{"summary":{"total_articles":1},"items":[{"article_id":"a1"}]}',
@@ -648,11 +646,11 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(history["session"]["summary"]["total_articles"], 1)
 
     def test_read_recent_history_reads_last_workbench_plan_and_result(self):
-        from tiandi_engine.workbench.bridge import read_recent_history
+        from ordo_engine.workbench.bridge import read_recent_history
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            workbench_dir = base / ".tiandidistribute" / "workbench"
+            workbench_dir = base / ".ordo" / "workbench"
             workbench_dir.mkdir(parents=True)
             (workbench_dir / "last-plan.json").write_text(
                 json.dumps(
@@ -696,12 +694,12 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(history["recovery"]["status"], "recoverable")
 
     def test_read_recent_history_tolerates_corrupt_snapshots_and_reports_state(self):
-        from tiandi_engine.workbench.bridge import read_recent_history
+        from ordo_engine.workbench.bridge import read_recent_history
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            workbench_dir = base / ".tiandidistribute" / "workbench"
-            session_dir = base / ".tiandidistribute" / "publish-console"
+            workbench_dir = base / ".ordo" / "workbench"
+            session_dir = base / ".ordo" / "publish-console"
             workbench_dir.mkdir(parents=True)
             session_dir.mkdir(parents=True)
             (workbench_dir / "last-plan.json").write_text("{not-json", encoding="utf-8")
@@ -717,11 +715,11 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertIn("last_plan", history["recovery"]["issues"])
 
     def test_read_recent_history_reports_result_missing_when_only_plan_exists(self):
-        from tiandi_engine.workbench.bridge import read_recent_history
+        from ordo_engine.workbench.bridge import read_recent_history
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            workbench_dir = base / ".tiandidistribute" / "workbench"
+            workbench_dir = base / ".ordo" / "workbench"
             workbench_dir.mkdir(parents=True)
             (workbench_dir / "last-plan.json").write_text(
                 json.dumps(
@@ -748,11 +746,11 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(history["recovery"]["status"], "result_missing")
 
     def test_read_recent_history_marks_restore_unavailable_when_staged_markdown_missing(self):
-        from tiandi_engine.workbench.bridge import read_recent_history
+        from ordo_engine.workbench.bridge import read_recent_history
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            workbench_dir = base / ".tiandidistribute" / "workbench"
+            workbench_dir = base / ".ordo" / "workbench"
             workbench_dir.mkdir(parents=True)
             (workbench_dir / "last-plan.json").write_text(
                 json.dumps(
@@ -772,7 +770,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
                         "staged_articles": [
                             {
                                 "article_id": "a1",
-                                "markdown_path": str(base / ".tiandidistribute" / "workbench" / "articles" / "missing.md"),
+                                "markdown_path": str(base / ".ordo" / "workbench" / "articles" / "missing.md"),
                             }
                         ],
                     }
@@ -786,11 +784,11 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(len(history["recovery"]["missing_staged_articles"]), 1)
 
     def test_plan_publish_job_preserves_last_result_without_explicit_reset(self):
-        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
+        from ordo_engine.workbench.bridge import import_sources, plan_publish_job
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            workbench_dir = base / ".tiandidistribute" / "workbench"
+            workbench_dir = base / ".ordo" / "workbench"
             workbench_dir.mkdir(parents=True)
             last_result = workbench_dir / "last-result.json"
             last_result.write_text('{"publish_job":{"job_id":"old-job","status":"failed"}}', encoding="utf-8")
@@ -800,11 +798,11 @@ class WorkbenchBridgeTests(unittest.TestCase):
             self.assertTrue(last_result.exists())
 
     def test_plan_publish_job_can_explicitly_reset_last_result(self):
-        from tiandi_engine.workbench.bridge import import_sources, plan_publish_job
+        from ordo_engine.workbench.bridge import import_sources, plan_publish_job
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            workbench_dir = base / ".tiandidistribute" / "workbench"
+            workbench_dir = base / ".ordo" / "workbench"
             workbench_dir.mkdir(parents=True)
             last_result = workbench_dir / "last-result.json"
             last_result.write_text('{"publish_job":{"job_id":"old-job","status":"failed"}}', encoding="utf-8")
@@ -820,7 +818,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
             self.assertFalse(last_result.exists())
 
     def test_handle_bridge_command_routes_json_requests(self):
-        from tiandi_engine.workbench.bridge import handle_bridge_command
+        from ordo_engine.workbench.bridge import handle_bridge_command
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -837,7 +835,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(response["job"]["drafts"][0]["title"], "命令标题")
 
     def test_read_wechat_settings_returns_empty_values_when_missing(self):
-        from tiandi_engine.workbench.bridge import read_wechat_settings
+        from ordo_engine.workbench.bridge import read_wechat_settings
 
         with tempfile.TemporaryDirectory() as tmp:
             payload = read_wechat_settings(Path(tmp))
@@ -849,7 +847,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertFalse(payload["status"]["secret_ready"])
 
     def test_save_wechat_settings_persists_values_and_preserves_other_lines(self):
-        from tiandi_engine.workbench.bridge import read_wechat_settings, save_wechat_settings
+        from ordo_engine.workbench.bridge import read_wechat_settings, save_wechat_settings
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -875,7 +873,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertIn("WECHAT_AUTHOR=Wizard", content)
 
     def test_save_wechat_settings_does_not_clear_existing_values_without_explicit_clear(self):
-        from tiandi_engine.workbench.bridge import read_wechat_settings, save_wechat_settings
+        from ordo_engine.workbench.bridge import read_wechat_settings, save_wechat_settings
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -893,7 +891,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(reread["author"], "keep-author")
 
     def test_discover_resources_includes_wechat_status(self):
-        from tiandi_engine.workbench.bridge import discover_resources, save_wechat_settings
+        from ordo_engine.workbench.bridge import discover_resources, save_wechat_settings
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -907,7 +905,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(payload_after["wechat"]["settings"]["author"], "A")
 
     def test_handle_bridge_command_routes_wechat_setting_commands(self):
-        from tiandi_engine.workbench.bridge import handle_bridge_command
+        from ordo_engine.workbench.bridge import handle_bridge_command
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -925,7 +923,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(save_response["app_id"], "wx_test")
         self.assertEqual(read_response["secret"], "sec_test")
 
-    def test_stream_bridge_appends_publish_records_for_desktop_runs(self):
+    def test_stream_bridge_appends_publish_records_for_stream_runs(self):
         import publish
         from scripts import workbench_bridge as bridge_script
 
@@ -974,7 +972,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
             with patch.object(bridge_script, "ROOT_DIR", base), patch.object(
                 publish, "PUBLISH_RECORDS_FILE", records_path
             ), patch("sys.stdin", stdin), patch("sys.stdout", stdout), patch(
-                "tiandi_engine.workbench.bridge.run_publish_job", side_effect=fake_run_publish_job
+                "ordo_engine.workbench.bridge.run_publish_job", side_effect=fake_run_publish_job
             ):
                 bridge_script.main()
 
@@ -984,35 +982,6 @@ class WorkbenchBridgeTests(unittest.TestCase):
             self.assertIn("article-1", content)
             self.assertIn('"type": "command_result"', stdout.getvalue())
 
-    def test_packaged_bridge_discover_resources_works_from_minimal_runtime_layout(self):
-        manifest = json.loads((Path(__file__).resolve().parent.parent / "desktop" / "runtime-manifest.json").read_text(encoding="utf-8"))
-        repo_root = Path(__file__).resolve().parent.parent
-
-        with tempfile.TemporaryDirectory() as tmp:
-            runtime_repo = Path(tmp) / "repo"
-            runtime_repo.mkdir(parents=True)
-            for relative in manifest["include"]:
-                source = repo_root / relative
-                target = runtime_repo / relative
-                if source.is_dir():
-                    shutil.copytree(source, target, dirs_exist_ok=True)
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(source, target)
-
-            proc = subprocess.run(
-                [sys.executable, str(runtime_repo / "scripts" / "workbench_bridge.py")],
-                input=json.dumps({"command": "discover_resources"}),
-                text=True,
-                capture_output=True,
-                cwd=tmp,
-            )
-
-        self.assertEqual(proc.returncode, 0, msg=proc.stderr)
-        payload = json.loads(proc.stdout)
-        self.assertEqual(payload["runtime"]["repo_root"], str(runtime_repo.resolve()))
-        self.assertIn("theme_pool", payload)
-        self.assertIn("cover_pool", payload)
 
 
 if __name__ == "__main__":

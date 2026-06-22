@@ -25,6 +25,9 @@ async function openUrls(urls) {
 }
 
 openUrls([
+  "https://zhuanlan.zhihu.com/write",
+  "https://mp.toutiao.com/profile_v4/graphic/publish",
+  "https://www.jianshu.com/writer#/",
   "https://mp.yidianzixun.com/#/Writing/articleEditor",
-  "https://www.jianshu.com/writer#/"
+  "https://member.bilibili.com/platform/upload/text/new-edit"
 ]);

@@ -6,13 +6,13 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from tiandi_engine.importers.sources import (
+from ordo_engine.importers.sources import (
     UnsupportedSourceError,
     import_file,
     import_pasted_text,
     list_import_candidates,
 )
-from tiandi_engine.models.workbench import (
+from ordo_engine.models.workbench import (
     ArticleDraft,
     CoverAssignment,
     ImportFailure,
@@ -190,7 +190,7 @@ class TestPdfAndImageImport(unittest.TestCase):
             path = Path(td) / "sample.pdf"
             path.write_bytes(b"%PDF-1.4")
             with patch(
-                "tiandi_engine.importers.sources._extract_pdf_text_content",
+                "ordo_engine.importers.sources._extract_pdf_text_content",
                 return_value="PDF标题\n\nPDF正文第一段。\n\nPDF正文第二段。",
             ):
                 draft = import_file(path)
@@ -205,7 +205,7 @@ class TestPdfAndImageImport(unittest.TestCase):
             path = Path(td) / "scan.png"
             Image.new("RGB", (240, 120), color=(255, 255, 255)).save(path)
             with patch(
-                "tiandi_engine.importers.sources._extract_image_text_content",
+                "ordo_engine.importers.sources._extract_image_text_content",
                 return_value="图片标题\n\nOCR 正文第一段。\n\nOCR 正文第二段。",
             ):
                 draft = import_file(path)

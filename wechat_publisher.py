@@ -14,8 +14,8 @@ import markdown
 
 from markdown_utils import render_markdown_plain_text, render_markdown_soup
 from scripts.format import convert_image_captions, convert_lists_to_sections
-from tiandi_engine.config import load_engine_config
-from tiandi_engine.importers.normalize import strip_title_marker
+from ordo_engine.config import load_engine_config
+from ordo_engine.importers.normalize import strip_title_marker
 
 BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 
@@ -27,7 +27,7 @@ SECRET = os.getenv("WECHAT_SECRET")
 
 # Apply proxy if configured
 wechat_proxy = os.getenv("WECHAT_PROXY")
-if wechat_proxy:
+if wechat_proxy and os.environ.get("ORDO_WORKER") != "1":
     os.environ["HTTP_PROXY"] = wechat_proxy
     os.environ["HTTPS_PROXY"] = wechat_proxy
 
@@ -268,14 +268,14 @@ def _inject_container_styles(html: str, theme: dict) -> str:
     accent_hex = theme.get("styles", {}).get("h2", {}).get("color", "#07C160")
     r, g, b = _hex_to_rgb(accent_hex)
     right_bubble_bg = f"rgba({r},{g},{b},0.08)"
-    
+
     dialogue_container = "margin:20px 0;padding:16px;background:#f8f9fa;border-radius:12px"
     dialogue_title = "text-align:center;font-size:14px;color:#999;margin-bottom:12px"
     dialogue_speaker = "font-size:12px;color:#999;margin-bottom:4px"
     dialogue_text = "font-size:15px;color:#333;line-height:1.6;margin:0"
     left_bubble = "max-width:80%;background:#fff;border-radius:0 12px 12px 12px;padding:10px 14px;margin:8px 20% 8px 0;box-shadow:0 1px 2px rgba(0,0,0,0.05)"
     right_bubble = f"max-width:80%;background:{right_bubble_bg};border-radius:12px 0 12px 12px;padding:10px 14px;margin:8px 0 8px 20%;box-shadow:0 1px 2px rgba(0,0,0,0.05)"
-    
+
     html = html.replace('<section data-container="dialogue">', f'<section style="{dialogue_container}">')
     html = html.replace('<p data-container="dialogue-title">', f'<p style="{dialogue_title}">')
     html = html.replace('<section data-container="dialogue-bubble" data-side="left">', f'<section style="{left_bubble}">')
@@ -317,7 +317,7 @@ def _inject_container_styles(html: str, theme: dict) -> str:
     html = html.replace('<section data-container="timeline">', f'<section style="margin:20px 0;padding-left:12px;border-left:2px solid #eee">')
     html = html.replace('<section data-container="quote-card">', f'<section style="margin:24px 0;padding:32px 24px;background:#f8f9fa;border-radius:16px;text-align:center;border:1px solid #eee">')
     html = html.replace('<p data-container="quote-mark">', f'<p style="font-size:48px;color:{accent_hex};opacity:0.2;margin:0;line-height:1">')
-    
+
     return html
 
 
@@ -472,7 +472,7 @@ class WeChatPublisher:
 
             if attempt < max_retries:
                 time.sleep(2 * attempt)
-        
+
         print(f"  [ERROR] 图片上传彻底失败: {file_path_or_url}")
         return None
 
@@ -513,7 +513,7 @@ class WeChatPublisher:
                 start_idx = i
                 break
         clean_md_text = '\n'.join(lines[start_idx:])
-        
+
         # ── 运行 AI 内容增强逻辑 (Fenced Containers & Callouts) ──
         enhanced_md = process_fenced_containers(clean_md_text)
         enhanced_md = process_callouts(enhanced_md)
@@ -588,7 +588,7 @@ class WeChatPublisher:
         final_html = _inject_container_styles(str(soup), theme)
         final_html = convert_lists_to_sections(final_html, list_style_map)
         final_html = convert_image_captions(final_html)
-        
+
         wechat_html = f"""<section style="{wrapper_style} overflow-wrap: break-word; font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', Arial, sans-serif;">
 {top_banner_html}
 {final_html}
@@ -701,7 +701,7 @@ def create_ai_cover(title, markdown_file_path):
             or any(marker.upper() in str(model).upper() for marker in placeholder_markers)
         ):
             return None
-        
+
         # Call generate.py
         import subprocess
         cover_dir = resolve_cover_dir()
@@ -725,6 +725,70 @@ def create_ai_cover(title, markdown_file_path):
         print(f"  [AI封面异常] {e}")
     return None
 
+
+def load_recent_cover_paths(limit: int) -> list[str]:
+    records_file = BASE_DIR / "publish_records.csv"
+    if not records_file.exists():
+        return []
+    try:
+        import csv
+        with open(records_file, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            paths = []
+            for row in reader:
+                path = row.get("cover_path")
+                if path:
+                    paths.append(path)
+            return paths[-limit:] if limit > 0 else []
+    except Exception as exc:
+        print(f"  [WARN] 读取历史封面记录失败: {exc}")
+        return []
+
+
+def select_cover_for_path(markdown_file_path, title=None, cover_override=None, cover_mode="auto"):
+    if cover_override:
+        path = Path(cover_override).expanduser().resolve()
+        if not path.is_file():
+            raise RuntimeError(f"封面文件不存在: {path}")
+        return str(path)
+
+    cfg = load_engine_config(BASE_DIR, environ=os.environ)
+    repeat_window = cfg.get_cover_repeat_window()
+    recent_covers = load_recent_cover_paths(repeat_window)
+    recent_resolved = set()
+    for rc in recent_covers:
+        if rc:
+            try:
+                recent_resolved.add(str(Path(rc).resolve()))
+            except OSError:
+                recent_resolved.add(str(rc))
+
+    cover_images = list_cover_images()
+    if not cover_images:
+        raise RuntimeError("未找到任何本地默认封面图片")
+
+    if cover_mode == "random":
+        candidates = [img for img in cover_images if str(Path(img).resolve()) not in recent_resolved]
+        if not candidates:
+            candidates = cover_images
+        import random
+        return random.choice(candidates)
+
+    numbered = resolve_numbered_cover(markdown_file_path)
+    if numbered:
+        return numbered
+    if title:
+        ai_cover = create_ai_cover(title, markdown_file_path)
+        if ai_cover:
+            return ai_cover
+
+    candidates = [img for img in cover_images if str(Path(img).resolve()) not in recent_resolved]
+    if not candidates:
+        candidates = cover_images
+    import random
+    return random.choice(candidates)
+
+
 def resolve_numbered_cover(markdown_file_path):
     name = Path(markdown_file_path).name
     match = re.search(r"(?:^|[-_.]|\D)(\d{2})_", name)
@@ -736,26 +800,6 @@ def resolve_numbered_cover(markdown_file_path):
     return None
 
 
-def select_cover_for_path(markdown_file_path, title=None, cover_override=None):
-    if cover_override:
-        path = Path(cover_override).expanduser().resolve()
-        if not path.is_file():
-            raise RuntimeError(f"封面文件不存在: {path}")
-        return str(path)
-    numbered = resolve_numbered_cover(markdown_file_path)
-    if numbered:
-        return numbered
-    if title:
-        ai_cover = create_ai_cover(title, markdown_file_path)
-        if ai_cover:
-            return ai_cover
-    import random
-    cover_images = list_cover_images()
-    if not cover_images:
-        raise RuntimeError("未找到任何本地默认封面，且 AI 封面未生成成功")
-    return random.choice(cover_images)
-
-
 def publish_one_article(
     publisher,
     markdown_file,
@@ -763,9 +807,10 @@ def publish_one_article(
     dry_run=False,
     theme_name="chinese",
     cover_path=None,
+    cover_mode="auto",
 ):
     title, md_content, md_file_path = load_single_article(markdown_file)
-    
+
     if dry_run:
         html_content = publisher.md_to_wechat_html(
             md_content,
@@ -786,7 +831,7 @@ def publish_one_article(
 
     cover_path = select_cover_for_path(md_file_path, title=title, cover_override=cover_path)
     cover_media_id, cover_url = publisher.upload_permanent_material(cover_path)
-    
+
     # 自动清理临时生成的 AI 封面图
     if os.path.basename(cover_path).startswith("ai_cover_") and os.path.exists(cover_path):
         try:
@@ -794,7 +839,7 @@ def publish_one_article(
             print(f"  [清理] 已删除临时封面: {os.path.basename(cover_path)}")
         except Exception as e:
             print(f"  [WARN] 临时封面删除失败: {e}")
-            
+
     draft_result = publisher.publish_draft(
         title,
         md_content,
@@ -845,12 +890,28 @@ def main():
         parser.add_argument("--theme", default="chinese", help="指定的预设主题名，如 chinese 或 elegant-blue")
         parser.add_argument("--dry-run", action="store_true", help="演练模式，只生成本地 html 进行预览，不推网")
         parser.add_argument("--cover", help="指定封面图路径；默认按文章文件名前缀 01_ 匹配 cover_01.png")
+        parser.add_argument(
+            "--cover-mode",
+            choices=["auto", "force_on", "force_off", "random"],
+            default=None,
+            help="任务级封面图策略：auto 自动；force_on 强制；force_off 禁用；random 随机（不匹配前缀和AI，直接从库中随机选择）"
+        )
         args = parser.parse_args()
 
         print("=" * 50)
         print("  ordo 微信公众号自动发布引擎 v3.0")
         print(f"  作者/公众号: {os.getenv('WECHAT_AUTHOR', '配置的作者')}")
         print("=" * 50)
+
+        cover_mode = args.cover_mode
+        if cover_mode is None:
+            try:
+                cfg = load_engine_config(BASE_DIR, os.environ)
+                cover_mode = cfg.project_config.get("terminal_wizard", {}).get("defaults", {}).get("cover_mode")
+            except Exception:
+                pass
+            if not cover_mode:
+                cover_mode = "auto"
 
         publisher = WeChatPublisher(APPID, SECRET)
         if args.dry_run:
@@ -867,6 +928,7 @@ def main():
                 dry_run=args.dry_run,
                 theme_name=args.theme,
                 cover_path=args.cover,
+                cover_mode=cover_mode,
             )
             return
 
@@ -897,6 +959,7 @@ def main():
                 args.mode,
                 dry_run=args.dry_run,
                 theme_name=args.theme,
+                cover_mode=cover_mode,
             )
 
             # 间隔避免限流

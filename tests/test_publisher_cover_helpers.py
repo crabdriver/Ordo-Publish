@@ -37,23 +37,6 @@ class ZhihuApplyCoverTests(unittest.TestCase):
         mock_run.assert_not_called()
 
 
-class JianshuCoverArgTests(unittest.TestCase):
-    def test_cover_flag_fails_fast_with_diagnostic(self):
-        with tempfile.NamedTemporaryFile(suffix=".md", delete=False, mode="w", encoding="utf-8") as handle:
-            handle.write("# T\n\nbody")
-            md_path = handle.name
-        old_argv = sys.argv
-        try:
-            sys.argv = ["jianshu_publisher.py", md_path, "--mode", "draft", "--cover", "/tmp/cover.png"]
-            with self.assertRaises(RuntimeError) as ctx:
-                jianshu_publisher.main()
-        finally:
-            sys.argv = old_argv
-            Path(md_path).unlink(missing_ok=True)
-        self.assertIn("简书", str(ctx.exception))
-        self.assertIn("--cover", str(ctx.exception))
-
-
 class YidianCoverArgTests(unittest.TestCase):
     def test_draft_mode_with_cover_still_applies_cover(self):
         argv = [
@@ -82,6 +65,13 @@ class YidianCoverArgTests(unittest.TestCase):
             return_value="ok",
         ), patch.object(
             yidian_publisher,
+            "scroll_settings_into_view",
+        ), patch.object(
+            yidian_publisher,
+            "ensure_content_statement",
+            return_value={"found": True, "checked": False},
+        ), patch.object(
+            yidian_publisher,
             "attempt_ai_declaration",
             return_value=None,
         ), patch.object(
@@ -89,12 +79,19 @@ class YidianCoverArgTests(unittest.TestCase):
             "apply_cover",
         ) as apply_cover_mock, patch.object(
             yidian_publisher,
+            "verify_in_management_list",
+        ), patch.object(
+            yidian_publisher,
+            "take_screenshot",
+        ), patch.object(
+            yidian_publisher,
             "click_action",
             return_value="clicked",
         ):
             yidian_publisher.main()
 
         apply_cover_mock.assert_called_once_with("target-1", "/tmp/cover.png")
+
 
 
 class ZhihuDeclarationTests(unittest.TestCase):
@@ -292,7 +289,8 @@ class ToutiaoStrictSettingTests(unittest.TestCase):
             ],
         ):
             with self.assertRaises(RuntimeError):
-                toutiao_publisher.attempt_ai_declaration("toutiao-target")
+                toutiao_publisher.ensure_ai_declaration("toutiao-target", True)
+
 
 
 class YidianStrictSettingTests(unittest.TestCase):

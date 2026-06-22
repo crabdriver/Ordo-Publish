@@ -303,7 +303,7 @@ def find_cover_image(article_dir, cover_arg=None):
     return None
 
 
-from tiandi_engine.platforms.wechat.api import (  # noqa: E402
+from ordo_engine.platforms.wechat.api import (  # noqa: E402
     download_external_image as shared_download_external_image,
     get_access_token as shared_get_access_token,
     push_draft as shared_push_draft,

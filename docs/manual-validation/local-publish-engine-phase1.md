@@ -130,7 +130,7 @@
    `python3 publish.py "./my_articles" --platform all --mode draft --continue-on-error`
 2. 确认多篇文章可以逐篇执行
 3. 确认 `publish_records.csv` 有结构化记录（含 GUI 元数据列时更易对照会话）
-4. 如使用控制台模式，确认 `.tiandidistribute/publish-console/` 中的会话文件持续更新
+4. 如使用控制台模式，确认 `.ordo/publish-console/` 中的会话文件持续更新
 
 ### 失败诊断路径
 
@@ -142,6 +142,6 @@
 
 - 浏览器平台依赖真实 DOM，平台改版会直接影响自动化稳定性
 - 简书自定义封面与编辑器限制耦合，自动化测试不替代真实页面回归
-- 目前内部缓存目录仍沿用 `.tiandidistribute/`，后续可能再迁移命名
+- 目前内部缓存目录仍沿用 `.ordo/`，后续可能再迁移命名
 - `scripts/format.py` 仍是较大的独立工具文件，本期未做深度拆分
 - 真实平台验证仍需要人工回归，自动化测试目前主要覆盖模型、状态和调度契约

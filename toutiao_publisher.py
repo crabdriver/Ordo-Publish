@@ -7,9 +7,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from markdown_utils import render_markdown_html
-from tiandi_engine.importers.normalize import strip_title_marker
-from tiandi_engine.platforms.browser.node_runtime import resolve_node_executable
+from markdown_utils import render_markdown_html, should_declare_ai
+from ordo_engine.importers.normalize import strip_title_marker
+from ordo_engine.platforms.browser.node_runtime import resolve_node_executable
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -34,7 +34,7 @@ TOUTIAO_EDITOR_SELECTORS = (
 )
 AI_CHECKBOX_LABEL = "引用AI"
 SMOKE_STATE_PREFIX = "[SMOKE_STATE] "
-PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off")
+PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off", "random")
 
 
 def clean_title(title):
@@ -172,6 +172,50 @@ def emit_smoke_state(target_id, smoke_step, page_state, *, error=None):
     if error:
         payload["error"] = str(error)
     print(f"{SMOKE_STATE_PREFIX}{json.dumps(payload, ensure_ascii=False)}")
+
+
+def take_screenshot(target_id, step):
+    if not target_id:
+        return
+    try:
+        timestamp = int(time.time() * 1000)
+        screenshot_dir = BASE_DIR / ".ordo" / "screenshots" / "toutiao"
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        filepath = screenshot_dir / f"{timestamp}_{step}.png"
+        run_cdp("shot", target_id, str(filepath))
+        print(f"[INFO] [SCREENSHOT] Saved to: {filepath}")
+    except Exception as e:
+        print(f"[WARN] 截图失败 ({step}): {e}")
+
+
+def verify_in_management_list(target_id, expected_title, is_draft=False):
+    if is_draft:
+        management_url = "https://mp.toutiao.com/profile_v4/manage/draft"
+    else:
+        management_url = "https://mp.toutiao.com/profile_v4/graphic/articles"
+    print(f"[INFO] 正在跳转至头条号作品管理页面进行校验: {management_url}")
+    run_cdp("nav", target_id, management_url)
+    time.sleep(3.5)
+
+    title_json = json.dumps(expected_title, ensure_ascii=False)
+    list_ready_expr = """
+(() => {
+  const normalize = (t) => (t || '').replace(/\\s+/g, '');
+  const target = normalize(""" + title_json + """);
+  const els = Array.from(document.querySelectorAll('a, div, span, h1, h2, h3, h4'));
+  const found = els.find(el => {
+    const txt = normalize(el.innerText || el.textContent || '');
+    return txt.includes(target) && el.offsetHeight > 0;
+  });
+  return !!found;
+})()
+"""
+    print(f"[INFO] 正在校验列表是否包含文章标题：《{expected_title}》...")
+    success = wait_until(target_id, list_ready_expr, timeout_seconds=15, interval_seconds=1)
+    take_screenshot(target_id, "verified_list")
+    if not success:
+        raise RuntimeError(f"双重校验失败：未能在头条号作品列表中找到文章《{expected_title}》")
+    print(f"[INFO] 双重校验成功：在作品列表中成功检索到文章《{expected_title}》！")
 
 
 def ensure_editor_ready(target_id):
@@ -314,6 +358,25 @@ def apply_cover(target_id, cover_path):
     path = Path(cover_path).expanduser().resolve()
     if not path.is_file():
         raise RuntimeError(f"封面文件不存在: {path}")
+    close_stale_drawer_expr = """
+(() => {
+  const drawer = document.querySelector('.byte-drawer-wrapper');
+  if (!drawer) return 'no-drawer';
+  const close = Array.from(drawer.querySelectorAll('button, span, i, div')).find(el => {
+    const text = (el.innerText || el.textContent || '').trim();
+    const cls = String(el.className || '');
+    return text === '×' || text === 'x' || cls.includes('close');
+  });
+  if (close) {
+    close.click();
+    return 'closed';
+  }
+  return 'close-not-found';
+})()
+"""
+    close_res = run_cdp("eval", target_id, close_stale_drawer_expr)
+    if close_res == "closed":
+        time.sleep(1)
     cover_result = choose_cover_mode(target_id, label_text="单图", attempts=5)
     if not cover_mode_is_selected(target_id, "单图"):
         raise RuntimeError(f"头条封面未切换到单图: {cover_result}")
@@ -324,6 +387,19 @@ def apply_cover(target_id, cover_path):
             raise
         run_cdp("click", target_id, ".article-cover-img-replace")
     time.sleep(0.7)
+    clear_existing_expr = """
+(() => {
+  const removers = Array.from(document.querySelectorAll('.image-item-remove'));
+  for (const remover of removers.reverse()) {
+    remover.click();
+  }
+  return String(removers.length);
+})()
+"""
+    removed = run_cdp("eval", target_id, clear_existing_expr)
+    if removed != "0":
+        print(f"[INFO] 头条已清理旧封面候选: {removed}")
+        time.sleep(1)
     upload_error = None
     for selector in TOUTIAO_COVER_FILE_INPUT_SELECTORS:
         try:
@@ -337,10 +413,28 @@ def apply_cover(target_id, cover_path):
     uploaded = wait_for_cover_upload(target_id, timeout_seconds=15, interval_seconds=1)
     if not uploaded:
         raise RuntimeError(f"头条封面上传后未检测到预览或成功状态: {path.name}")
+    select_uploaded_expr = """
+(() => {
+  const items = Array.from(document.querySelectorAll('.pic-select-image-item'));
+  const item = items.filter(el => el.querySelector('.success')).at(-1);
+  if (!item) return JSON.stringify({ok: false, reason: 'no-uploaded-item'});
+  item.scrollIntoView({ block: 'center', inline: 'center' });
+  const rect = item.getBoundingClientRect();
+  return JSON.stringify({ok: true, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2});
+})()
+"""
+    select_result = json.loads(run_cdp("eval", target_id, select_uploaded_expr))
+    if select_result.get("ok"):
+        run_cdp("clickxy", target_id, str(select_result["x"]), str(select_result["y"]))
+    print(f"[INFO] 头条已上传封面选择结果: {select_result}")
+    time.sleep(1)
     confirm_result = click_visible_button(target_id, "确定")
     if confirm_result == "button-disabled":
-        for _ in range(5):
+        for _ in range(20):
             time.sleep(1)
+            select_result = json.loads(run_cdp("eval", target_id, select_uploaded_expr))
+            if select_result.get("ok"):
+                run_cdp("clickxy", target_id, str(select_result["x"]), str(select_result["y"]))
             confirm_result = click_visible_button(target_id, "确定")
             if confirm_result != "button-disabled":
                 break
@@ -575,11 +669,9 @@ def wait_for_cover_dialog_closed(target_id, timeout_seconds=10, interval_seconds
     return wait_until(target_id, expression, timeout_seconds=timeout_seconds, interval_seconds=interval_seconds)
 
 
-def wait_for_draft_saved(target_id, timeout_seconds=12):
+def wait_for_draft_saved(target_id, timeout_seconds=15):
     signals = [
         "草稿已保存",
-        "草稿将自动保存",
-        "草稿保存中",
         "已保存到草稿",
     ]
     return wait_for_any_text(target_id, signals, timeout_seconds=timeout_seconds, interval_seconds=1)
@@ -614,7 +706,7 @@ def schedule_publish(target_id, scheduled_publish_at):
         target_id,
         """
 (() => {
-  const normalize = (text) => (text || '').replace(/\s+/g, '');
+  const normalize = (text) => (text || '').replace(/\\s+/g, '');
   const visible = (el) => {
     if (!el) return false;
     const rect = el.getBoundingClientRect();
@@ -732,8 +824,8 @@ def wait_for_scheduled_publish(target_id, timeout_seconds=30):
     return wait_for_any_text(target_id, signals, timeout_seconds=timeout_seconds, interval_seconds=1)
 
 
-def attempt_ai_declaration(target_id):
-    """在「作品声明」区域精确勾选「引用AI」并做结果校验。"""
+def ensure_ai_declaration(target_id, should_declare):
+    """在「作品声明」区域根据 should_declare 精确勾选或取消勾选「引用AI」并做结果校验。"""
     expand_expression = """
 (() => {
   if ((document.body.innerText || '').includes('作品声明')) return 'already-open';
@@ -754,7 +846,7 @@ def attempt_ai_declaration(target_id):
     label_json = json.dumps(AI_CHECKBOX_LABEL, ensure_ascii=False)
     check_expression = f"""
 (() => {{
-  const normalize = (text) => (text || '').replace(/\s+/g, '');
+  const normalize = (text) => (text || '').replace(/\\s+/g, '');
   const labels = Array.from(document.querySelectorAll('.byte-checkbox-group .byte-checkbox, label, .byte-checkbox'));
   const lb = labels.find(node => normalize(node.innerText || node.textContent || '') === normalize({label_json}));
   if (!lb) return JSON.stringify({{found: false}});
@@ -764,8 +856,10 @@ def attempt_ai_declaration(target_id):
     lb.classList.contains('checked') ||
     lb.querySelector('.byte-checkbox-input-checked, .checked')
   );
-  if (isChecked()) {{
-    return JSON.stringify({{found: true, checked: true, already: true}});
+  const checkedBefore = isChecked();
+  const should_declare = {str(should_declare).lower()};
+  if (checkedBefore === should_declare) {{
+    return JSON.stringify({{found: true, checked: checkedBefore, already: true}});
   }}
   lb.click();
   return JSON.stringify({{found: true, checked: isChecked(), already: false}});
@@ -779,13 +873,14 @@ def attempt_ai_declaration(target_id):
     if not result.get("found"):
         raise RuntimeError('头条作品声明中未找到「引用AI」选项')
 
-    if result.get("checked"):
+    current_checked = result.get("checked")
+    if current_checked == should_declare:
         if result.get("already"):
-            print('[INFO] AI创作声明: 「引用AI」已勾选')
+            print(f"[INFO] AI创作声明: 「引用AI」{'已勾选' if should_declare else '已取消勾选'}")
         else:
-            print('[INFO] AI创作声明: 已成功勾选「引用AI」')
+            print(f"[INFO] AI创作声明: 已成功{'勾选' if should_declare else '取消勾选'}「引用AI」")
     else:
-        raise RuntimeError('头条作品声明中「引用AI」勾选失败')
+        raise RuntimeError(f"头条作品声明中「引用AI」{'勾选' if should_declare else '取消勾选'}失败")
     return result
 
 
@@ -880,6 +975,7 @@ def main():
         inject_result = inject_article(target_id, title, html_body)
         page_state = "article_injected"
         print(f"[INFO] 已写入头条号编辑器: {inject_result}")
+        take_screenshot(target_id, "injected")
 
         smoke_step = "apply_cover"
         if args.cover_mode == "force_on" and not args.cover:
@@ -892,6 +988,7 @@ def main():
             if not cover_mode_is_selected(target_id, "无封面"):
                 raise RuntimeError(f"头条封面未切换到无封面: {cover_result}")
             print(f"[INFO] 已切换头条封面为无封面: {cover_result}")
+        take_screenshot(target_id, "cover_ready")
 
         smoke_step = "ad_selection"
         ad_result = choose_required_radio(target_id, "投放广告", "投放广告赚收益")
@@ -899,23 +996,25 @@ def main():
             ad_result = click_text_by_xy(target_id, "投放广告赚收益", selector="label")
         print(f"[INFO] 已尝试设置头条广告选项: {ad_result}")
 
-        if args.ai_declaration_mode != "force_off":
-            smoke_step = "attempt_ai_declaration"
-            attempt_ai_declaration(target_id)
-            page_state = "ai_declared"
-        else:
-            print("[INFO] 已显式关闭头条号 AI 声明设置")
+        need_ai_declaration = should_declare_ai(title, html_body, args.ai_declaration_mode)
+        smoke_step = "attempt_ai_declaration"
+        ensure_ai_declaration(target_id, need_ai_declaration)
+        page_state = "ai_declared"
+        take_screenshot(target_id, "ai_declared")
 
         if args.mode == "draft":
             smoke_step = "draft_saved"
             if not wait_for_draft_saved(target_id, timeout_seconds=12):
                 raise RuntimeError("未检测到头条号草稿提示")
             page_state = "draft_saved"
+            take_screenshot(target_id, "draft_saved")
+            verify_in_management_list(target_id, title, is_draft=True)
             emit_smoke_state(target_id, smoke_step, page_state)
             print(f"[OK] 已写入头条草稿页: {article_path}")
             return
 
         smoke_step = "publish_click"
+        take_screenshot(target_id, "before_publish")
         publish_button_text = "定时发布" if args.scheduled_publish_at else "预览并发布"
         publish_result = click_button_with_fallback(target_id, publish_button_text)
         if publish_result != "clicked":
@@ -934,6 +1033,8 @@ def main():
                     raise RuntimeError(f"头条号定时发布受限: {limit_marker}")
                 raise RuntimeError("未检测到头条号定时发布成功提示，请检查页面状态")
             page_state = "scheduled"
+            take_screenshot(target_id, "scheduled")
+            verify_in_management_list(target_id, title, is_draft=False)
             emit_smoke_state(target_id, smoke_step, page_state)
             print(f"[OK] 已设置头条号定时发布: {article_path}")
             return
@@ -964,9 +1065,12 @@ def main():
             raise RuntimeError("未检测到头条号发布成功提示，请检查页面状态")
 
         page_state = "published"
+        take_screenshot(target_id, "published")
+        verify_in_management_list(target_id, title, is_draft=False)
         emit_smoke_state(target_id, smoke_step, page_state)
         print(f"[OK] 已发布到头条号: {article_path}")
     except Exception as exc:
+        take_screenshot(target_id, "error")
         emit_smoke_state(target_id, smoke_step, page_state, error=exc)
         raise
 

@@ -22,30 +22,30 @@ from publish_console_state import (
     save_session,
 )
 from scripts.format import build_gallery_bundle, render_publish_console_page
-from tiandi_engine.assignment.covers import COVER_PLATFORMS, CoverPoolError, assign_covers, list_cover_files
-from tiandi_engine.assignment.templates import assign_templates
-from tiandi_engine.config import load_engine_config
-from tiandi_engine.platforms.base import classify_process_result
-from tiandi_engine.platforms.browser.node_runtime import resolve_node_executable
-from tiandi_engine.platforms.registry import build_platform_registry
-from tiandi_engine.results.publish_records import (
+from ordo_engine.assignment.covers import COVER_PLATFORMS, CoverPoolError, assign_covers, list_cover_files
+from ordo_engine.assignment.templates import assign_templates
+from ordo_engine.config import load_engine_config
+from ordo_engine.platforms.base import classify_process_result
+from ordo_engine.platforms.browser.node_runtime import resolve_node_executable
+from ordo_engine.platforms.registry import build_platform_registry
+from ordo_engine.results.publish_records import (
     MAX_RECORD_LOG_LENGTH,
     PUBLISH_RECORD_FIELDNAMES,
     append_publish_record_at_path,
 )
-from tiandi_engine.runner.pipeline import run_platform_task, run_publish_pipeline
+from ordo_engine.runner.pipeline import run_platform_task, run_publish_pipeline
 
 
 BASE_DIR = Path(__file__).resolve().parent
 CDP_SCRIPT = BASE_DIR / "live_cdp.mjs"
 CDP_RESOLVER_SCRIPT = BASE_DIR / "live_cdp_ws_resolver.mjs"
 WORKBENCH_FILE = BASE_DIR / ".publish-workbench.json"
-PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off")
+PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off", "random")
 COVERS_DIR = BASE_DIR / "covers"
 PUBLISH_RECORDS_FILE = BASE_DIR / "publish_records.csv"
-BROWSER_SESSION_DIR = BASE_DIR / ".tiandidistribute" / "browser-session"
+BROWSER_SESSION_DIR = BASE_DIR / ".ordo" / "browser-session"
 BROWSER_SESSION_STATE_FILE = BROWSER_SESSION_DIR / "state.json"
-PUBLISH_CONSOLE_DIR = BASE_DIR / ".tiandidistribute" / "publish-console"
+PUBLISH_CONSOLE_DIR = BASE_DIR / ".ordo" / "publish-console"
 PUBLISH_CONSOLE_HTML = PUBLISH_CONSOLE_DIR / "console.html"
 PUBLISH_CONSOLE_SESSION = PUBLISH_CONSOLE_DIR / "publish-console-session.json"
 CHROME_APP_CANDIDATES = [
@@ -73,26 +73,30 @@ PLATFORM_SCRIPTS = {
     "toutiao": "toutiao_publisher.py",
     "jianshu": "jianshu_publisher.py",
     "yidian": "yidian_publisher.py",
+    "bilibili": "bilibili_publisher.py",
 }
 PLATFORM_URLS = {
     "zhihu": "https://zhuanlan.zhihu.com/write",
     "toutiao": "https://mp.toutiao.com/profile_v4/graphic/publish",
     "jianshu": "https://www.jianshu.com/writer#/",
     "yidian": "https://mp.yidianzixun.com/#/Writing/articleEditor",
+    "bilibili": "https://member.bilibili.com/platform/upload/text/new-edit",
 }
 PLATFORM_MATCHES = {
     "zhihu": ["zhihu.com"],
     "toutiao": ["mp.toutiao.com"],
     "jianshu": ["jianshu.com/writer"],
     "yidian": ["mp.yidianzixun.com"],
+    "bilibili": ["member.bilibili.com"],
 }
 BROWSER_PLATFORM_LABELS = {
     "zhihu": "知乎",
     "toutiao": "头条号",
     "jianshu": "简书",
     "yidian": "一点号",
+    "bilibili": "哔哩哔哩",
 }
-DEFAULT_PLATFORMS = ["wechat", "zhihu", "toutiao", "jianshu", "yidian"]
+DEFAULT_PLATFORMS = ["wechat", "zhihu", "toutiao", "jianshu", "yidian", "bilibili"]
 BROWSER_PLATFORMS = list(PLATFORM_URLS.keys())
 COVER_PLATFORMS_SET = frozenset(COVER_PLATFORMS)
 def parse_platforms(raw_value):
@@ -143,6 +147,85 @@ def collect_markdown_files(raw_path, offset=0, limit=None):
     return files
 
 
+def get_published_stems(dashboard_path: Path) -> set[str]:
+    published_stems = set()
+    if not dashboard_path.exists():
+        return published_stems
+    try:
+        import re
+        content = dashboard_path.read_text(encoding="utf-8")
+        for line in content.splitlines():
+            if "|" not in line:
+                continue
+            is_published = "✅" in line or "已发" in line or "已发表" in line
+            if is_published:
+                match = re.search(r"AI终稿/(.+?)\.md", line)
+                if match:
+                    published_stems.add(match.group(1))
+                else:
+                    match_any = re.search(r"\((.+?)\.md\)", line)
+                    if match_any:
+                        published_stems.add(Path(match_any.group(1)).stem)
+    except Exception as e:
+        print(f"[WARN] 读取或解析看板失败: {e}")
+    return published_stems
+
+
+def filter_already_published_articles(article_paths: list[Path], markdown_path: str) -> list[Path]:
+    dashboard_path = None
+    env_doc_root = os.getenv("DOCUMENT_ROOT")
+    if env_doc_root:
+        candidate = Path(env_doc_root) / "AI智能创作" / "Ordo_Scribe_AI创作看板.md"
+        if candidate.is_file():
+            dashboard_path = candidate
+
+    if not dashboard_path and markdown_path:
+        p = Path(markdown_path).expanduser().resolve()
+        start_dir = p.parent if p.is_file() else p
+        curr = start_dir
+        for _ in range(4):
+            candidate = curr / "Ordo_Scribe_AI创作看板.md"
+            if candidate.is_file():
+                dashboard_path = candidate
+                break
+            candidate = curr / "AI智能创作" / "Ordo_Scribe_AI创作看板.md"
+            if candidate.is_file():
+                dashboard_path = candidate
+                break
+            if curr.parent == curr:
+                break
+            curr = curr.parent
+
+    if not dashboard_path:
+        print("[WARN] 未找到创作状态看板 Ordo_Scribe_AI创作看板.md，将不进行已发布文章过滤。")
+        return article_paths
+
+    print(f"[INFO] 找到创作状态看板: {dashboard_path}")
+    published_stems = get_published_stems(dashboard_path)
+    if not published_stems:
+        return article_paths
+
+    print(f"[INFO] 看板记录已发表文章数: {len(published_stems)}")
+    filtered = []
+    for p in article_paths:
+        if p.stem in published_stems:
+            print(f"[SKIP] 根据看板记录过滤已发布文章: {p.name}")
+        else:
+            filtered.append(p)
+    return filtered
+
+
+def maybe_filter_already_published_articles(
+    article_paths: list[Path],
+    markdown_path: str,
+    *,
+    skip_published: bool,
+) -> list[Path]:
+    if not skip_published:
+        return article_paths
+    return filter_already_published_articles(article_paths, markdown_path)
+
+
 def load_simple_env_file(env_path):
     values = {}
     if not env_path.exists():
@@ -190,7 +273,8 @@ def inspect_browser_platform_state(platform, target_id):
   if (titleEl && editor) {
     return JSON.stringify({ current_url: href, page_state: 'editor_ready', editor_ready: true, detail: '写作编辑器已就绪' });
   }
-  if (text.includes('登录') || text.includes('验证码')) {
+  const isLoginUrl = href.includes('/signin') || href.includes('/login') || href.includes('/sign_in') || href.includes('/sign_up');
+  if (isLoginUrl || document.querySelector('.SignContainer, .SignFlowHeader') || text.includes('密码登录') || text.includes('验证码登录') || text.includes('立即登录') || text.includes('扫码登录')) {
     return JSON.stringify({ current_url: href, page_state: 'login_required', editor_ready: false, detail: '当前标签页仍处于登录或校验状态' });
   }
   if (!href.includes('/write') && !href.includes('/creator')) {
@@ -208,7 +292,8 @@ def inspect_browser_platform_state(platform, target_id):
   if (titleEl && editor) {{
     return JSON.stringify({{ current_url: href, page_state: 'editor_ready', editor_ready: true, detail: '图文编辑器已就绪' }});
   }}
-  if (text.includes('登录') || text.includes('验证码')) {{
+  const isLoginUrl = href.includes('/signin') || href.includes('/login') || href.includes('/sign_in') || href.includes('/sign_up');
+  if (isLoginUrl || document.querySelector('.login-panel, .login-form, .s-login') || text.includes('密码登录') || text.includes('验证码登录') || text.includes('立即登录') || text.includes('扫码登录')) {{
     return JSON.stringify({{ current_url: href, page_state: 'login_required', editor_ready: false, detail: '当前标签页仍处于登录或校验状态' }});
   }}
   if (!href.startsWith({json.dumps(PLATFORM_URLS["toutiao"])}) && !href.includes('/graphic/publish')) {{
@@ -232,7 +317,8 @@ def inspect_browser_platform_state(platform, target_id):
   if (titleEl && editor) {
     return JSON.stringify({ current_url: href, page_state: 'editor_ready', editor_ready: true, detail: '一点号编辑器已就绪' });
   }
-  if (text.includes('登录') || text.includes('验证码')) {
+  const isLoginUrl = href.includes('/signin') || href.includes('/login') || href.includes('/sign_in') || href.includes('/sign_up') || href === 'https://mp.yidianzixun.com/#/' || href === 'https://mp.yidianzixun.com/';
+  if (isLoginUrl || document.querySelector('.login-container, .login-box, .yidian-login-box') || text.includes('密码登录') || text.includes('验证码登录') || text.includes('立即登录') || text.includes('扫码登录')) {
     return JSON.stringify({ current_url: href, page_state: 'login_required', editor_ready: false, detail: '当前标签页仍处于登录或校验状态' });
   }
   if (canEnterEditor) {
@@ -253,13 +339,34 @@ def inspect_browser_platform_state(platform, target_id):
   if (titleEl && editor) {
     return JSON.stringify({ current_url: href, page_state: 'editor_ready', editor_ready: true, detail: '简书编辑器已就绪' });
   }
-  if (text.includes('登录') || text.includes('验证码')) {
+  const isLoginUrl = href.includes('/signin') || href.includes('/login') || href.includes('/sign_in') || href.includes('/sign_up');
+  if (isLoginUrl || document.querySelector('.sign, .login-container') || text.includes('密码登录') || text.includes('验证码登录') || text.includes('立即登录') || text.includes('扫码登录')) {
     return JSON.stringify({ current_url: href, page_state: 'login_required', editor_ready: false, detail: '当前标签页仍处于登录或校验状态' });
   }
   if (!href.includes('jianshu.com')) {
     return JSON.stringify({ current_url: href, page_state: 'wrong_editor_page', editor_ready: false, detail: '当前标签页不在简书域名' });
   }
   return JSON.stringify({ current_url: href, page_state: 'editor_missing', editor_ready: false, detail: '已进入简书域名，但未检测到标题框或正文编辑器' });
+})()
+""".strip(),
+        "bilibili": """
+(() => {
+  const href = location.href;
+  const iframe = document.querySelector('iframe[src*="read-editor"]');
+  const doc = iframe?.contentDocument || iframe?.contentWindow?.document;
+  const titleEl = doc?.querySelector('textarea.title-input__inner');
+  const editor = doc?.querySelector('div.tiptap.ProseMirror');
+  if (titleEl && editor) {
+    return JSON.stringify({ current_url: href, page_state: 'editor_ready', editor_ready: true, detail: '哔哩哔哩编辑器已就绪' });
+  }
+  const isLoginUrl = href.includes('/login') || href.includes('/signin') || document.body.innerText.includes('登录');
+  if (isLoginUrl) {
+    return JSON.stringify({ current_url: href, page_state: 'login_required', editor_ready: false, detail: '当前标签页仍处于登录或校验状态' });
+  }
+  if (!href.includes('bilibili.com')) {
+    return JSON.stringify({ current_url: href, page_state: 'wrong_editor_page', editor_ready: false, detail: '当前标签页不在哔哩哔哩域名' });
+  }
+  return JSON.stringify({ current_url: href, page_state: 'editor_missing', editor_ready: false, detail: '已进入哔哩哔哩域名，但未检测到标题框或正文编辑器' });
 })()
 """.strip(),
     }
@@ -319,6 +426,24 @@ def build_template_assignments_for_articles(base_dir: Path, article_ids: tuple[s
     )
 
 
+def load_recent_cover_paths(limit: int) -> list[str]:
+    if not PUBLISH_RECORDS_FILE.exists():
+        return []
+    try:
+        import csv
+        with open(PUBLISH_RECORDS_FILE, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            paths = []
+            for row in reader:
+                path = row.get("cover_path")
+                if path:
+                    paths.append(path)
+            return paths[-limit:] if limit > 0 else []
+    except Exception as exc:
+        print(f"[WARN] 读取历史封面记录失败: {exc}")
+        return []
+
+
 def build_cover_assignments_for_articles(base_dir: Path, article_ids: tuple[str, ...], platforms: list[str]):
     ec = load_engine_config(base_dir)
     pool = ec.discover_cover_pool()
@@ -327,19 +452,21 @@ def build_cover_assignments_for_articles(base_dir: Path, article_ids: tuple[str,
     need = [p for p in platforms if p in COVER_PLATFORMS_SET]
     if not need:
         return ()
+    repeat_window = ec.get_cover_repeat_window()
+    recent_covers = load_recent_cover_paths(repeat_window)
     return assign_covers(
         article_ids,
         platforms,
         cover_dir=ec.resolve_cover_dir(),
-        recent_cover_paths=(),
-        repeat_window=ec.get_cover_repeat_window(),
+        recent_cover_paths=recent_covers,
+        repeat_window=repeat_window,
     )
 
 
 def normalize_publish_option_mode(value, *, field_name: str):
     mode = str(value or "auto")
     if mode not in PUBLISH_OPTION_MODES:
-        raise ValueError(f"{field_name} 仅支持: auto / force_on / force_off")
+        raise ValueError(f"{field_name} 仅支持: auto / force_on / force_off / random")
     return mode
 
 
@@ -437,7 +564,7 @@ def _now_iso():
 
 def _browser_session_state_path(base_dir=None):
     root = Path(base_dir).resolve() if base_dir is not None else BASE_DIR
-    return root / ".tiandidistribute" / "browser-session" / "state.json"
+    return root / ".ordo" / "browser-session" / "state.json"
 
 
 def load_browser_session_state(base_dir=None):
@@ -580,13 +707,15 @@ def run_preflight_checks(
                     vps_ssh_key = env.get("VPS_SSH_KEY")
                     appid = env.get("WECHAT_APPID") or os.environ.get("WECHAT_APPID")
                     secret = env.get("WECHAT_SECRET") or os.environ.get("WECHAT_SECRET")
-                    
+
                     ssh_opts = ["-p", vps_port, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
                     if vps_ssh_key:
                         ssh_opts.extend(["-i", str(Path(vps_ssh_key).expanduser())])
-                        
+
                     test_cmd = (
                         f"cd ~/ordo-publish && "
+                        f"unset WECHAT_PROXY HTTP_PROXY HTTPS_PROXY http_proxy https_proxy && "
+                        f"export ORDO_WORKER=1 && "
                         f"if [ -f .venv/bin/python ]; then python_bin=.venv/bin/python; else python_bin=python3; fi; "
                         f"$python_bin -c 'from wechat_publisher import WeChatPublisher; p = WeChatPublisher(\"{appid}\", \"{secret}\"); p.ensure_access_token()'"
                     )
@@ -596,20 +725,7 @@ def run_preflight_checks(
                         err_msg = res.stderr.strip() or res.stdout.strip()
                         raise Exception(f"VPS 上的微信接口预检失败：{err_msg}")
                 else:
-                    # 本地执行验证检查（兼容标准/代理模式）
-                    wechat_proxy = env.get("WECHAT_PROXY") or os.environ.get("WECHAT_PROXY")
-                    if wechat_proxy:
-                        os.environ["HTTP_PROXY"] = wechat_proxy
-                        os.environ["HTTPS_PROXY"] = wechat_proxy
-
-                    from wechat_publisher import WeChatPublisher
-                    appid = env.get("WECHAT_APPID") or os.environ.get("WECHAT_APPID")
-                    secret = env.get("WECHAT_SECRET") or os.environ.get("WECHAT_SECRET")
-                    if appid and secret:
-                        publisher = WeChatPublisher(appid, secret)
-                        # 尝试拉取 token 以验证 IP 白名单是否已生效
-                        publisher.ensure_access_token()
-
+                    blockers.append("微信公众号发布必须走 VPS：secrets.env 缺少 `VPS_IP`，已拒绝本地发送。")
 
             except Exception as exc:
                 err_str = str(exc)
@@ -637,7 +753,7 @@ def run_preflight_checks(
     # 严格标题完整性审核与前缀过滤检查（拒绝发布带有无意义编号/日期的文章）
     if article_paths:
         import re
-        from tiandi_engine.importers.sources import import_file
+        from ordo_engine.importers.sources import import_file
         # 匹配无意义日期/期号/序号前缀，如 "20250728-01_"、"01_"、"1. "、"20250728." 等
         invalid_prefix_re = re.compile(r"^\s*\d{1,8}(?:[-_.]\d{1,4})*[-_.\s:：、，]+")
         for path in article_paths:
@@ -673,7 +789,7 @@ def run_preflight_checks(
             label = BROWSER_PLATFORM_LABELS.get(platform, platform)
             try:
                 state = inspect_browser_platform_state(platform, workbench[platform])
-            except (subprocess.CalledProcessError, json.JSONDecodeError, ValueError):
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
                 warnings.append(f"{label}预检读取失败，发布时再做实际判断")
             else:
                 persist_browser_session_health(root, platform, state, cdp_connection=cdp_connection)
@@ -717,7 +833,18 @@ def run_preflight_checks(
     return blockers, warnings
 
 
-def run_platform(platform, markdown_file, mode, theme_name=None):
+def run_platform(
+    platform,
+    markdown_file,
+    mode,
+    theme_name=None,
+    cover_path=None,
+    cover_mode=None,
+    ai_declaration_mode=None,
+    template_mode=None,
+    article_id=None,
+    scheduled_publish_at=None,
+):
     registry = build_platform_registry(BASE_DIR)
     result = run_platform_task(
         base_dir=BASE_DIR,
@@ -725,6 +852,12 @@ def run_platform(platform, markdown_file, mode, theme_name=None):
         markdown_file=markdown_file,
         mode=mode,
         theme_name=theme_name,
+        cover_path=cover_path,
+        cover_mode=cover_mode,
+        ai_declaration_mode=ai_declaration_mode,
+        template_mode=template_mode,
+        article_id=article_id,
+        scheduled_publish_at=scheduled_publish_at,
         registry=registry,
     )
     result["script"] = PLATFORM_SCRIPTS[platform]
@@ -1009,17 +1142,9 @@ def warm_platforms(platforms):
 
 
 def resolve_wechat_theme_mode(args, available_themes):
-    if args.wechat_theme_mode == "console":
-        return "console"
-    if args.wechat_theme_mode == "random":
-        return "random"
-    if args.wechat_theme_mode == "fixed":
-        return "fixed"
-    if args.wechat_theme_mode == "prompt":
-        return "prompt"
-    if not sys.stdin.isatty() or not available_themes:
-        return "fixed"
-    return "prompt"
+    if args.wechat_theme_mode in {"fixed", "console"}:
+        return args.wechat_theme_mode
+    return "random"
 
 
 def resolve_wechat_theme_for_article(article_path, theme_mode, available_themes, fixed_theme):
@@ -1027,11 +1152,6 @@ def resolve_wechat_theme_for_article(article_path, theme_mode, available_themes,
         theme_name = random.choice(available_themes)
         print(f"  [INFO] 随机分配微信排版主题: {theme_name}")
         return theme_name
-    if theme_mode == "prompt":
-        ans = input(
-            f"  请输入并为文章《{article_path.name}》指定微信排版主题 (直接回车默认 '{fixed_theme}'): "
-        ).strip()
-        return ans if ans else fixed_theme
     return fixed_theme
 
 
@@ -1141,12 +1261,19 @@ def wait_for_console_confirmation(target_id, expected_index, timeout_seconds=Non
 
 
 def run_console_queue(args, platforms, article_paths, available_themes):
+    args_mode = getattr(args, "mode", "draft")
+    args_wechat_theme = getattr(args, "wechat_theme", "chinese")
+    args_no_auto_launch = getattr(args, "no_auto_launch", False)
+    args_cover_mode = getattr(args, "cover_mode", "auto")
+    args_cover = getattr(args, "cover", None)
+    args_ai_declaration_mode = getattr(args, "ai_declaration_mode", "auto")
+
     session = build_session(
         article_paths=[str(path) for path in article_paths],
         platforms=platforms,
-        mode=args.mode,
+        mode=args_mode,
         available_themes=available_themes,
-        default_theme=args.wechat_theme,
+        default_theme=args_wechat_theme,
     )
     session["phase"] = "reviewing"
     session["notice"] = {
@@ -1155,6 +1282,31 @@ def run_console_queue(args, platforms, article_paths, available_themes):
         "message": "请选择当前文章的微信模板，然后点击确认发布。",
     }
     save_session(PUBLISH_CONSOLE_SESSION, session)
+
+    path_to_id = {p.resolve(): article_id_for_path(p, i) for i, p in enumerate(article_paths)}
+    article_ids = tuple(path_to_id.values())
+    cover_assignments = ()
+    if args_cover_mode != "force_off":
+        if args_cover:
+            from ordo_engine.models.workbench import CoverAssignment
+            cov_p = Path(args_cover).expanduser().resolve()
+            cover_assignments = tuple(
+                CoverAssignment(
+                    article_id=aid,
+                    platform=platform,
+                    cover_path=cov_p,
+                    cover_source="manual",
+                    is_random=False,
+                    is_manual_override=True,
+                )
+                for aid in article_ids for platform in platforms
+            )
+        else:
+            cover_assignments = build_cover_assignments_for_articles(BASE_DIR, article_ids, platforms)
+
+    cover_by_pair = {}
+    for ca in cover_assignments or ():
+        cover_by_pair[(ca.article_id, ca.platform)] = ca.cover_path
 
     console_target = None
     results = []
@@ -1181,12 +1333,12 @@ def run_console_queue(args, platforms, article_paths, available_themes):
         save_session(PUBLISH_CONSOLE_SESSION, session)
         render_publish_console_page(bundle, session, PUBLISH_CONSOLE_HTML)
 
-        console_target = ensure_console_target(auto_launch=not args.no_auto_launch)
+        console_target = ensure_console_target(auto_launch=not args_no_auto_launch)
         wait_for_console_ready(console_target)
         sync_console_state(console_target, session)
 
         action = wait_for_console_confirmation(console_target, index)
-        chosen_theme = action.get("theme") or args.wechat_theme
+        chosen_theme = action.get("theme") or args_wechat_theme
         item["selected_theme"] = chosen_theme
         session["current_theme"] = chosen_theme
         session["phase"] = "publishing"
@@ -1206,11 +1358,21 @@ def run_console_queue(args, platforms, article_paths, available_themes):
         print(article_path)
         print(f"[INFO] 主控台已确认微信模板: {chosen_theme}")
 
+        aid = path_to_id.get(Path(article_path).resolve())
         for platform in platforms:
             theme_name = chosen_theme if platform == "wechat" else None
-            result = run_platform(platform, str(article_path), args.mode, theme_name=theme_name)
+            cover_path = cover_by_pair.get((aid, platform))
+            result = run_platform(
+                platform,
+                str(article_path),
+                args_mode,
+                theme_name=theme_name,
+                cover_path=cover_path,
+                cover_mode=args_cover_mode,
+                ai_declaration_mode=args_ai_declaration_mode,
+            )
             result["article"] = str(article_path)
-            result["mode"] = args.mode
+            result["mode"] = args_mode
             result["status"] = classify_result(result)
             results.append(result)
             append_publish_record(result)
@@ -1267,7 +1429,7 @@ def run_console_queue(args, platforms, article_paths, available_themes):
     return results
 
 
-def main():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Publish one or many Markdown articles to multiple platforms.")
     parser.add_argument("markdown_path", help="Markdown 文件或目录路径")
     parser.add_argument(
@@ -1319,20 +1481,20 @@ def main():
     )
     parser.add_argument(
         "--wechat-theme",
-        default="chinese",
-        help="微信默认主题名，非交互模式下直接使用；默认 chinese",
+        default=None,
+        help="微信默认主题名，非交互模式下直接使用；默认从 config.json 获取，或回退到 chinese",
     )
     parser.add_argument(
         "--wechat-theme-mode",
-        choices=["auto", "prompt", "random", "fixed", "console"],
-        default="auto",
-        help="微信主题分配方式：auto 自动判断；prompt 每篇手动输入；random 随机；fixed 固定使用 --wechat-theme；console 浏览器逐篇预览确认",
+        choices=["auto", "random", "fixed", "console"],
+        default=None,
+        help="微信主题分配方式：auto/random 随机；fixed 固定使用 --wechat-theme；console 浏览器逐篇预览确认；默认从 config.json 获取，或回退到 auto",
     )
     parser.add_argument(
         "--cover-mode",
         choices=list(PUBLISH_OPTION_MODES),
-        default="auto",
-        help="任务级封面策略：auto 使用默认逻辑；force_on 强制要求封面；force_off 跳过封面设置",
+        default="random",
+        help="任务级封面策略：random 随机；auto 使用默认逻辑；force_on 强制要求封面；force_off 跳过封面设置",
     )
     parser.add_argument(
         "--cover",
@@ -1345,10 +1507,200 @@ def main():
         default="auto",
         help="任务级 AI 声明策略：auto 使用默认逻辑；force_on 强制要求声明；force_off 跳过声明设置",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--remote",
+        choices=["local", "vps"],
+        default="local",
+        help="运行模式：local 本地直接执行；vps 上传到 VPS 异步托管执行",
+    )
+    parser.add_argument(
+        "--vps-host",
+        default="127.0.0.1",
+        help="VPS 的 IP 地址或域名，默认 127.0.0.1",
+    )
+    parser.add_argument(
+        "--vps-user",
+        default="root",
+        help="SSH 登录 VPS 的用户名，默认 root",
+    )
+    parser.add_argument(
+        "--vps-path",
+        default="/root/ordo-publish-runtime/repo",
+        help="VPS 上的代码库绝对路径，默认 /root/ordo-publish-runtime/repo",
+    )
+    parser.add_argument(
+        "--skip-published",
+        action="store_true",
+        help="读取 Ordo_Scribe_AI创作看板.md，跳过看板中已发表的文章",
+    )
+    return parser.parse_args(argv)
+
+
+def main():
+    args = parse_args()
+
+    # Load defaults from config.json if not specified
+    config_defaults = {}
+    try:
+        engine_config = load_engine_config(BASE_DIR)
+        config_defaults = engine_config.project_config.get("terminal_wizard", {}).get("defaults", {})
+    except Exception as e:
+        print(f"[WARN] 无法从 config.json 加载默认排版配置: {e}")
+
+    if args.wechat_theme is None:
+        args.wechat_theme = config_defaults.get("wechat_theme") or "chinese"
+    if args.wechat_theme_mode is None:
+        args.wechat_theme_mode = config_defaults.get("wechat_theme_mode") or "auto"
 
     platforms = parse_platforms(args.platform)
     article_paths = collect_markdown_files(args.markdown_path, offset=args.offset, limit=args.limit)
+    article_paths = maybe_filter_already_published_articles(
+        article_paths,
+        args.markdown_path,
+        skip_published=args.skip_published,
+    )
+    if not article_paths:
+        print("[INFO] 所有文章均已发布，没有需要处理的文章。任务结束。")
+        return
+
+    if args.remote == "vps":
+        print(f"[INFO] 启用了远端托管模式 (VPS-First Pipeline)")
+        print(f"[INFO] 远端主机: {args.vps_user}@{args.vps_host}")
+        print(f"[INFO] 远端路径: {args.vps_path}")
+
+        # 1. 校验本地与远端代码版本
+        from ordo_engine.runner.version import verify_codebase_version
+        match, local_commit, remote_commit = verify_codebase_version(
+            ssh_host=args.vps_host,
+            ssh_user=args.vps_user,
+            remote_path=args.vps_path
+        )
+        if not match:
+            print(f"\n[WARNING] 本地与远端代码版本不一致！")
+            print(f"  本地 Commit: {local_commit}")
+            print(f"  远端 Commit: {remote_commit}")
+            print(f"  建议在 VPS 上执行 git pull 同步最新发布适配器代码。")
+            ans = input("是否忽略版本差异继续发布？[y/N]: ").strip().lower()
+            if ans != 'y':
+                print("[INFO] 任务已取消。")
+                return
+        else:
+            print("[INFO] 代码版本校验通过，本地与远端完全一致。")
+
+        # 2. 本地封面池预分配
+        article_ids = tuple(article_id_for_path(p, i) for i, p in enumerate(article_paths))
+        cover_assignments = ()
+        if args.cover_mode != "force_off":
+            if args.cover:
+                from ordo_engine.models.workbench import CoverAssignment
+                cover_path = Path(args.cover).expanduser().resolve()
+                if not cover_path.is_file():
+                    raise FileNotFoundError(f"封面文件不存在: {cover_path}")
+                cover_assignments = tuple(
+                    CoverAssignment(
+                        article_id=aid,
+                        platform=platform,
+                        cover_path=cover_path,
+                        cover_source="manual",
+                        is_random=False,
+                        is_manual_override=True,
+                    )
+                    for aid in article_ids for platform in platforms
+                )
+            else:
+                cover_assignments = build_cover_assignments_for_articles(BASE_DIR, article_ids, platforms)
+
+        cover_mapping = {}
+        for ca in cover_assignments:
+            for idx, p in enumerate(article_paths):
+                if article_id_for_path(p, idx) == ca.article_id:
+                    cover_mapping.setdefault(p.stem, {})[ca.platform] = ca.cover_path
+
+        # 3. 本地打包 Bundle
+        from ordo_engine.runner.bundle import create_publish_bundle, upload_bundle_to_vps
+        bundle_name = f"bundle_{int(time.time())}.zip"
+        local_bundle_path = Path(tempfile.gettempdir()) / bundle_name
+
+        print(f"[INFO] 正在本地生成任务包: {local_bundle_path}")
+        create_publish_bundle(
+            article_paths=article_paths,
+            cover_mapping=cover_mapping,
+            platforms=platforms,
+            mode=args.mode,
+            output_zip_path=local_bundle_path,
+        )
+
+        # 4. 上传任务包至 VPS
+        remote_runtime_root = Path(args.vps_path).parent
+        remote_inbox_path = str(remote_runtime_root / "data" / "inbox" / bundle_name)
+        print(f"[INFO] 正在上传任务包至远端: {remote_inbox_path}")
+        try:
+            upload_bundle_to_vps(
+                zip_path=local_bundle_path,
+                remote_path=remote_inbox_path,
+                ssh_host=args.vps_host,
+                ssh_user=args.vps_user,
+            )
+            print("[SUCCESS] 任务包上传成功！")
+        except Exception as e:
+            print(f"[ERROR] 上传任务包失败: {e}")
+            return
+        finally:
+            if local_bundle_path.exists():
+                local_bundle_path.unlink()
+
+        # 5. 在远端执行发布任务
+        from ordo_engine.runner.executor import RemoteSubprocessExecutor
+        remote_executor = RemoteSubprocessExecutor(
+            ssh_host=args.vps_host,
+            ssh_user=args.vps_user,
+            remote_cwd=args.vps_path,
+            proxy_tunnel="7890:127.0.0.1:7890"
+        )
+
+        import shlex
+        remote_cmd = [
+            "bash",
+            "-c",
+            f"if [ -f .venv/bin/python ]; then .venv/bin/python ordo_worker.py run-job {shlex.quote(remote_inbox_path)}; else python3 ordo_worker.py run-job {shlex.quote(remote_inbox_path)}; fi"
+        ]
+
+        print(f"\n[INFO] 正在远端启动发布任务，开启本地 Clash 代理反向隧道...")
+        print("------------------- VPS 运行输出开始 -------------------")
+        res = remote_executor.execute(remote_cmd, timeout=900)
+        if res["stdout"]:
+            print(res["stdout"])
+        print("------------------- VPS 运行输出结束 -------------------")
+
+        # 6. 清理远端 inbox 临时文件
+        cleanup_cmd = ["rm", "-f", remote_inbox_path]
+        cleanup_res = remote_executor.execute(cleanup_cmd, timeout=15)
+        if cleanup_res["returncode"] == 0:
+            print(f"[INFO] 已清理远端临时文件: {remote_inbox_path}")
+        else:
+            print(f"[WARN] 远端临时文件清理失败（可手动删除）: {remote_inbox_path}")
+
+        if res["returncode"] == 0:
+            print(f"\n[SUCCESS] 远端托管发布任务成功完成！")
+        else:
+            print(f"\n[ERROR] 远端托管发布任务失败，退出码: {res['returncode']}")
+            if res["stderr"]:
+                print(f"Stderr:\n{res['stderr']}")
+
+            remote_output = "\n".join(filter(None, [res.get("stdout", ""), res.get("stderr", "")]))
+            if "login_required" in remote_output or "登录已失效" in remote_output:
+                print("\n" + "="*80)
+                print("[WARNING] 检测到远端平台发文需要人工协助登录！")
+                print("请单独在本地终端中运行以下命令建立安全调试隧道：")
+                print(f"  ssh -N -L 9999:127.0.0.1:9333 {args.vps_user}@{args.vps_host}")
+                print("然后在本地 Chrome 浏览器中访问：")
+                print("  http://127.0.0.1:9999/json")
+                print("或在本地 Chrome 中打开开发者工具 (DevTools) -> More tools -> Remote devices，添加 'localhost:9999'，并在本地打开对应域名的 Inspect 窗口，完成扫码登录或滑块验证。")
+                print("安全验证完成后，请在本地通过再次运行发布命令，或在远端执行 `python3 ordo_worker.py resume` 来恢复任务。")
+                print("="*80 + "\n")
+            raise SystemExit(1)
+        return
+
     results = []
 
     print(f"[INFO] 准备执行平台: {', '.join(platforms)}")
@@ -1413,20 +1765,6 @@ def main():
             available_themes = sorted(f.stem for f in theme_dir.glob("*.json"))
 
         theme_mode = resolve_wechat_theme_mode(args, available_themes)
-        if theme_mode == "prompt":
-            while True:
-                ans = input(
-                    "\n请选择微信排版主题分配方式:\n1. 为每篇文章自定义主题 (手动输入)\n2. 为每篇文章随机分配主题\n3. 全部使用固定主题\n请选择 [1/2/3]: "
-                ).strip()
-                if ans == "1":
-                    theme_mode = "prompt"
-                    break
-                if ans == "2":
-                    theme_mode = "random"
-                    break
-                if ans == "3":
-                    theme_mode = "fixed"
-                    break
 
     if theme_mode == "console":
         results = run_console_queue(args, platforms, article_paths, available_themes)
@@ -1454,7 +1792,7 @@ def main():
     cover_assignments = ()
     if args.cover_mode != "force_off":
         if args.cover:
-            from tiandi_engine.models.workbench import CoverAssignment
+            from ordo_engine.models.workbench import CoverAssignment
             cover_path = Path(args.cover).expanduser().resolve()
             if not cover_path.is_file():
                 raise FileNotFoundError(f"封面文件不存在: {cover_path}")

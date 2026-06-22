@@ -21,7 +21,8 @@ class BrowserPublisherBehaviorTests(unittest.TestCase):
 
         args = mocked_wait.call_args.args
         self.assertEqual(args[0], "target-1")
-        self.assertIn("草稿保存中", args[1])
+        self.assertIn("草稿已保存", args[1])
+
 
     def test_toutiao_wait_for_cover_upload_accepts_uploaded_signal(self):
         with patch.object(toutiao_publisher, "wait_until", return_value=True) as mocked_wait:
@@ -145,7 +146,7 @@ class BrowserPublisherBehaviorTests(unittest.TestCase):
         ), patch.object(
             toutiao_publisher, "choose_required_radio", return_value="clicked"
         ), patch.object(
-            toutiao_publisher, "attempt_ai_declaration", return_value="checked"
+            toutiao_publisher, "ensure_ai_declaration", return_value="checked"
         ), patch.object(
             toutiao_publisher, "click_button_with_fallback", return_value="clicked"
         ) as mocked_click, patch.object(
@@ -154,6 +155,10 @@ class BrowserPublisherBehaviorTests(unittest.TestCase):
             toutiao_publisher, "detect_publish_limit", return_value=None
         ), patch.object(
             toutiao_publisher, "wait_for_scheduled_publish", return_value=True
+        ), patch.object(
+            toutiao_publisher, "verify_in_management_list"
+        ), patch.object(
+            toutiao_publisher, "take_screenshot"
         ), patch.object(
             toutiao_publisher, "emit_smoke_state", return_value=None
         ):
@@ -256,11 +261,17 @@ class BrowserPublisherBehaviorTests(unittest.TestCase):
         ), patch.object(
             yidian_publisher, "ensure_content_statement", return_value={"found": True, "checked": True}
         ) as mocked_statement, patch.object(
+            yidian_publisher, "scroll_settings_into_view"
+        ), patch.object(
             yidian_publisher, "select_default_cover", return_value="selected-default"
         ) as mocked_cover, patch.object(
             yidian_publisher, "wait_for_default_cover", return_value=True
         ) as mocked_wait_cover, patch.object(
             yidian_publisher, "click_action", return_value="clicked"
+        ), patch.object(
+            yidian_publisher, "verify_in_management_list"
+        ), patch.object(
+            yidian_publisher, "take_screenshot"
         ), patch.object(
             yidian_publisher, "emit_smoke_state", return_value=None
         ):

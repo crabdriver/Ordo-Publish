@@ -1,6 +1,6 @@
 {
-  "output_dir": "./.tiandidistribute/wechat-format",
-  "selected_theme_file": "./.tiandidistribute/wechat-format/selected-theme.txt",
+  "output_dir": "./.ordo/wechat-format",
+  "selected_theme_file": "./.ordo/wechat-format/selected-theme.txt",
   "vault_root": "./my_articles",
   "image_search_paths": [],
   "settings": {

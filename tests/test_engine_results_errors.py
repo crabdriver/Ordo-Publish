@@ -3,10 +3,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tiandi_engine.config import EngineConfig, load_engine_config
-from tiandi_engine.models.task import build_task_spec
-from tiandi_engine.results.errors import ErrorType, is_blocking_error, is_retryable_error
-from tiandi_engine.results.record import ExecutionResult
+from ordo_engine.config import EngineConfig, load_engine_config
+from ordo_engine.models.task import build_task_spec
+from ordo_engine.results.errors import ErrorType, is_blocking_error, is_retryable_error
+from ordo_engine.results.record import ExecutionResult
 
 
 class EngineTaskModelTests(unittest.TestCase):
@@ -57,7 +57,7 @@ class EngineConfigTests(unittest.TestCase):
         self.assertTrue(browser_session["enabled"])
         self.assertEqual(browser_session["debug_port"], 9333)
         self.assertEqual(browser_session["remind_after_days"], 5)
-        self.assertIn(".tiandidistribute", browser_session["profile_dir"])
+        self.assertIn(".ordo", browser_session["profile_dir"])
 
     def test_browser_session_allows_config_override(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -172,7 +172,7 @@ class EngineConfigTests(unittest.TestCase):
 
         self.assertEqual(config.resolve_wechat_credentials(), ("env-app", "env-secret", "env-author"))
 
-    def test_load_engine_config_falls_back_to_shared_desktop_repo_env_file(self):
+    def test_load_engine_config_falls_back_to_shared_runtime_repo_env_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             base_dir = root / "repo"

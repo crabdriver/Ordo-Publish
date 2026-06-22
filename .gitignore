@@ -18,7 +18,15 @@ dist/
 # Local data & temporary files
 logs/
 .worktrees/
-.tiandidistribute/
+.ordo/
+data/*.db
+data/*.db-*
+data/*.pid
+data/inbox/
+data/jobs/
+data/logs/
+data/local_browser_profile/
+browser/profile/
 covers/
 .firecrawl/
 .superpowers/
@@ -33,6 +41,7 @@ publish_records.csv
 *.md
 !README.md
 !README_EN.md
+!docs/*.md
 !docs/manual-validation/*.md
 !requirements.txt
 *.docx
@@ -47,6 +56,4 @@ docs/superpowers/
 # One-off personal scripts (not part of public API)
 scripts/run_real_publish_*.sh
 scripts/run_real_publish_*.py
-scripts/deploy_vps.sh
 scripts/setup_ssh_key.py
-

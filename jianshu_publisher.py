@@ -6,9 +6,9 @@ import subprocess
 import time
 from pathlib import Path
 
-from markdown_utils import normalize_markdown_source
-from tiandi_engine.importers.normalize import strip_title_marker
-from tiandi_engine.platforms.browser.node_runtime import resolve_node_executable
+from markdown_utils import normalize_markdown_source, should_declare_ai
+from ordo_engine.importers.normalize import strip_title_marker
+from ordo_engine.platforms.browser.node_runtime import resolve_node_executable
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -16,7 +16,7 @@ CDP_SCRIPT = BASE_DIR / "live_cdp.mjs"
 JIANSHU_MATCH = "jianshu.com"
 JIANSHU_WRITER_URL = "https://www.jianshu.com/writer#/"
 AI_KEYWORDS = ["AI创作", "AI辅助", "AIGC", "人工智能生成", "AI生成", "AI工具", "使用AI"]
-PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off")
+PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off", "random")
 
 
 def clean_title(title):
@@ -54,6 +54,45 @@ def run_cdp(command, *args, timeout=120):
         raise RuntimeError(f"CDP call timed out after {timeout}s: {command} {args}") from exc
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"CDP call failed ({command}): exit={exc.returncode}, stderr={exc.stderr[:500]}") from exc
+
+
+def take_screenshot(target_id, step):
+    if not target_id:
+        return
+    try:
+        timestamp = int(time.time() * 1000)
+        screenshot_dir = BASE_DIR / ".ordo" / "screenshots" / "jianshu"
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        filepath = screenshot_dir / f"{timestamp}_{step}.png"
+        run_cdp("shot", target_id, str(filepath))
+        print(f"[INFO] [SCREENSHOT] Saved to: {filepath}")
+    except Exception as e:
+        print(f"[WARN] 截图失败 ({step}): {e}")
+
+
+def verify_in_management_list(target_id, expected_title, is_draft=False):
+    management_url = "https://www.jianshu.com/writer#/"
+    print(f"[INFO] 正在跳转至简书写作管理页面进行校验: {management_url}")
+    run_cdp("nav", target_id, management_url)
+    title_json = json.dumps(expected_title, ensure_ascii=False)
+    list_ready_expr = """
+(() => {
+  const normalize = (t) => (t || '').replace(/\\s+/g, '');
+  const target = normalize(""" + title_json + """);
+  const els = Array.from(document.querySelectorAll('ul._2TxA- span, ul._2TxA- li, a, div, span'));
+  const found = els.find(el => {
+    const txt = normalize(el.innerText || el.textContent || '');
+    return txt.includes(target) && el.offsetHeight > 0;
+  });
+  return !!found;
+})()
+"""
+    print(f"[INFO] 正在校验列表是否包含文章标题：《{expected_title}》...")
+    success = wait_until(target_id, list_ready_expr, timeout_seconds=15, interval_seconds=1)
+    take_screenshot(target_id, "verified_list")
+    if not success:
+        raise RuntimeError(f"双重校验失败：未能在简书文章列表中找到文章《{expected_title}》")
+    print(f"[INFO] 双重校验成功：在文章列表中成功检索到文章《{expected_title}》！")
 
 
 def list_jianshu_targets():
@@ -373,6 +412,82 @@ def attempt_ai_declaration(target_id):
     return result
 
 
+def apply_jianshu_cover(target_id, cover_path):
+    print(f"[INFO] 正在为简书上传封面/插入头部图片: {cover_path}")
+    # 1. Click upload button
+    click_expression = """
+(() => {
+  const btn = document.querySelector('a.fa.fa-picture-o');
+  if (btn) {
+    btn.click();
+    return 'clicked';
+  }
+  return 'not-found';
+})()
+"""
+    click_res = run_cdp("eval", target_id, click_expression)
+    if click_res != "clicked":
+        raise RuntimeError("未找到简书编辑器图片上传按钮 `a.fa.fa-picture-o`")
+
+    # 2. Wait for input#kalamu-upload-image[type=file]
+    input_ready = wait_until(
+        target_id,
+        "(() => !!document.querySelector('input#kalamu-upload-image'))()",
+        timeout_seconds=5
+    )
+    if not input_ready:
+        raise RuntimeError("未在页面中找到简书图片上传文件控件 `input#kalamu-upload-image`")
+
+    # 3. Upload file using setfile
+    print("[INFO] 向 input#kalamu-upload-image 注入封面文件路径 …")
+    setfile_res = run_cdp("setfile", target_id, "input#kalamu-upload-image", str(cover_path))
+    print(f"[INFO] setfile 注入结果: {setfile_res}")
+
+    # 4. Poll textarea value for the inserted Markdown link.
+    print("[INFO] 等待简书图片上传完成并生成 CDN 链接 …")
+    uploaded_link = None
+    for _ in range(40):
+        val = run_cdp("eval", target_id, "(() => document.querySelector('textarea._3swFR.source')?.value || '')()")
+        match = re.search(r"!\[.*?\]\(https?://upload-images\.jianshu\.io/upload_images/[^)]+\)", val)
+        if match:
+            uploaded_link = match.group(0)
+            break
+        time.sleep(0.5)
+
+    if not uploaded_link:
+        raise RuntimeError("上传封面超时，简书未返回 CDN 图片链接")
+
+    print(f"[INFO] 成功捕获简书封面 CDN 链接: {uploaded_link}")
+
+    # 5. Remove the link from its current position and prepend it to the top.
+    reposition_js = f"""
+(() => {{
+  const source = document.querySelector('textarea._3swFR.source');
+  if (!source) return 'missing-textarea';
+  const val = source.value;
+  const linkText = {json.dumps(uploaded_link, ensure_ascii=False)};
+
+  let cleaned = val.replace(linkText, '');
+  cleaned = cleaned.trim();
+  const newVal = linkText + '\\n\\n' + cleaned;
+
+  const textSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
+  if (textSetter) {{
+    textSetter.call(source, newVal);
+  }} else {{
+    source.value = newVal;
+  }}
+
+  source.dispatchEvent(new Event('input', {{ bubbles: true }}));
+  source.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  return 'ok';
+}})()
+"""
+    repo_res = run_cdp("eval", target_id, reposition_js)
+    print(f"[INFO] 封面图重置首行状态: {repo_res}")
+    return uploaded_link
+
+
 def main():
     parser = argparse.ArgumentParser(description="Publish Markdown article to Jianshu using live Chrome.")
     parser.add_argument("markdown_file", help="Markdown article path")
@@ -421,14 +536,8 @@ def main():
     args = parser.parse_args()
     _ = (args.theme, args.template_mode, args.article_id, args.cover_mode, args.ai_declaration_mode)
 
-    if args.cover_mode == "force_on":
-        raise RuntimeError("简书当前没有稳定可用的封面上传入口，暂不支持 `封面: 强制开启`。")
-
-    if args.cover:
-        raise RuntimeError(
-            "简书写作页当前没有稳定可用的封面图上传入口，无法使用编排层传入的 --cover。"
-            "请从 `--platform` 中移除 jianshu，或取消为简书分配封面后再试。"
-        )
+    if args.cover_mode == "force_on" and not args.cover:
+        raise RuntimeError("简书已要求启用封面，但当前任务没有可用封面路径")
 
     title, _body, source_html, article_path = load_article(args.markdown_file)
     target_id = find_jianshu_target()
@@ -463,20 +572,29 @@ def main():
         raise RuntimeError(f"简书正文/标题注入异常: {inject_result}")
     print(f"[INFO] 已写入简书编辑器: {inject_result}")
 
-    if args.ai_declaration_mode != "force_off":
+    if args.cover_mode != "force_off" and args.cover:
+        apply_jianshu_cover(target_id, args.cover)
+        take_screenshot(target_id, "cover_ready")
+
+    need_ai_declaration = should_declare_ai(title, source_html, args.ai_declaration_mode)
+    if need_ai_declaration:
         attempt_ai_declaration(target_id)
     else:
-        print("[INFO] 已显式关闭简书 AI 创作声明设置")
+        print("[INFO] 跳过或已显式关闭简书 AI 创作声明设置")
+    take_screenshot(target_id, "ai_declared")
 
     if args.mode == "draft":
         if not editor_content_ready(target_id, title, timeout_seconds=20):
             raise RuntimeError("未检测到简书自动保存提示")
+        take_screenshot(target_id, "draft_saved")
+        verify_in_management_list(target_id, title, is_draft=True)
         print(f"[OK] 已生成简书草稿: {article_path}")
         return
 
     if not editor_content_ready(target_id, title, timeout_seconds=20):
         raise RuntimeError("简书正文尚未保存完成，暂不发布")
 
+    take_screenshot(target_id, "before_publish")
     click_publish_article(target_id)
     if not published_state_visible(target_id, timeout_seconds=4, interval_seconds=1):
         click_publish_article(target_id)
@@ -513,9 +631,12 @@ def main():
 
     if wait_for_text(target_id, "每天只能发布 2 篇公开文章", timeout_seconds=2) or wait_for_text(target_id, "达到发布上限", timeout_seconds=2):
         print(f"[WARN] 简书今日公开文章发布次数已达上限，已自动保留为草稿箱草稿")
+        verify_in_management_list(target_id, title, is_draft=True)
         print(f"[OK] 已生成简书草稿: {article_path}")
         return
 
+    take_screenshot(target_id, "published")
+    verify_in_management_list(target_id, title, is_draft=False)
     print(f"[OK] 已发布到简书: {article_path}")
 
 

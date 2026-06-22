@@ -1,140 +1,47 @@
-# 🚀 Ordo-Publish
+# Ordo-Publish
 
-**Ordo-Publish** is a local multi-platform publishing engine of the Ordo Creator Suite for Chinese-language creators. It treats Markdown as the single source of truth, then prepares and distributes the same article to WeChat, Zhihu, Toutiao, Jianshu, Yidian, and similar platforms with far less repeated login, formatting, and copy-paste work.
+**Ordo-Publish** is a local multi-platform publishing engine for Markdown-first Chinese-language creators. It prepares and distributes one article to WeChat, Zhihu, Toutiao, Jianshu, Yidian, Bilibili columns, and similar platforms with less repeated formatting and copy-paste work.
 
-The current repository already includes a runnable desktop workbench MVP on top of the local CLI and engine workflow, and the official direction remains to harden that core into a native desktop application for `macOS` and `Windows`.
+The project is now **terminal / CLI first**. The historical desktop shell has been removed, and this repository no longer targets a macOS / Windows desktop product. Some internal modules still use the `workbench` name because the terminal TUI and engine reuse those import, planning, preflight, and recovery utilities.
 
-The current automation boundary is explicit: `ordo` assumes the user already has valid platform login sessions, and the system handles article loading, content transformation, editor injection, draft or publish actions, result recording, and failure recovery. It does not promise automatic login, CAPTCHA handling, or anti-risk bypass behavior.
-
-Compatibility note: some internal paths and cache directories still use `.tiandidistribute/` for backward compatibility with the existing workflow and stored state, while the public project is now **Ordo-Publish** (invoked via CLI as `ordo`).
+Automation boundary: Ordo assumes the user already has valid platform sessions. It handles article loading, content transformation, editor injection, draft or publish actions, result recording, and failure recovery. It does not promise automatic login, CAPTCHA handling, or anti-risk bypass behavior.
 
 [中文说明](README.md)
 
 ## Why It Is Useful
 
 - One Markdown source for multiple platforms
-- A full WeChat theme system with local preview and gallery mode
-- AI cover generation is enabled by default when configured
-- Browser platforms now default to an Ordo-managed browser session: log in once, then keep reusing it with expiry reminders
-- Browser-platform tasks can now explicitly choose `cover / AI declaration` mode: `auto` / `force_on` / `force_off`
-- Comment auto-reply stays as an independent tool instead of polluting the main publishing flow
-- The repository has been cleaned for public release: no real keys, no personal paths, no local scheduler setup
+- WeChat themes are random by default, so articles do not all share the same visual style
+- Covers are random by default from the cover pool
+- Cover assignment supports WeChat, Zhihu, Toutiao, Yidian, and Bilibili columns
+- Browser platforms reuse an Ordo-managed Chrome profile after first login
+- Browser-platform tasks can choose `cover / AI declaration`: `auto` / `force_on` / `force_off`
+- Toutiao publish mode supports scheduled publishing
+- VPS-managed publishing supports a task queue, platform-limit deferral, and daemon-based auto resume
+- Comment auto-reply remains an independent tool
 
 ## Included Tools
 
-- `ordo`: Homebrew-style fullscreen terminal publishing entry, now the recommended primary entry
-- `scripts/terminal_wizard.py`: compatibility launcher kept for source-tree usage
+- `ordo`: Homebrew-style fullscreen terminal publishing entry
+- `scripts/terminal_wizard.py`: source-tree compatibility launcher
 - `publish.py`: unified multi-platform entry
-- `tiandi_engine/`: core local publishing engine package for tasks, config, state, results, adapters, and runner
-- `wechat_publisher.py`: WeChat-focused publishing flow
-- `zhihu_publisher.py`
-- `toutiao_publisher.py`
-- `jianshu_publisher.py`
-- `yidian_publisher.py`
-- `scripts/format.py`: formatting, preview, and theme gallery
-- `scripts/publish.py`: publish formatted output to WeChat drafts
+- `ordo_engine/`: core local publishing engine
+- `wechat_publisher.py`: WeChat publishing
+- `zhihu_publisher.py`: Zhihu publishing
+- `toutiao_publisher.py`: Toutiao publishing
+- `jianshu_publisher.py`: Jianshu publishing
+- `yidian_publisher.py`: Yidian publishing
+- `bilibili_publisher.py`: Bilibili column publishing
+- `ordo_worker.py`: VPS task queue, deferred publishing, daemon, and status report
+- `scripts/format.py`: WeChat formatting, preview, and theme gallery
+- `scripts/publish.py`: push formatted output to WeChat drafts
 - `scripts/generate.py`: AI image generation
-- `reply_comments.py`: WeChat comment auto-reply entry
-- `themes/`: theme library
-- `templates/`: preview templates
+- `reply_comments.py`: WeChat comment auto-reply
 - `live_cdp.mjs`: CDP browser bridge
-
-## Project Structure
-
-- `publish.py`: public CLI entry, now routed through the shared `tiandi_engine` runner
-- `tiandi_engine/`: engine core for task models, config, state recovery, platform adapters, and orchestration
-- `wechat_publisher.py`: compatibility CLI entry for the WeChat publishing flow
-- `scripts/`: standalone tools for formatting, WeChat draft publishing, image generation, and auxiliary workflows
-- `themes/`: WeChat theme library
-- `templates/`: local preview and gallery templates
-- `markdown_utils.py`: shared Markdown transformation utilities
 
 ## Install
 
-If you want the end-user `ordo` command, use the Homebrew-style terminal install path described below.
-
-The command below is only for source-tree development or debugging:
-
-```bash
-python3 -m pip install -r requirements.txt
-```
-
-You also need Chrome or Chromium for browser-platform publishing.
-
-## Configuration
-
-### Browser managed session
-
-By default, Ordo now prefers its managed browser session:
-
-- profile directory: `.tiandidistribute/browser-session/profile`
-- fixed debugging port: `9333`
-- session state file: `.tiandidistribute/browser-session/state.json`
-
-You can override it in `config.json`:
-
-```json
-{
-  "browser_session": {
-    "enabled": true,
-    "remind_after_days": 5,
-    "profile_dir": ".tiandidistribute/browser-session/profile",
-    "debug_port": 9333
-  }
-}
-```
-
-### 1. Main WeChat publishing flow
-
-```bash
-cp secrets.env.example secrets.env
-```
-
-Fill:
-
-```env
-WECHAT_APPID=your_appid
-WECHAT_SECRET=your_secret
-WECHAT_AUTHOR=your_author_name
-```
-
-### 2. AI and formatting toolchain
-
-```bash
-cp config.example.json config.json
-```
-
-Fill the real values for:
-
-- `settings.base_url`
-- `settings.model`
-- `secrets.api_key`
-- `ai.url`
-- `ai.api_key`
-- `ai.model`
-
-### 3. AI cover default behavior
-
-Default strategy:
-
-1. Try AI cover generation first
-2. Fallback to local `covers/cover_*.png`
-
-If you want to disable AI-first behavior:
-
-```json
-"cover": {
-  "prefer_ai_first": false
-}
-```
-
-## Quick Start
-
-### Homebrew-style Terminal TUI (Recommended)
-
-The terminal flow is now the preferred primary entry. The desktop workbench remains in the repository, but new feature work is paused there and the focus moves to the terminal-first workflow.
-
-Install it with:
+Install the terminal command:
 
 ```bash
 bash scripts/install_ordo.sh
@@ -146,104 +53,84 @@ or directly:
 brew install --formula ./Formula/ordo.rb
 ```
 
-Then run:
+For source-tree development:
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+Chrome or Chromium is required for browser-platform publishing.
+
+## Configuration
+
+WeChat credentials:
+
+```bash
+cp secrets.env.example secrets.env
+```
+
+```env
+WECHAT_APPID=your_appid
+WECHAT_SECRET=your_secret
+WECHAT_AUTHOR=your_author_name
+```
+
+AI and toolchain:
+
+```bash
+cp config.example.json config.json
+```
+
+Managed browser session defaults:
+
+- profile: `.ordo/browser-session/profile`
+- debug port: `9333`
+- state file: `.ordo/browser-session/state.json`
+
+Override in `config.json`:
+
+```json
+{
+  "browser_session": {
+    "enabled": true,
+    "remind_after_days": 5,
+    "profile_dir": ".ordo/browser-session/profile",
+    "debug_port": 9333
+  }
+}
+```
+
+## Random Themes And Covers
+
+Default publishing behavior:
+
+- WeChat theme: random by default; use `--wechat-theme-mode fixed --wechat-theme chinese` to pin it
+- Cover: random from `covers/`, with recent-history avoidance where possible
+- Cover-capable platforms: WeChat, Zhihu, Toutiao, Yidian, Bilibili
+- `--cover-mode force_off` skips cover setup
+- `--cover-mode force_on` fails early when no usable cover exists
+- `--cover PATH` uses a manual cover for the current run
+
+Cover pool config:
+
+```json
+{
+  "assignment": {
+    "cover_dir": "covers",
+    "cover_repeat_window": 8
+  }
+}
+```
+
+## Quick Start
+
+Launch the TUI:
 
 ```bash
 ordo
 ```
 
-The command launches a fullscreen TUI for article path, platform selection, `draft/publish`, cover mode, AI declaration mode, failure continuation, and default persistence.
-
-On first launch, the command syncs its runtime template into `~/Library/Application Support/com.ordo.cli/runtime/repo`. Credentials stay in `secrets.env`, defaults stay in `config.json` under `terminal_wizard.defaults`, and runtime state continues under `.tiandidistribute/` inside that runtime repo. Use `ORDO_HOME` to override the base directory.
-
-If preflight blocks the task or the run ends partially failed, the TUI prints the retry-queue path and tells you to re-run `ordo` using the saved defaults and the generated queue as your narrowing guide.
-
-This terminal-first flow is currently macOS-first. Windows is only kept as a compatibility target for future follow-up, not as a full first-class delivery in this round.
-
-### Desktop Workbench MVP
-
-The desktop workbench lives in `desktop/` and uses a `Tauri + Rust` shell on top of the Python publishing engine in the repository root.
-
-First start:
-
-```bash
-cd desktop
-npm install
-npm run tauri:dev
-```
-
-If your Python executable is not `python3`, set it before launch:
-
-```bash
-export ORDO_PYTHON=/path/to/python
-cd desktop
-npm run tauri:dev
-```
-
-Current desktop workbench coverage:
-
-- visual WeChat settings (`AppID` / `Secret` / `Author`)
-- top-level WeChat readiness status and blocking hint when credentials are missing
-- paste / single-file / folder import, now covering `Markdown` / `TXT` / `DOCX`
-- theme-pool and cover-pool discovery
-- per-article theme override and non-WeChat cover override
-- Python bridge planning and streaming publish execution
-- `continue_on_error` passed through to publish planning
-- task-level `cover / AI declaration` options passed into the Zhihu / Toutiao / Yidian scripts
-- retry-only-failed-items flow after a failed run, even when the failed item itself is not marked `retryable`
-- last-plan and last-result snapshots, so the desktop workbench can restore the latest task or latest failed subset after restart
-- restore buttons are disabled with an explicit prompt when the staged Markdown files from the latest plan are missing
-- the header now shows the effective `Repo Root` and `Python` path, making `ORDO_REPO_ROOT` / `ORDO_PYTHON` diagnosis much more direct
-- structured result details and recent history refresh after publishing, with clearer hints for login loss, environment issues, and page-structure changes
-- broken `config.json` is now surfaced as an explicit warning in the desktop workbench and CLI preflight, instead of silently degrading
-- the header now shows both WeChat status and browser-session status, including managed mode, fallback mode, expiring-soon reminders, and relogin-required state
-
-Cover-pool note:
-
-- non-WeChat platforms read the default local cover pool from `covers/`
-- you can override that path with `assignment.cover_dir` in `config.json`
-- the desktop UI now shows an explicit target directory when the cover pool is missing or empty
-
-Publish-option note:
-
-- `Cover: auto` keeps the current platform-default behavior
-- `Cover: force_on` asks for usable cover resources as early as planning / preflight
-- `Cover: force_off` skips custom cover setup; Yidian may still fall back to the platform default cover in direct-publish mode, and the UI now says so explicitly
-- `AI declaration: force_off` skips declaration setup on Zhihu / Toutiao / Yidian
-- `AI declaration: force_on` keeps declaration as a required step and fails loudly when the site structure no longer matches
-
-### Desktop Packaging Preview
-
-The current desktop shell can already build a development preview bundle:
-
-```bash
-cd desktop
-npm run tauri:build
-```
-
-If you want the built shell to point to an explicit engine checkout, set:
-
-```bash
-export ORDO_REPO_ROOT=/path/to/tiandidistribute
-export ORDO_PYTHON=/path/to/python
-cd desktop
-npm run tauri:dev
-```
-
-Notes:
-
-- the current bundle is best treated as a developer preview, not a fully standalone installer with an embedded Python engine
-- `ORDO_REPO_ROOT` lets the desktop shell find `scripts/workbench_bridge.py` outside the original source launch layout
-- if repository-root or Python resolution fails, the desktop shell now tells you how to set `ORDO_REPO_ROOT` / `ORDO_PYTHON`
-- `tauri.conf.json` is still oriented toward `.app`-level output; Windows installer packaging remains a later step
-
-Preview a WeChat article locally:
-
-```bash
-python3 wechat_publisher.py "./my_articles/example.md" --dry-run --theme chinese
-```
-
-Publish one file to all platforms:
+Publish one file:
 
 ```bash
 python3 publish.py "./my_articles/example.md" --platform all --mode draft
@@ -255,16 +142,44 @@ Batch publish a directory:
 python3 publish.py "./my_articles" --platform all --mode publish --continue-on-error
 ```
 
-Open the theme gallery:
+VPS-managed publishing:
+
+```bash
+python3 publish.py "./my_articles" --platform all --mode publish --remote vps --vps-host 203.0.113.10 --vps-user root --vps-path /root/ordo-publish
+```
+
+VPS task status and auto-resume:
+
+```bash
+.venv/bin/python ordo_worker.py status
+.venv/bin/python ordo_worker.py daemon-status
+.venv/bin/python ordo_worker.py resume
+```
+
+When a platform returns daily-limit text such as “publish limit reached” or “try again tomorrow”, the VPS worker records that platform task as `deferred_limit`, stores `next_run_at`, and lets the daemon resume it when due.
+
+To skip articles already marked as published in `Ordo_Scribe_AI创作看板.md`, opt in explicitly:
+
+```bash
+python3 publish.py "./my_articles" --platform all --mode publish --skip-published
+```
+
+Pin a WeChat theme:
+
+```bash
+python3 publish.py "./my_articles" --platform wechat --mode draft --wechat-theme-mode fixed --wechat-theme chinese
+```
+
+Force random WeChat themes:
+
+```bash
+python3 publish.py "./my_articles" --platform wechat --mode draft --wechat-theme-mode random
+```
+
+Open theme gallery:
 
 ```bash
 python3 scripts/format.py --input "./my_articles/example.md" --gallery
-```
-
-Publish through the formatting pipeline:
-
-```bash
-python3 scripts/publish.py --input "./my_articles/example.md" --theme newspaper --cover "./covers/cover_01.png"
 ```
 
 Dry-run comment replies:
@@ -275,68 +190,55 @@ python3 reply_comments.py --dry-run
 
 ## Browser Workflow
 
-Recommended workflow:
+Recommended flow:
 
-1. On first use, let Ordo launch its managed browser session, or open the same managed profile yourself
-2. Log in to Zhihu, Toutiao, Jianshu, and Yidian in that managed session
-3. Reuse that same profile afterward instead of re-authorizing each run
+1. Let Ordo launch its managed browser profile, or open the same profile yourself
+2. Log in to Zhihu, Toutiao, Jianshu, Yidian, and Bilibili there
+3. Reuse the same profile afterward
 4. Start with `--mode draft`
-4. Then switch to `--mode publish`
-5. Record real smoke results against `docs/manual-validation/2026-03-28-browser-smoke.md`
+5. Switch to `--mode publish`
 
-The main entry tries to:
+The main entry tries to connect to Chrome, open missing tabs, reuse bound targets, run preflight checks, assign random covers for supported platforms, and then run each platform adapter.
 
-- connect to the existing browser session
-- open missing platform tabs
-- warm up the workbench tabs
-- reuse the same bound targets
-- run preflight checks before publishing
-- assign covers for **non-WeChat** browser platforms from a local cover pool (separate from WeChat’s `covers/cover_*.png` / AI cover behavior; see `tiandi_engine` config)
-- prefer the Ordo-managed browser instance first, then fall back to existing system Chrome / `DevToolsActivePort` hints if needed
-
-Managed browser-session notes:
-
-- the first login still happens in the managed browser profile, but that profile is then reused by default
-- the latest health-check timestamps are stored in `.tiandidistribute/browser-session/state.json`
-- if the session has not been revalidated for a while, the desktop workbench shows an expiring-soon reminder
-- if preflight already lands on a login or verification page, the workbench explicitly tells you to log in again
-
-The desktop workbench now also shows explicit execution-area hints for:
-
-- Chrome remote debugging being required for browser platforms
-- existing platform login sessions being required
-- whether the current tab is already sitting on a writable editor page
-- DOM-dependent browser automation still being vulnerable to site changes
-- `config.json` parse failures
-
-### Browser Smoke Checklist
-
-The minimal smoke checklist and this round's validation record live at:
+Smoke records:
 
 - `docs/manual-validation/2026-03-28-browser-smoke.md`
 - `docs/manual-validation/2026-03-28-browser-session.md`
+- `docs/manual-validation/2026-03-28-functional-freeze-checklist.md`
 
-Latest real smoke entry-point attempt: `2026-03-28`, blocked before site-level draft save because no remote-debuggable Chrome tabs were available in the current environment.
+## Structured Results
 
-### Structured results for GUI consumers
+Each platform step prints one `[META]` JSON line with `article_id`, `theme_name`, `template_mode`, `cover_path`, `platform`, `status`, `error_type`, `current_url`, `page_state`, and `smoke_step`.
 
-After each platform step, the CLI prints one JSON line prefixed with `[META]`, containing: `article_id`, `theme_name`, `template_mode`, `cover_path`, `platform`, `status`, `error_type`, `current_url`, `page_state`, and `smoke_step`. A future desktop GUI or automation can parse this without scraping unstructured logs.
+`publish_records.csv` writes the same fields. Older 8-column CSV files migrate on first append.
 
-`publish_records.csv` includes the same columns. If you still have an older 8-column file, the first append under the new logic **migrates** the file to the wider schema (back up the CSV before upgrading).
+## VPS Mode
 
-### Browser cover support (current behavior)
+VPS mode keeps publishing traffic on the VPS IP and is the recommended path for production use.
 
-- **Zhihu, Toutiao, Yidian**: publisher scripts accept a cover path from the engine and attempt custom cover upload (DOM-dependent; site changes may break it).
-- **Jianshu**: the editor is restrictive; when custom cover cannot be applied, the flow fails with an **explicit diagnostic**—do not read this as full Jianshu custom-cover support.
+Common commands:
 
-## Not Done Yet
+```bash
+python3 ordo_worker.py start-browser --xvfb
+python3 ordo_worker.py run-job /root/ordo-publish/data/inbox/bundle.zip
+python3 ordo_worker.py daemon
+python3 ordo_worker.py status
+```
 
-- Standalone installer: the desktop bundle still depends on a local Python runtime and engine checkout
-- Production Windows distribution: the current closing phase is explicitly `macOS` first; Windows browser adaptation, installer, signing, and distribution stay in a later phase
-- Product-grade resume: the current flow is a minimal loop built from latest plan/result snapshots plus failed-item retry, not a full checkpoint-resume system
-- Secret and local-data hardening: `secrets.env`, `config.json`, and `publish_records.csv` are still local engineering-style storage and need a dedicated security pass before wider distribution
-- Real external smoke on logged-in accounts: the repository now includes a checklist plus one blocked real entry-point attempt, but a true authenticated draft-save pass still needs to be completed in the user's own browser environment
-- Bundled browser runtime and UI redesign: both remain explicitly postponed; the current product line stays with managed system browsers and a small-footprint desktop shell
+Deployment helper:
+
+```bash
+bash scripts/deploy_vps.sh
+```
+
+## Not Done / Not Promised
+
+- Jianshu is experimental because real access may be blocked by `403 Forbidden` or platform risk controls
+- Local `publish.py` mode records CSV results but does not auto-resume the next day; automatic deferral belongs to the VPS job queue
+- Product-grade web console, desktop app, multi-account hosting, and queue concurrency are not implemented
+- Automatic login, CAPTCHA/slider handling, and risk-control bypass are out of scope
+- Secret and local-data hardening: `secrets.env`, `config.json`, and `publish_records.csv` are still local plaintext
+- Long soak and batch stress testing with real logged-in accounts still need more time
 
 ## Useful CDP Commands
 
@@ -350,13 +252,6 @@ node live_cdp.mjs snap <target>
 node live_cdp.mjs stop
 ```
 
-## Who It Is For
-
-- creators who write in Markdown first
-- people who care about stable WeChat formatting
-- teams or individuals who publish the same content to multiple platforms
-- builders who want a scriptable content workflow instead of a manual one
-
 ## Disclaimer
 
-This project is for publishing workflow automation and technical experimentation. Platform rules, review policies, and login behavior may change at any time. Use it at your own risk.
+This project is for content workflow automation and technical research. Platform review, risk control, login, and API behavior can change at any time. Use it at your own discretion.

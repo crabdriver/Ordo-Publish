@@ -6,9 +6,9 @@ import subprocess
 import time
 from pathlib import Path
 
-from markdown_utils import render_markdown_plain_text
-from tiandi_engine.importers.normalize import strip_title_marker
-from tiandi_engine.platforms.browser.node_runtime import resolve_node_executable
+from markdown_utils import render_markdown_plain_text, should_declare_ai
+from ordo_engine.importers.normalize import strip_title_marker
+from ordo_engine.platforms.browser.node_runtime import resolve_node_executable
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -19,7 +19,7 @@ ZHIHU_COVER_FILE_INPUT = "input.UploadPicture-input"
 ZHIHU_AI_DECLARATION = "包含 AI 辅助创作"
 AI_KEYWORDS = ["AI创作", "AI辅助", "AIGC", "人工智能生成", "AI生成", "AI工具", "使用AI"]
 SMOKE_STATE_PREFIX = "[SMOKE_STATE] "
-PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off")
+PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off", "random")
 
 
 def clean_title(title):
@@ -124,6 +124,84 @@ def emit_smoke_state(target_id, smoke_step, page_state, *, error=None):
     print(f"{SMOKE_STATE_PREFIX}{json.dumps(payload, ensure_ascii=False)}")
 
 
+def take_screenshot(target_id, step):
+    if not target_id:
+        return
+    try:
+        timestamp = int(time.time() * 1000)
+        screenshot_dir = BASE_DIR / ".ordo" / "screenshots" / "zhihu"
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        filepath = screenshot_dir / f"{timestamp}_{step}.png"
+        run_cdp("shot", target_id, str(filepath))
+        print(f"[INFO] [SCREENSHOT] Saved to: {filepath}")
+    except Exception as e:
+        print(f"[WARN] 截图失败 ({step}): {e}")
+
+
+def verify_in_management_list(target_id, expected_title, is_draft=False):
+    if is_draft:
+        management_url = "https://www.zhihu.com/creator/manage/creation/draft?type=article"
+    else:
+        management_url = "https://www.zhihu.com/creator/manage/creation/all?type=article"
+    print(f"[INFO] 正在跳转至知乎内容管理页面进行校验: {management_url}")
+    run_cdp("nav", target_id, management_url)
+    time.sleep(3)
+
+    click_tabs_expr = f"""
+    (() => {{
+        const isDraft = {str(is_draft).lower()};
+        const tabs = Array.from(document.querySelectorAll('div, span, li, a, p'));
+        if (isDraft) {{
+            // 尝试点击子标签「文章草稿」作为二次确认
+            const subTabs = Array.from(document.querySelectorAll('div, span, li, a, p'));
+            const articleSubTab = subTabs.find(el => {{
+                const txt = (el.innerText || el.textContent || '').trim();
+                return txt.includes('文章草稿') && el.offsetHeight > 0;
+            }});
+            if (articleSubTab) {{
+                articleSubTab.click();
+                return 'draft_subtab_clicked';
+            }}
+            return 'no_draft_subtab';
+        }} else {{
+            // 尝试点击主标签「文章」作为二次确认
+            const articleTab = tabs.find(el => {{
+                const txt = (el.innerText || el.textContent || '').trim();
+                return txt === '文章' && el.offsetHeight > 0;
+            }});
+            if (articleTab) {{
+                articleTab.click();
+                return 'article_tab_clicked';
+            }}
+            return 'no_article_tab';
+        }}
+    }})()
+    """
+    res = run_cdp("eval", target_id, click_tabs_expr)
+    print(f"[INFO] 执行知乎标签切换动作结果: {res}")
+    time.sleep(2)
+
+    title_json = json.dumps(expected_title, ensure_ascii=False)
+    list_ready_expr = """
+(() => {
+  const normalize = (t) => (t || '').replace(/\\s+/g, '');
+  const target = normalize(""" + title_json + """);
+  const els = Array.from(document.querySelectorAll('a, div, span, h1, h2, h3, h4'));
+  const found = els.find(el => {
+    const txt = normalize(el.innerText || el.textContent || '');
+    return txt.includes(target) && el.offsetHeight > 0;
+  });
+  return !!found;
+})()
+"""
+    print(f"[INFO] 正在校验列表是否包含文章标题：《{expected_title}》...")
+    success = wait_until(target_id, list_ready_expr, timeout_seconds=15, interval_seconds=1)
+    take_screenshot(target_id, "verified_list")
+    if not success:
+        raise RuntimeError(f"双重校验失败：未能在知乎作品列表中找到文章《{expected_title}》")
+    print(f"[INFO] 双重校验成功：在作品列表中成功检索到文章《{expected_title}》！")
+
+
 def apply_cover(target_id, cover_path, run_cdp_fn=None):
     """通过 CDP 向知乎「添加文章封面」对应的 file input 注入本地文件。"""
     runner = run_cdp_fn or run_cdp
@@ -138,7 +216,8 @@ def ensure_editor_ready(target_id):
         target_id,
         """
 (() => {
-  const titleEl = document.querySelector('textarea[placeholder*="标题"], input[placeholder*="标题"]');
+  const titleEl = Array.from(document.querySelectorAll('textarea[placeholder*="标题"], input[placeholder*="标题"]'))
+    .find(el => isVisible(el));
   const editor = document.querySelector('.public-DraftEditor-content, .ProseMirror, [data-lexical-editor="true"], [contenteditable="true"]');
   return !!titleEl && !!editor;
 })()
@@ -240,7 +319,7 @@ def inject_article(target_id, title, plain_body):
     verify_output = run_cdp(
         "eval",
         target_id,
-        """
+        r"""
 (() => {
   const titleEl = document.querySelector('textarea[placeholder*="标题"], input[placeholder*="标题"]');
   const editor = document.querySelector('.public-DraftEditor-content, .ProseMirror, [data-lexical-editor="true"], [contenteditable="true"]');
@@ -386,7 +465,7 @@ def declare_ai_creation(target_id):
         f"""(() => {{
   const opts = Array.from(document.querySelectorAll('[role=option]'));
   const normalize = (text) => (text || '').replace(/\\s+/g, '');
-  return opts.some(o => normalize(o.innerText || '') === normalize({json.dumps(ZHIHU_AI_DECLARATION, ensure_ascii=False)}));
+  return opts.some(o => normalize(o.innerText || '').includes(normalize({json.dumps(ZHIHU_AI_DECLARATION, ensure_ascii=False)})));
 }})()""",
         timeout_seconds=8,
     )
@@ -399,7 +478,7 @@ def declare_ai_creation(target_id):
             f"""(() => {{
   const normalize = (text) => (text || '').replace(/\\s+/g, '');
   const opt = Array.from(document.querySelectorAll('[role=option]'))
-    .find(o => normalize(o.innerText || '') === normalize({json.dumps(ZHIHU_AI_DECLARATION, ensure_ascii=False)}));
+    .find(o => normalize(o.innerText || '').includes(normalize({json.dumps(ZHIHU_AI_DECLARATION, ensure_ascii=False)})));
   if (!opt) return 'not-found';
   opt.click();
   return 'clicked';
@@ -421,7 +500,7 @@ def declare_ai_creation(target_id):
   }};
   const target = nodes.find(node => {{
     const text = normalize(node.innerText || node.textContent || '');
-    if (text !== targetText || !isVisible(node)) return false;
+    if (!text.includes(targetText) || !isVisible(node)) return false;
     const row = node.closest('[role=listbox], ul, li, .css-be2u3, .css-13mrzb0, .Popover-content');
     return !!row;
   }});
@@ -546,6 +625,7 @@ def main():
             apply_cover(target_id, args.cover)
             page_state = "cover_ready"
             print(f"[INFO] 已注入知乎封面: {args.cover}")
+            take_screenshot(target_id, "cover_ready")
         elif args.cover_mode == "force_off":
             print("[INFO] 已显式关闭知乎封面设置")
 
@@ -553,13 +633,16 @@ def main():
         inject_result = inject_article(target_id, title, plain_body)
         page_state = "article_injected"
         print(f"[INFO] 已写入知乎编辑器: {inject_result}")
+        take_screenshot(target_id, "injected")
 
-        if args.ai_declaration_mode != "force_off":
+        need_ai_declaration = should_declare_ai(title, plain_body, args.ai_declaration_mode)
+        if need_ai_declaration:
             smoke_step = "declare_ai_creation"
             declare_ai_creation(target_id)
             page_state = "ai_declared"
         else:
-            print("[INFO] 已显式关闭知乎 AI 创作声明设置")
+            print("[INFO] 跳过或已显式关闭知乎 AI 创作声明设置")
+        take_screenshot(target_id, "ai_declared")
 
         if args.mode == "draft":
             smoke_step = "draft_saved"
@@ -571,11 +654,14 @@ def main():
             if not draft_saved:
                 print("[WARN] 未明确检测到知乎保存文案，可能仍在自动保存")
             page_state = "draft_saved"
+            take_screenshot(target_id, "draft_saved")
+            verify_in_management_list(target_id, title, is_draft=True)
             emit_smoke_state(target_id, smoke_step, page_state)
             print(f"[OK] 已写入知乎草稿页: {article_path}")
             return
 
         smoke_step = "publish_click"
+        take_screenshot(target_id, "before_publish")
         publish_result = click_text_by_xy(target_id, "发布", selector="button,a,div,span")
         if publish_result != "clicked":
             publish_result = click_text_by_xy(target_id, "发布文章", selector="button,a,div,span")
@@ -610,7 +696,7 @@ def main():
     text.includes('发布成功') ||
     text.includes('文章已发布') ||
     text.includes('查看文章') ||
-    (!location.href.includes('/write') && !location.href.includes('/creator'))
+    /^https:\\/\\/zhuanlan\\.zhihu\\.com\\/p\\/\\d+(?:[?#].*)?$/.test(location.href)
   );
 })()
 """.strip(),
@@ -623,9 +709,12 @@ def main():
             raise RuntimeError("未检测到知乎发布成功提示，请检查页面状态")
 
         page_state = "published"
+        take_screenshot(target_id, "published")
+        verify_in_management_list(target_id, title, is_draft=False)
         emit_smoke_state(target_id, smoke_step, page_state)
         print(f"[OK] 已发布到知乎: {article_path}")
     except Exception as exc:
+        take_screenshot(target_id, "error")
         emit_smoke_state(target_id, smoke_step, page_state, error=exc)
         raise
 

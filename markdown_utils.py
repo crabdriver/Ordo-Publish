@@ -79,3 +79,15 @@ def render_markdown_plain_text(markdown_text, extensions=None):
             blocks.append(text.strip())
 
     return "\n\n".join(blocks).strip()
+
+
+def should_declare_ai(title: str, body: str, mode: str) -> bool:
+    if mode == "force_on":
+        return True
+    if mode == "force_off":
+        return False
+    if mode == "auto":
+        keywords = ["AI", "AIGC", "人工智能", "机器学习", "深度学习", "大模型", "LLM", "神经网络", "生成式"]
+        text = (title + "\n" + body).lower()
+        return any(kw.lower() in text for kw in keywords)
+    return False

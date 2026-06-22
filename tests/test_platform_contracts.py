@@ -1,12 +1,13 @@
 import subprocess
 import sys
 import unittest
+from unittest.mock import patch
 from tempfile import TemporaryDirectory
 from pathlib import Path
 
-from tiandi_engine.platforms.base import BasePlatformAdapter, SubprocessPlatformAdapter
-from tiandi_engine.platforms.registry import build_platform_registry
-from tiandi_engine.results.errors import ErrorType
+from ordo_engine.platforms.base import BasePlatformAdapter, SubprocessPlatformAdapter
+from ordo_engine.platforms.registry import build_platform_registry
+from ordo_engine.results.errors import ErrorType
 
 
 class PlatformContractTests(unittest.TestCase):
@@ -14,8 +15,9 @@ class PlatformContractTests(unittest.TestCase):
         registry = build_platform_registry(Path("/tmp/repo"))
         self.assertEqual(
             sorted(registry.keys()),
-            ["jianshu", "toutiao", "wechat", "yidian", "zhihu"],
+            ["bilibili", "jianshu", "toutiao", "wechat", "yidian", "zhihu"],
         )
+
 
     def test_adapters_expose_required_methods(self):
         registry = build_platform_registry(Path("/tmp/repo"))
@@ -37,6 +39,41 @@ class PlatformContractTests(unittest.TestCase):
         self.assertEqual(prepared["platform"], "wechat")
         self.assertIn("wechat_publisher.py", str(prepared["command"][1]))
         self.assertEqual(prepared["command"][-2:], ["--theme", "chinese"])
+
+    def test_wechat_publish_refuses_local_without_vps_ip(self):
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            (repo / "secrets.env").write_text("WECHAT_PROXY=http://127.0.0.1:7890\n", encoding="utf-8")
+            adapter = build_platform_registry(repo)["wechat"]
+            prepared = adapter.prepare(markdown_file=repo / "article.md", mode="publish")
+
+            result = adapter.publish(prepared)
+
+        self.assertEqual(result["returncode"], 2)
+        self.assertIn("必须走 VPS", result["stderr"])
+
+    def test_wechat_publish_remote_unsets_proxy_and_marks_worker(self):
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            article = repo / "article.md"
+            article.write_text("# title\nbody\n", encoding="utf-8")
+            (repo / "secrets.env").write_text("VPS_IP=203.0.113.10\nVPS_USER=root\n", encoding="utf-8")
+            adapter = build_platform_registry(repo)["wechat"]
+            prepared = adapter.prepare(markdown_file=article, mode="publish")
+
+            with patch("ordo_engine.platforms.wechat.publisher.subprocess.run", side_effect=fake_run):
+                result = adapter.publish(prepared)
+
+        self.assertEqual(result["returncode"], 0)
+        ssh_exec = [cmd for cmd in calls if cmd[0] == "ssh" and "cd ~/ordo-publish" in cmd[-1]][0]
+        self.assertIn("unset WECHAT_PROXY HTTP_PROXY HTTPS_PROXY http_proxy https_proxy", ssh_exec[-1])
+        self.assertIn("export ORDO_WORKER=1", ssh_exec[-1])
 
     def test_zhihu_prepare_includes_theme_cover_and_template_mode_in_command(self):
         registry = build_platform_registry(Path("/tmp/repo"))
@@ -168,6 +205,37 @@ class PlatformContractTests(unittest.TestCase):
 
         self.assertEqual(result.error_type, ErrorType.LOGIN_REQUIRED)
         self.assertFalse(result.retryable)
+
+    def test_collect_result_marks_daily_limit_as_rate_limited(self):
+        registry = build_platform_registry(Path("/tmp/repo"))
+        result = registry["toutiao"].collect_result(
+            {
+                "platform": "toutiao",
+                "returncode": 1,
+                "stdout": "今日发文已达 50 篇上限，请明天再来",
+                "stderr": "",
+            },
+            mode="publish",
+        )
+
+        self.assertEqual(result.status, "limit_reached")
+        self.assertEqual(result.error_type, ErrorType.RATE_LIMITED)
+        self.assertFalse(result.retryable)
+
+    def test_collect_result_does_not_treat_review_lock_as_daily_limit(self):
+        registry = build_platform_registry(Path("/tmp/repo"))
+        result = registry["yidian"].collect_result(
+            {
+                "platform": "yidian",
+                "returncode": 1,
+                "stdout": "审核通过前你将无法继续编辑",
+                "stderr": "",
+            },
+            mode="publish",
+        )
+
+        self.assertNotEqual(result.status, "limit_reached")
+        self.assertNotEqual(result.error_type, ErrorType.RATE_LIMITED)
 
     def test_collect_result_marks_environment_error_when_cdp_not_ready(self):
         registry = build_platform_registry(Path("/tmp/repo"))

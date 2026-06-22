@@ -11,8 +11,8 @@ if str(ROOT_DIR) not in sys.path:
 
 from datetime import datetime, timezone
 
-from tiandi_engine.results.publish_records import append_publish_record_at_path  # noqa: E402
-from tiandi_engine.workbench.bridge import handle_bridge_command  # noqa: E402
+from ordo_engine.results.publish_records import append_publish_record_at_path  # noqa: E402
+from ordo_engine.workbench.bridge import handle_bridge_command  # noqa: E402
 
 
 def _append_structured_log(entry: dict) -> None:
@@ -48,7 +48,7 @@ def main():
 
     try:
         if payload.get("command") == "run_publish_job_stream":
-            from tiandi_engine.workbench.bridge import run_publish_job
+            from ordo_engine.workbench.bridge import run_publish_job
 
             result = run_publish_job(
                 ROOT_DIR,

@@ -5,8 +5,8 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
-from tiandi_engine.platforms.base import BasePlatformAdapter, SubprocessPlatformAdapter
-from tiandi_engine.runner.pipeline import run_platform_task, run_publish_pipeline
+from ordo_engine.platforms.base import BasePlatformAdapter, SubprocessPlatformAdapter
+from ordo_engine.runner.pipeline import run_platform_task, run_publish_pipeline
 
 
 class DummyAdapter(BasePlatformAdapter):
@@ -65,7 +65,7 @@ class DummyAdapter(BasePlatformAdapter):
         return "draft_only" if mode == "draft" else "published"
 
     def collect_result(self, process_result, mode):
-        from tiandi_engine.results.record import ExecutionResult
+        from ordo_engine.results.record import ExecutionResult
 
         return ExecutionResult(
             platform=self.platform,
@@ -299,7 +299,7 @@ class EnginePipelineTests(unittest.TestCase):
         }
 
         with patch(
-            "tiandi_engine.platforms.base.subprocess.run",
+            "ordo_engine.platforms.base.subprocess.run",
             side_effect=subprocess.TimeoutExpired(
                 cmd=["python3", "zhihu_publisher.py"],
                 timeout=180,

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import publish
 
@@ -9,8 +10,9 @@ class PublishParseTests(unittest.TestCase):
     def test_parse_platforms_returns_all_by_default(self):
         self.assertEqual(
             publish.parse_platforms("all"),
-            ["wechat", "zhihu", "toutiao", "jianshu", "yidian"],
+            ["wechat", "zhihu", "toutiao", "jianshu", "yidian", "bilibili"],
         )
+
 
     def test_parse_platforms_deduplicates_and_preserves_order(self):
         self.assertEqual(
@@ -49,6 +51,52 @@ class PublishParseTests(unittest.TestCase):
     def test_article_id_for_path_uses_index_and_safe_stem(self):
         path = Path("/tmp/foo bar/hello world!.md")
         self.assertEqual(publish.article_id_for_path(path, 3), "0003-hello_world_")
+
+    def test_wechat_theme_auto_resolves_to_random(self):
+        class Args:
+            wechat_theme_mode = "auto"
+
+        self.assertEqual(publish.resolve_wechat_theme_mode(Args(), ["chinese", "ink"]), "random")
+
+    def test_wechat_theme_console_mode_is_preserved(self):
+        class Args:
+            wechat_theme_mode = "console"
+
+        self.assertEqual(publish.resolve_wechat_theme_mode(Args(), ["chinese", "ink"]), "console")
+
+    def test_filter_published_articles_is_opt_in(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            article = root / "AI终稿" / "done.md"
+            article.parent.mkdir()
+            article.write_text("# Done", encoding="utf-8")
+            dashboard = root / "Ordo_Scribe_AI创作看板.md"
+            dashboard.write_text(
+                "| a | b | c | d | e | [done](AI终稿/done.md) | ✅ 已发表 |\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                publish.maybe_filter_already_published_articles(
+                    [article],
+                    str(article),
+                    skip_published=False,
+                ),
+                [article],
+            )
+            self.assertEqual(
+                publish.maybe_filter_already_published_articles(
+                    [article],
+                    str(article),
+                    skip_published=True,
+                ),
+                [],
+            )
+
+    def test_parser_defaults_cover_mode_to_random(self):
+        with patch("sys.argv", ["publish.py", "/tmp/post.md"]):
+            args = publish.parse_args()
+        self.assertEqual(args.cover_mode, "random")
 
 
 class PublishClassifyResultTests(unittest.TestCase):

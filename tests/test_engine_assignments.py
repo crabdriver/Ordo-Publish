@@ -4,14 +4,14 @@ from pathlib import Path
 
 from PIL import Image
 
-from tiandi_engine.assignment.covers import (
+from ordo_engine.assignment.covers import (
     COVER_PLATFORMS,
     CoverPoolError,
     assign_covers,
     list_cover_files,
 )
-from tiandi_engine.assignment.templates import assign_templates, scan_theme_pool
-from tiandi_engine.config import load_engine_config
+from ordo_engine.assignment.templates import assign_templates, scan_theme_pool
+from ordo_engine.config import load_engine_config
 
 
 class ThemePoolScanTests(unittest.TestCase):
@@ -25,6 +25,22 @@ class ThemePoolScanTests(unittest.TestCase):
             self.assertEqual(set(by_id), {"alpha", "beta"})
             self.assertEqual(by_id["alpha"].display_name, "Alpha 名")
             self.assertEqual(by_id["beta"].display_name, "beta")
+
+    def test_scan_theme_pool_falls_back_to_stem_for_non_utf8_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "gbk_theme.json").write_bytes('{"name": "中文"}'.encode("gbk"))
+            pool = scan_theme_pool(root)
+            by_id = {e.theme_id: e for e in pool}
+            self.assertEqual(by_id["gbk_theme"].display_name, "gbk_theme")
+
+    def test_scan_theme_pool_ignores_macos_metadata_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "sspai.json").write_text('{"name": "少数派"}', encoding="utf-8")
+            (root / "._sspai.json").write_bytes(b"not real json")
+            pool = scan_theme_pool(root)
+            self.assertEqual([e.theme_id for e in pool], ["sspai"])
 
 
 class TemplateAssignmentTests(unittest.TestCase):
@@ -68,7 +84,7 @@ class TemplateAssignmentTests(unittest.TestCase):
                 themes_dir=themes,
                 assignment_mode="custom",
                 manual_theme_by_article={"p1": "zebra"},
-                seed=1,
+                seed=0,
             )
             by_id = {x.article_id: x for x in out}
             self.assertEqual(by_id["p1"].theme_id, "zebra")
@@ -94,20 +110,28 @@ class CoverAssignmentTests(unittest.TestCase):
             cdir.mkdir()
             self._write_cover(cdir, "a.png")
             self._write_cover(cdir, "b.png")
-            platforms = ["wechat", "zhihu", "toutiao", "jianshu"]
+            platforms = ["wechat", "zhihu", "toutiao", "jianshu", "bilibili"]
             out = assign_covers(
                 ["art1"],
                 platforms,
                 cover_dir=cdir,
                 recent_cover_paths=(),
                 repeat_window=0,
-                seed=0,
+                seed=1,
             )
             keys = {(x.article_id, x.platform) for x in out}
-            self.assertEqual(keys, {("art1", "zhihu"), ("art1", "toutiao")})
+            self.assertEqual(
+                keys,
+                {
+                    ("art1", "wechat"),
+                    ("art1", "zhihu"),
+                    ("art1", "toutiao"),
+                    ("art1", "bilibili"),
+                },
+            )
             self.assertEqual(COVER_PLATFORMS, tuple(sorted(COVER_PLATFORMS)))
 
-    def test_same_article_different_platforms_prefers_distinct_covers_when_pool_allows(self):
+    def test_same_article_different_platforms_uses_same_cover(self):
         with tempfile.TemporaryDirectory() as tmp:
             cdir = Path(tmp) / "covers"
             cdir.mkdir()
@@ -123,7 +147,25 @@ class CoverAssignmentTests(unittest.TestCase):
                 seed=99,
             )
             paths = [x.cover_path for x in out]
-            self.assertEqual(len(paths), len(set(paths)))
+            self.assertEqual(len(set(paths)), 1)
+
+    def test_assign_covers_prefers_landscape_cover_when_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cdir = Path(tmp) / "covers"
+            cdir.mkdir()
+            square = self._write_png_cover(cdir, "square.png", (1024, 1024))
+            wide = self._write_png_cover(cdir, "wide.png", (1376, 768))
+            out = assign_covers(
+                ["only"],
+                ["zhihu", "toutiao", "yidian", "bilibili"],
+                cover_dir=cdir,
+                recent_cover_paths=(),
+                repeat_window=0,
+                seed=1,
+            )
+            self.assertTrue(out)
+            self.assertEqual({x.cover_path for x in out}, {wide})
+            self.assertNotIn(square, {x.cover_path for x in out})
 
     def test_recent_history_avoids_recent_covers_when_possible(self):
         with tempfile.TemporaryDirectory() as tmp:

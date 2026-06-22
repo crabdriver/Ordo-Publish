@@ -89,29 +89,42 @@ class PublishPreflightTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertTrue(any("WECHAT_APPID" in item for item in blockers))
 
-    def test_run_preflight_checks_warns_when_ai_cover_ready_but_local_cover_missing(self):
-        with patch.object(
-            publish,
-            "get_wechat_config_status",
-            return_value={
-                "appid_ready": True,
-                "secret_ready": True,
-                "covers_ready": False,
-                "ai_cover_ready": True,
-            },
-        ):
-            blockers, warnings = publish.run_preflight_checks(
-                platforms=["wechat"],
-                mode="draft",
-                workbench={},
-            )
+    @patch("wechat_publisher.WeChatPublisher")
+    def test_run_preflight_checks_warns_when_ai_cover_ready_but_local_cover_missing(self, mock_wechat_publisher):
+        mock_wechat_publisher.return_value.ensure_access_token.return_value = None
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "secrets.env").write_text("VPS_IP=203.0.113.10\n", encoding="utf-8")
+            with patch.object(
+                publish,
+                "get_wechat_config_status",
+                return_value={
+                    "appid_ready": True,
+                    "secret_ready": True,
+                    "covers_ready": False,
+                    "ai_cover_ready": True,
+                },
+            ), patch.object(
+                publish.subprocess,
+                "run",
+                return_value=CompletedProcess(["ssh"], 0, stdout="", stderr=""),
+            ):
+                blockers, warnings = publish.run_preflight_checks(
+                    platforms=["wechat"],
+                    mode="draft",
+                    workbench={},
+                    base_dir=base,
+                )
 
         self.assertEqual(blockers, [])
         self.assertTrue(any("AI 封面" in item for item in warnings))
 
-    def test_run_preflight_checks_respects_cover_override_for_wechat(self):
+    @patch("wechat_publisher.WeChatPublisher")
+    def test_run_preflight_checks_respects_cover_override_for_wechat(self, mock_wechat_publisher):
+        mock_wechat_publisher.return_value.ensure_access_token.return_value = None
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
+            (base / "secrets.env").write_text("VPS_IP=203.0.113.10\n", encoding="utf-8")
             override_dir = base / "external-covers"
             override_dir.mkdir()
             self._write_cover(override_dir / "cover_01.png")
@@ -124,6 +137,10 @@ class PublishPreflightTests(unittest.TestCase):
                     "covers_ready": False,
                     "ai_cover_ready": False,
                 },
+            ), patch.object(
+                publish.subprocess,
+                "run",
+                return_value=CompletedProcess(["ssh"], 0, stdout="", stderr=""),
             ):
                 blockers, warnings = publish.run_preflight_checks(
                     platforms=["wechat"],
@@ -135,6 +152,31 @@ class PublishPreflightTests(unittest.TestCase):
 
         self.assertEqual(warnings, [])
         self.assertEqual(blockers, [])
+
+    def test_run_preflight_checks_blocks_wechat_without_vps_ip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "covers").mkdir()
+            self._write_cover(base / "covers" / "cover_01.png")
+            with patch.object(
+                publish,
+                "get_wechat_config_status",
+                return_value={
+                    "appid_ready": True,
+                    "secret_ready": True,
+                    "covers_ready": True,
+                    "ai_cover_ready": False,
+                },
+            ):
+                blockers, warnings = publish.run_preflight_checks(
+                    platforms=["wechat"],
+                    mode="publish",
+                    workbench={},
+                    base_dir=base,
+                )
+
+        self.assertEqual(warnings, [])
+        self.assertTrue(any("必须走 VPS" in item for item in blockers), blockers)
 
     def test_run_preflight_checks_requires_browser_tabs_for_browser_platforms(self):
         with patch.object(
@@ -186,7 +228,7 @@ class PublishPreflightTests(unittest.TestCase):
             "inspect_browser_platform_state",
             return_value={
                 "editor_ready": False,
-                "page_state": "wrong_editor_page",
+                "page_state": "login_required",
                 "current_url": "https://www.zhihu.com/signin",
                 "detail": "当前标签页不在知乎写作页",
             },
@@ -246,7 +288,7 @@ class PublishPreflightTests(unittest.TestCase):
                     },
                 )
 
-            payload = json.loads((base / ".tiandidistribute" / "browser-session" / "state.json").read_text(encoding="utf-8"))
+            payload = json.loads((base / ".ordo" / "browser-session" / "state.json").read_text(encoding="utf-8"))
 
         self.assertEqual(payload["mode"], "managed")
         self.assertEqual(payload["platforms"]["zhihu"]["status"], "healthy")
@@ -279,7 +321,7 @@ class PublishPreflightTests(unittest.TestCase):
                     },
                 )
 
-            payload = json.loads((base / ".tiandidistribute" / "browser-session" / "state.json").read_text(encoding="utf-8"))
+            payload = json.loads((base / ".ordo" / "browser-session" / "state.json").read_text(encoding="utf-8"))
 
         self.assertTrue(any("知乎预检未通过" in item for item in blockers))
         self.assertEqual(payload["platforms"]["zhihu"]["status"], "expired_or_relogin_required")
@@ -315,8 +357,8 @@ class PublishPreflightTests(unittest.TestCase):
                 workbench={"jianshu": "note-1"},
             )
 
-        self.assertEqual(warnings, [])
-        self.assertIn("简书今天已达到公开文章发布上限（每天最多 2 篇）", blockers)
+        self.assertEqual(blockers, [])
+        self.assertTrue(any("简书今天已达到公开文章发布上限" in item for item in warnings))
 
     def test_preflight_blocks_publish_when_non_wechat_cover_pool_missing(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -16,13 +16,13 @@ class OrdoCliBootstrapTests(unittest.TestCase):
         (root / "templates" / "preview.html").write_text("<html></html>\n", encoding="utf-8")
         (root / "scripts").mkdir(parents=True)
         (root / "scripts" / "format.py").write_text("def noop():\n    return 'ok'\n", encoding="utf-8")
-        (root / "tiandi_engine" / "workbench").mkdir(parents=True)
-        (root / "tiandi_engine" / "__init__.py").write_text("", encoding="utf-8")
-        (root / "tiandi_engine" / "workbench" / "__init__.py").write_text("", encoding="utf-8")
-        (root / "tiandi_engine" / "workbench" / "bridge.py").write_text("BRIDGE = True\n", encoding="utf-8")
+        (root / "ordo_engine" / "workbench").mkdir(parents=True)
+        (root / "ordo_engine" / "__init__.py").write_text("", encoding="utf-8")
+        (root / "ordo_engine" / "workbench" / "__init__.py").write_text("", encoding="utf-8")
+        (root / "ordo_engine" / "workbench" / "bridge.py").write_text("BRIDGE = True\n", encoding="utf-8")
 
     def test_seed_runtime_repo_copies_runtime_files_and_preserves_user_config(self):
-        from tiandi_engine.cli.runtime import seed_runtime_repo
+        from ordo_engine.cli.runtime import seed_runtime_repo
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -47,7 +47,7 @@ class OrdoCliBootstrapTests(unittest.TestCase):
             self.assertTrue((runtime_repo / "templates" / "preview.html").is_file())
 
     def test_main_bootstraps_runtime_and_dispatches_to_repo_entrypoint(self):
-        from tiandi_engine.cli import app
+        from ordo_engine.cli import app
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -75,10 +75,10 @@ class OrdoCliBootstrapTests(unittest.TestCase):
         self.assertTrue(pyproject_path.is_file())
         text = pyproject_path.read_text(encoding="utf-8")
         self.assertIn("[project.scripts]", text)
-        self.assertIn('ordo = "tiandi_engine.cli.app:main"', text)
+        self.assertIn('ordo = "ordo_engine.cli.app:main"', text)
 
     def test_resolve_app_home_uses_xdg_config_on_linux(self):
-        from tiandi_engine.cli import runtime
+        from ordo_engine.cli import runtime
 
         with patch.object(runtime.sys, "platform", "linux"):
             path = runtime.resolve_app_home({"XDG_CONFIG_HOME": "/tmp/xdg"})
@@ -86,12 +86,12 @@ class OrdoCliBootstrapTests(unittest.TestCase):
         self.assertEqual(path.resolve(), (Path("/tmp/xdg") / "ordo").resolve())
 
     def test_run_repo_entrypoint_dispatches_to_terminal_tui(self):
-        from tiandi_engine.cli import app
+        from ordo_engine.cli import app
 
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime_repo = Path(tmpdir)
             with patch.object(app, "ensure_runtime_importable") as mock_importable, patch(
-                "tiandi_engine.workbench.terminal_tui.main",
+                "ordo_engine.workbench.terminal_tui.main",
                 return_value=5,
             ) as mock_tui_main:
                 exit_code = app.run_repo_entrypoint(runtime_repo_root=runtime_repo, argv=["--demo"])

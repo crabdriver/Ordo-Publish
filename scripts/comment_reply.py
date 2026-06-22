@@ -31,7 +31,7 @@ LOG_PATH = SCRIPT_DIR.parent / "comment_reply.log"
 # Load secret credentials from secrets.env and configure proxy
 load_dotenv(SCRIPT_DIR.parent / "secrets.env")
 wechat_proxy = os.getenv("WECHAT_PROXY")
-if wechat_proxy:
+if wechat_proxy and os.environ.get("ORDO_WORKER") != "1":
     os.environ["HTTP_PROXY"] = wechat_proxy
     os.environ["HTTPS_PROXY"] = wechat_proxy
 

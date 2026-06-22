@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ordo = "tiandi_engine.cli.app:main"
+ordo = "ordo_engine.cli.app:main"
 
 [tool.setuptools.packages.find]
-include = ["tiandi_engine*"]
+include = ["ordo_engine*"]

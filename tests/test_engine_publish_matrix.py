@@ -5,8 +5,8 @@ from pathlib import Path
 
 from PIL import Image
 
-from tiandi_engine.models.workbench import ArticleDraft
-from tiandi_engine.workbench.matrix import build_publish_matrix, select_representative_drafts
+from ordo_engine.models.workbench import ArticleDraft
+from ordo_engine.workbench.matrix import build_publish_matrix, select_representative_drafts
 
 
 class PublishMatrixTests(unittest.TestCase):

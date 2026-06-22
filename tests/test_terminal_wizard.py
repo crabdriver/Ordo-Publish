@@ -54,7 +54,7 @@ class DummyAdapter:
         return "draft_only" if mode == "draft" else "published"
 
     def collect_result(self, process_result, mode):
-        from tiandi_engine.results.record import ExecutionResult
+        from ordo_engine.results.record import ExecutionResult
 
         return ExecutionResult(
             platform=self.platform,
@@ -69,7 +69,7 @@ class DummyAdapter:
 
 class TerminalWizardTests(unittest.TestCase):
     def test_read_terminal_defaults_uses_saved_values_and_builtin_defaults(self):
-        from tiandi_engine.workbench.terminal_wizard import read_terminal_defaults
+        from ordo_engine.workbench.terminal_wizard import read_terminal_defaults
 
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -101,7 +101,7 @@ class TerminalWizardTests(unittest.TestCase):
         self.assertTrue(settings.continue_on_error)
 
     def test_save_terminal_defaults_preserves_existing_config(self):
-        from tiandi_engine.workbench.terminal_wizard import TerminalWizardSettings, save_terminal_defaults
+        from ordo_engine.workbench.terminal_wizard import TerminalWizardSettings, save_terminal_defaults
 
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -140,7 +140,7 @@ class TerminalWizardTests(unittest.TestCase):
         self.assertFalse(payload["terminal_wizard"]["defaults"]["continue_on_error"])
 
     def test_collect_terminal_settings_keeps_defaults_on_blank_input(self):
-        from tiandi_engine.workbench.terminal_wizard import TerminalWizardSettings, collect_terminal_settings
+        from ordo_engine.workbench.terminal_wizard import TerminalWizardSettings, collect_terminal_settings
 
         answers = iter(
             [
@@ -181,7 +181,7 @@ class TerminalWizardTests(unittest.TestCase):
         self.assertFalse(settings.continue_on_error)
 
     def test_collect_terminal_settings_allows_clearing_cover_dir_override(self):
-        from tiandi_engine.workbench.terminal_wizard import TerminalWizardSettings, collect_terminal_settings
+        from ordo_engine.workbench.terminal_wizard import TerminalWizardSettings, collect_terminal_settings
 
         answers = iter(
             [
@@ -210,7 +210,7 @@ class TerminalWizardTests(unittest.TestCase):
         self.assertEqual(settings.cover_dir_override, "")
 
     def test_execute_publish_flow_writes_retry_queue_when_preflight_blocked(self):
-        from tiandi_engine.workbench.terminal_wizard import TerminalWizardSettings, execute_publish_flow
+        from ordo_engine.workbench.terminal_wizard import TerminalWizardSettings, execute_publish_flow
 
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -225,10 +225,10 @@ class TerminalWizardTests(unittest.TestCase):
 
             output = io.StringIO()
             with patch(
-                "tiandi_engine.workbench.terminal_service.prepare_browser_context",
+                "ordo_engine.workbench.terminal_service.prepare_browser_context",
                 return_value={"tabs": [], "workbench": {}, "cdp_connection": None},
             ), patch(
-                "tiandi_engine.workbench.terminal_service.publish.run_preflight_checks",
+                "ordo_engine.workbench.terminal_service.publish.run_preflight_checks",
                 return_value=(["知乎预检未通过：请先登录"], ["当前 CDP 连接来源：test"]),
             ):
                 result = execute_publish_flow(
@@ -242,7 +242,7 @@ class TerminalWizardTests(unittest.TestCase):
             self.assertIn("python3 scripts/terminal_wizard.py", output.getvalue())
 
     def test_execute_publish_flow_runs_publish_job_and_reports_summary(self):
-        from tiandi_engine.workbench.terminal_wizard import TerminalWizardSettings, execute_publish_flow
+        from ordo_engine.workbench.terminal_wizard import TerminalWizardSettings, execute_publish_flow
 
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -252,7 +252,7 @@ class TerminalWizardTests(unittest.TestCase):
             output = io.StringIO()
 
             with patch(
-                "tiandi_engine.workbench.terminal_service.publish.run_preflight_checks",
+                "ordo_engine.workbench.terminal_service.publish.run_preflight_checks",
                 return_value=([], []),
             ):
                 result = execute_publish_flow(
@@ -272,7 +272,7 @@ class TerminalWizardTests(unittest.TestCase):
             self.assertIn("成功: 1", output.getvalue())
 
     def test_run_terminal_wizard_smoke_saves_defaults_and_completes(self):
-        from tiandi_engine.workbench.terminal_wizard import run_terminal_wizard
+        from ordo_engine.workbench.terminal_wizard import run_terminal_wizard
 
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
@@ -295,7 +295,7 @@ class TerminalWizardTests(unittest.TestCase):
             output = io.StringIO()
 
             with patch(
-                "tiandi_engine.workbench.terminal_service.publish.run_preflight_checks",
+                "ordo_engine.workbench.terminal_service.publish.run_preflight_checks",
                 return_value=([], []),
             ):
                 exit_code = run_terminal_wizard(

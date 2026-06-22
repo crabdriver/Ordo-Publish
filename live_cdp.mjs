@@ -6,6 +6,17 @@ import net from "net";
 import path from "path";
 import { resolveBrowserWsUrl } from "./live_cdp_ws_resolver.mjs";
 
+let WebSocketCtor = globalThis.WebSocket;
+if (!WebSocketCtor) {
+  try {
+    const wsModule = await import("ws");
+    WebSocketCtor = wsModule.WebSocket || wsModule.default;
+  } catch {
+    const wsModule = await import("file:///usr/share/nodejs/ws/index.js");
+    WebSocketCtor = wsModule.WebSocket || wsModule.default;
+  }
+}
+
 const TIMEOUT_MS = 15000;
 const NAVIGATION_TIMEOUT_MS = 30000;
 const IDLE_TIMEOUT_MS = Number(process.env.LIVE_CDP_IDLE_TIMEOUT_MS || 12 * 60 * 60 * 1000);
@@ -25,7 +36,7 @@ class CDP {
 
   async connect(wsUrl) {
     return new Promise((resolvePromise, rejectPromise) => {
-      this.#ws = new WebSocket(wsUrl);
+      this.#ws = new WebSocketCtor(wsUrl);
       this.#ws.onopen = () => resolvePromise();
       this.#ws.onerror = (event) =>
         rejectPromise(new Error(`WebSocket error: ${event.message || event.type}`));
@@ -136,10 +147,26 @@ class CDP {
 }
 
 async function getPages(cdp) {
-  const result = await cdp.send("Target.getTargets");
-  return result.targetInfos.filter(
-    (target) => target.type === "page" && !target.url.startsWith("chrome://")
-  );
+  try {
+    const result = await cdp.send("Target.getTargets");
+    return result.targetInfos.filter(
+      (target) => target.type === "page" && !target.url.startsWith("chrome://")
+    );
+  } catch (error) {
+    const port = Number(process.env.LIVE_CDP_PORT || process.env.ORDO_BROWSER_SESSION_DEBUG_PORT || 9222);
+    const response = await fetch(`http://127.0.0.1:${port}/json/list`);
+    if (!response.ok) {
+      throw error;
+    }
+    const targets = await response.json();
+    return targets
+      .filter((target) => target.type === "page" && !String(target.url || "").startsWith("chrome://"))
+      .map((target) => ({
+        targetId: target.id,
+        title: target.title || "",
+        url: target.url || "",
+      }));
+  }
 }
 
 function formatPageList(pages) {
@@ -291,6 +318,37 @@ async function waitForDocumentReady(cdp, sessionId, timeoutMs = NAVIGATION_TIMEO
   throw new Error("Timed out waiting for navigation to finish");
 }
 
+async function navigationReachedTarget(cdp, sessionId, expectedUrl) {
+  const raw = await evalStr(
+    cdp,
+    sessionId,
+    "JSON.stringify({ href: location.href, readyState: document.readyState })"
+  ).catch(() => null);
+  if (!raw) {
+    return false;
+  }
+  const state = JSON.parse(raw);
+  if (state.readyState === "loading") {
+    return false;
+  }
+  try {
+    const current = new URL(state.href);
+    const expected = new URL(expectedUrl);
+    if (current.origin !== expected.origin || current.pathname !== expected.pathname) {
+      return false;
+    }
+    if (expected.search && current.search !== expected.search) {
+      return false;
+    }
+    if (expected.hash && current.hash !== expected.hash) {
+      return false;
+    }
+    return true;
+  } catch {
+    return state.href === expectedUrl;
+  }
+}
+
 async function navStr(cdp, sessionId, url) {
   await cdp.send("Page.enable", {}, sessionId);
   const loadEvent = cdp.waitForEvent("Page.loadEventFired", {
@@ -303,11 +361,23 @@ async function navStr(cdp, sessionId, url) {
     throw new Error(result.errorText);
   }
   if (result.loaderId) {
-    await loadEvent.promise;
+    try {
+      await loadEvent.promise;
+    } catch (error) {
+      if (!(await navigationReachedTarget(cdp, sessionId, url))) {
+        throw error;
+      }
+    }
   } else {
     loadEvent.cancel();
   }
-  await waitForDocumentReady(cdp, sessionId, 5000);
+  try {
+    await waitForDocumentReady(cdp, sessionId, 5000);
+  } catch (error) {
+    if (!(await navigationReachedTarget(cdp, sessionId, url))) {
+      throw error;
+    }
+  }
   return `Navigated to ${url}`;
 }
 
@@ -408,12 +478,116 @@ async function setFileInputStr(cdp, sessionId, selector, filePath) {
   }
   await cdp.send("DOM.enable", {}, sessionId);
   const { root } = await cdp.send("DOM.getDocument", { depth: -1, pierce: true }, sessionId);
-  const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: root.nodeId, selector }, sessionId);
+
+  async function findNodeId(parentNodeId, sel) {
+    try {
+      const { nodeId } = await cdp.send("DOM.querySelector", { nodeId: parentNodeId, selector: sel }, sessionId);
+      if (nodeId) return nodeId;
+    } catch (e) {
+      // ignore querySelector error
+    }
+    return null;
+  }
+
+  async function searchTree(node) {
+    if (!node) return null;
+    const foundId = await findNodeId(node.nodeId, selector);
+    if (foundId) return foundId;
+
+    if (node.children) {
+      for (const child of node.children) {
+        const result = await searchTree(child);
+        if (result) return result;
+      }
+    }
+    if (node.contentDocument) {
+      const result = await searchTree(node.contentDocument);
+      if (result) return result;
+    }
+    return null;
+  }
+
+  const nodeId = await searchTree(root);
   if (!nodeId) {
     throw new Error(`file input not found: ${selector}`);
   }
   await cdp.send("DOM.setFileInputFiles", { nodeId, files: [absolutePath] }, sessionId);
-  return `Set file on ${selector}`;
+  return `Set file on ${selector} (pierced)`;
+}
+
+async function setFileInputInterceptStr(cdp, sessionId, clickSelector, filePath, iframeSelector = null) {
+  if (!clickSelector) {
+    throw new Error("setfile_intercept requires a click selector");
+  }
+  if (!filePath) {
+    throw new Error("setfile_intercept requires a file path");
+  }
+  const absolutePath = path.resolve(filePath);
+  if (!existsSync(absolutePath)) {
+    throw new Error(`File not found: ${absolutePath}`);
+  }
+
+  await cdp.send("Page.enable", {}, sessionId);
+  await cdp.send("Page.setInterceptFileChooserDialog", { enabled: true }, sessionId);
+
+  const chooserOpenedPromise = cdp.waitForEvent("Page.fileChooserOpened", { sessionId, timeoutMs: 15000 });
+
+  const expression = iframeSelector
+    ? `(() => {
+         const iframe = document.querySelector(${JSON.stringify(iframeSelector)});
+         const doc = iframe?.contentDocument || iframe?.contentWindow?.document;
+         const btn = doc?.querySelector(${JSON.stringify(clickSelector)});
+         if (btn) {
+           btn.click();
+           return 'clicked';
+         }
+         return 'btn-not-found';
+       })()`
+    : `(() => {
+         const btn = document.querySelector(${JSON.stringify(clickSelector)});
+         if (btn) {
+           btn.click();
+           return 'clicked';
+         }
+         return 'btn-not-found';
+       })()`;
+
+  await cdp.send("Runtime.enable", {}, sessionId);
+  const clickEvalResult = await cdp.send("Runtime.evaluate", {
+    expression,
+    returnByValue: true,
+    awaitPromise: true,
+    userGesture: true
+  }, sessionId);
+
+  if (clickEvalResult.exceptionDetails) {
+    await cdp.send("Page.setInterceptFileChooserDialog", { enabled: false }, sessionId);
+    throw new Error(`Click failed: ${clickEvalResult.exceptionDetails.text}`);
+  }
+
+  const clickStatus = clickEvalResult.result?.value;
+  if (clickStatus !== "clicked") {
+    await cdp.send("Page.setInterceptFileChooserDialog", { enabled: false }, sessionId);
+    throw new Error(`Click target not found or not clicked: ${clickStatus}`);
+  }
+
+  let eventParams;
+  try {
+    eventParams = await chooserOpenedPromise.promise;
+  } catch (err) {
+    await cdp.send("Page.setInterceptFileChooserDialog", { enabled: false }, sessionId);
+    throw new Error(`Timeout waiting for Page.fileChooserOpened: ${err.message}`);
+  } finally {
+    await cdp.send("Page.setInterceptFileChooserDialog", { enabled: false }, sessionId);
+  }
+
+  await cdp.send("DOM.enable", {}, sessionId);
+  await cdp.send("DOM.setFileInputFiles", {
+    backendNodeId: eventParams.backendNodeId,
+    files: [absolutePath]
+  }, sessionId);
+
+  return `Set file intercept completed successfully on backendNodeId: ${eventParams.backendNodeId}`;
 }
 
 async function ensureTargetSession(state, targetId) {
@@ -546,6 +720,8 @@ async function runBroker() {
               return { ok: true, result: await pasteHtmlStr(cdp, sessionId, args[0]) };
             case "setfile":
               return { ok: true, result: await setFileInputStr(cdp, sessionId, args[0], args[1]) };
+            case "setfile_intercept":
+              return { ok: true, result: await setFileInputInterceptStr(cdp, sessionId, args[0], args[1], args[2] || null) };
             default:
               return { ok: false, error: `Unknown command: ${cmd}` };
           }
@@ -721,7 +897,7 @@ async function main() {
   const [, , command, ...args] = process.argv;
 
   if (!command) {
-    throw new Error("Usage: live_cdp.mjs <list|warm|warmall|nav|eval|click|clickxy|type|setfile|html|shot|snap|stop> ...");
+    throw new Error("Usage: live_cdp.mjs <list|warm|warmall|nav|eval|click|clickxy|type|setfile|setfile_intercept|html|shot|snap|stop> ...");
   }
 
   if (command === "_broker") {
@@ -789,11 +965,14 @@ async function main() {
   if (command === "setfile" && args.length < 3) {
     throw new Error("Usage: live_cdp.mjs setfile <target> <selector> <filePath>");
   }
+  if (command === "setfile_intercept" && args.length < 3) {
+    throw new Error("Usage: live_cdp.mjs setfile_intercept <target> <clickSelector> <filePath> [iframeSelector]");
+  }
 
   if (
-    !["nav", "eval", "click", "clickxy", "type", "pastehtml", "setfile", "html", "shot", "screenshot", "snap", "snapshot"].includes(command)
+    !["nav", "eval", "click", "clickxy", "type", "pastehtml", "setfile", "setfile_intercept", "html", "shot", "screenshot", "snap", "snapshot"].includes(command)
   ) {
-    throw new Error("Usage: live_cdp.mjs <list|warm|warmall|nav|eval|click|clickxy|type|pastehtml|setfile|html|shot|snap|stop> ...");
+    throw new Error("Usage: live_cdp.mjs <list|warm|warmall|nav|eval|click|clickxy|type|pastehtml|setfile|setfile_intercept|html|shot|snap|stop> ...");
   }
 
   const targetId = await resolveFullTargetId(args[0]);
@@ -802,6 +981,8 @@ async function main() {
     commandArgs = [args.slice(1).join(" ")];
   } else if (command === "setfile") {
     commandArgs = [args[1], args.slice(2).join(" ")];
+  } else if (command === "setfile_intercept") {
+    commandArgs = [args[1], args[2], args[3] || ""];
   } else {
     commandArgs = args.slice(1);
   }

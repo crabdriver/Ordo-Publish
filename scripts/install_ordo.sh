@@ -40,17 +40,19 @@ for item in \
   publish.py \
   publish_console_state.py \
   markdown_utils.py \
+  ordo_worker.py \
   wechat_publisher.py \
   zhihu_publisher.py \
   toutiao_publisher.py \
   jianshu_publisher.py \
   yidian_publisher.py \
+  bilibili_publisher.py \
   live_cdp.mjs \
   live_cdp_ws_resolver.mjs \
   scripts \
   themes \
   templates \
-  tiandi_engine
+  ordo_engine
 do
   cp -R "$ROOT_DIR/$item" "$STAGE_DIR/"
 done
@@ -78,24 +80,26 @@ class Ordo < Formula
       "publish.py",
       "publish_console_state.py",
       "markdown_utils.py",
+      "ordo_worker.py",
       "requirements.txt",
       "wechat_publisher.py",
       "zhihu_publisher.py",
       "toutiao_publisher.py",
       "jianshu_publisher.py",
       "yidian_publisher.py",
+      "bilibili_publisher.py",
       "live_cdp.mjs",
       "live_cdp_ws_resolver.mjs",
       "scripts",
       "themes",
       "templates",
-      "tiandi_engine",
+      "ordo_engine",
     )
 
     (libexec/"bin").mkpath
     (libexec/"bin/ordo").write <<~SH
       #!/bin/bash
-      exec "#{libexec}/bin/python" -m tiandi_engine.cli.app "$@"
+      exec "#{libexec}/bin/python" -m ordo_engine.cli.app "$@"
     SH
     chmod 0755, libexec/"bin/ordo"
     bin.install libexec/"bin/ordo"

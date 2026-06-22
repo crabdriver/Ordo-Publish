@@ -36,8 +36,8 @@ class FakeTerminalService:
 class TerminalTuiTests(unittest.IsolatedAsyncioTestCase):
     async def test_tui_loads_defaults_into_fullscreen_form(self):
         from textual.widgets import Input
-        from tiandi_engine.workbench.terminal_service import TerminalWizardSettings
-        from tiandi_engine.workbench.terminal_tui import OrdoTuiApp
+        from ordo_engine.workbench.terminal_service import TerminalWizardSettings
+        from ordo_engine.workbench.terminal_tui import OrdoTuiApp
 
         app = OrdoTuiApp(
             base_dir=Path("/tmp"),
@@ -58,8 +58,8 @@ class TerminalTuiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tui_save_defaults_uses_service(self):
         from textual.widgets import Input
-        from tiandi_engine.workbench.terminal_service import TerminalWizardSettings
-        from tiandi_engine.workbench.terminal_tui import OrdoTuiApp
+        from ordo_engine.workbench.terminal_service import TerminalWizardSettings
+        from ordo_engine.workbench.terminal_tui import OrdoTuiApp
 
         service = FakeTerminalService(TerminalWizardSettings(source_path="/tmp/articles"))
         app = OrdoTuiApp(base_dir=Path("/tmp"), service=service)
@@ -73,8 +73,8 @@ class TerminalTuiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.saved[-1].source_path, "/tmp/changed")
 
     async def test_tui_save_defaults_preserves_wechat_theme_fields(self):
-        from tiandi_engine.workbench.terminal_service import TerminalWizardSettings
-        from tiandi_engine.workbench.terminal_tui import OrdoTuiApp
+        from ordo_engine.workbench.terminal_service import TerminalWizardSettings
+        from ordo_engine.workbench.terminal_tui import OrdoTuiApp
 
         service = FakeTerminalService(
             TerminalWizardSettings(
@@ -94,8 +94,8 @@ class TerminalTuiTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tui_run_publish_uses_service_and_updates_logs(self):
         from textual.widgets import Log
-        from tiandi_engine.workbench.terminal_service import TerminalWizardSettings
-        from tiandi_engine.workbench.terminal_tui import OrdoTuiApp
+        from ordo_engine.workbench.terminal_service import TerminalWizardSettings
+        from ordo_engine.workbench.terminal_tui import OrdoTuiApp
 
         service = FakeTerminalService(TerminalWizardSettings(source_path="/tmp/articles"))
         app = OrdoTuiApp(base_dir=Path("/tmp"), service=service)

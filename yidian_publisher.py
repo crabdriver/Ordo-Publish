@@ -6,22 +6,22 @@ import subprocess
 import time
 from pathlib import Path
 
-from markdown_utils import render_markdown_html
-from tiandi_engine.importers.normalize import strip_title_marker
-from tiandi_engine.platforms.browser.node_runtime import resolve_node_executable
+from markdown_utils import render_markdown_html, should_declare_ai
+from ordo_engine.importers.normalize import strip_title_marker
+from ordo_engine.platforms.browser.node_runtime import resolve_node_executable
 
 
 BASE_DIR = Path(__file__).resolve().parent
 CDP_SCRIPT = BASE_DIR / "live_cdp.mjs"
 YIDIAN_MATCH = "mp.yidianzixun.com"
 YIDIAN_EDITOR_URL = "https://mp.yidianzixun.com/#/Writing/articleEditor"
-YIDIAN_COVER_FILE_INPUT = ".upload-input"
+YIDIAN_COVER_FILE_INPUT = "input.upload-input"
 YIDIAN_SINGLE_COVER_TEXT = "单图"
 YIDIAN_NO_DECLARATION = "无需声明"
 YIDIAN_AI_DECLARATION = "内容由AI生成"
 AI_KEYWORDS = ["AI创作", "AI辅助", "AIGC", "人工智能生成", "AI生成", "AI工具", "使用AI"]
 SMOKE_STATE_PREFIX = "[SMOKE_STATE] "
-PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off")
+PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off", "random")
 
 
 def clean_title(title):
@@ -182,12 +182,96 @@ def emit_smoke_state(target_id, smoke_step, page_state, *, error=None):
     print(f"{SMOKE_STATE_PREFIX}{json.dumps(payload, ensure_ascii=False)}")
 
 
+def take_screenshot(target_id, step):
+    if not target_id:
+        return
+    try:
+        timestamp = int(time.time() * 1000)
+        screenshot_dir = BASE_DIR / ".ordo" / "screenshots" / "yidian"
+        screenshot_dir.mkdir(parents=True, exist_ok=True)
+        filepath = screenshot_dir / f"{timestamp}_{step}.png"
+        run_cdp("shot", target_id, str(filepath))
+        print(f"[INFO] [SCREENSHOT] Saved to: {filepath}")
+    except Exception as e:
+        print(f"[WARN] 截图失败 ({step}): {e}")
+
+
+def verify_in_management_list(target_id, expected_title, is_draft=False):
+    management_url = "https://mp.yidianzixun.com/#/ArticleManual/original/publish"
+    print(f"[INFO] 正在跳转至一点号内容管理页面进行校验: {management_url}")
+    run_cdp("nav", target_id, management_url)
+    time.sleep(2)
+
+    if is_draft:
+        click_draft_tab_expr = """
+        (() => {
+            const tabs = Array.from(document.querySelectorAll('div, span, li, a, p'));
+            const draftTab = tabs.find(el => {
+                const txt = (el.innerText || el.textContent || '').trim();
+                return (txt === '草稿' || txt === '草稿箱') && el.offsetHeight > 0;
+            });
+            if (draftTab) {
+                draftTab.click();
+                return 'clicked';
+            }
+            return 'not_found';
+        })()
+        """
+        res = run_cdp("eval", target_id, click_draft_tab_expr)
+        print(f"[INFO] 尝试点击一点号「草稿箱」标签结果: {res}")
+        time.sleep(1.5)
+
+    title_json = json.dumps(expected_title, ensure_ascii=False)
+    list_ready_expr = """
+(() => {
+  const normalize = (t) => (t || '').replace(/\\s+/g, '');
+  const target = normalize(""" + title_json + """);
+  const els = Array.from(document.querySelectorAll('.card-title, .title, a, div, span, h1, h2, h3, h4'));
+  const found = els.find(el => {
+    const txt = normalize(el.innerText || el.textContent || '');
+    return txt.includes(target) && el.offsetHeight > 0;
+  });
+  return !!found;
+})()
+"""
+    print(f"[INFO] 正在校验列表是否包含文章标题：《{expected_title}》...")
+    success = wait_until(target_id, list_ready_expr, timeout_seconds=15, interval_seconds=1)
+    if not success:
+        print("[WARN] 一点号内容管理列表未就绪，刷新后重试校验")
+        run_cdp("eval", target_id, "location.reload(); 'reloading'")
+        time.sleep(6)
+        if is_draft:
+            run_cdp("eval", target_id, click_draft_tab_expr)
+            time.sleep(1.5)
+        success = wait_until(target_id, list_ready_expr, timeout_seconds=15, interval_seconds=1)
+    take_screenshot(target_id, "verified_list")
+    if not success:
+        raise RuntimeError(f"双重校验失败：未能在一点号稿件列表中找到文章《{expected_title}》")
+    print(f"[INFO] 双重校验成功：在稿件列表中成功检索到文章《{expected_title}》！")
+
+
+def scroll_settings_into_view(target_id):
+    expression = """
+(() => {
+  const el = document.querySelector('.article-setting');
+  if (el) {
+    el.scrollIntoView({ block: 'start' });
+    return 'scrolled';
+  }
+  return 'not_found';
+})()
+"""
+    res = run_cdp("eval", target_id, expression)
+    print(f"[INFO] 已将一点号文章设置面板滚动至可视区域: {res}")
+    time.sleep(1)
+
+
 def ensure_editor_ready(target_id):
     run_cdp("nav", target_id, YIDIAN_EDITOR_URL)
     # 强制执行一次 reload 以确保打破 Yidian SPA 路由锁，强制重新渲染编辑器
     run_cdp("eval", target_id, "location.reload()")
     time.sleep(2)
-    
+
     if wait_for_button(target_id, "再写一篇", timeout_seconds=3, interval_seconds=1):
         action = click_action(target_id, "再写一篇")
         if action != "clicked":
@@ -297,47 +381,97 @@ def apply_cover(target_id, cover_path):
     mode_result = select_cover_type(target_id, YIDIAN_SINGLE_COVER_TEXT)
     if not wait_for_cover_type(target_id, YIDIAN_SINGLE_COVER_TEXT, timeout_seconds=8):
         raise RuntimeError(f"一点号封面未切换到单图: {mode_result}")
+
+    # 1. 直接将文件注入到 input.upload-input 控件中
     run_cdp("setfile", target_id, YIDIAN_COVER_FILE_INPUT, str(path))
-    
-    # 动态等待裁剪弹窗出现
-    crop_visible_expr = """
+    time.sleep(0.5)
+
+    # 2. 直接调用一点号封面组件绑定的 Vue 方法 uploadLocalImg 进行上传
+    trigger_upload_expr = """
 (() => {
-  const dialogSelectors = ['.el-dialog__wrapper', '.dialog-wrapper', '.modal', '.crop-dialog', '.popup', '.cropper-modal', '.mp-crop-container'];
-  const dialog = dialogSelectors.map(sel => document.querySelector(sel)).find(el => el && el.style.display !== 'none' && el.offsetHeight > 0);
-  return !!dialog;
+  const el = document.querySelector('.cover-crop-container');
+  const input = document.querySelector('input.upload-input');
+  if (el && el.__vue__ && input && input.files.length > 0) {
+    el.__vue__.uploadLocalImg(input.files);
+    return 'triggered';
+  }
+  return 'missing';
 })()
 """
-    print("[INFO] 等待封面裁剪弹窗出现...")
-    if not wait_until(target_id, crop_visible_expr, timeout_seconds=10, interval_seconds=0.5):
-        print("[WARN] 未检测到封面裁剪弹窗，可能已自动跳过或直接上传成功")
-    else:
-        print("[INFO] 裁剪弹窗已出现，执行裁切确认...")
-        crop_confirm_result = run_cdp(
-            "eval",
-            target_id,
-            """
+    triggered = run_cdp("eval", target_id, trigger_upload_expr)
+    if triggered != "triggered":
+        raise RuntimeError(f"无法触发一点号 Vue 封面上传函数: {triggered}")
+
+    # 3. 轮询等待后台上传完成（监听 Vue 内部的 m_isUploading 状态并验证 images 集合不为空）
+    print("[INFO] 正在上传封面图片至一点号...")
+    time.sleep(1.0)  # 预留上传开始与状态变更时间
+    upload_success = False
+    for _ in range(40):
+        state_expr = """
 (() => {
-  const dialogSelectors = ['.el-dialog__wrapper', '.dialog-wrapper', '.modal', '.crop-dialog', '.popup', '.cropper-modal', '.mp-crop-container'];
-  const dialog = dialogSelectors.map(sel => document.querySelector(sel)).find(el => el && el.style.display !== 'none' && el.offsetHeight > 0);
-  if (!dialog) return 'no-dialog';
-  const btn = Array.from(dialog.querySelectorAll('button, span, div, a')).find(
-    el => ['确定', '保存', '裁剪', '裁剪并保存', '裁切'].includes((el.innerText || '').trim())
-  );
-  if (btn) {
-    btn.click();
-    return 'clicked';
-  }
-  return 'no-crop-button';
+  const el = document.querySelector('.cover-crop-container');
+  if (!el || !el.__vue__) return JSON.stringify({status: 'missing'});
+  const vue = el.__vue__;
+  return JSON.stringify({
+    isUploading: vue.m_isUploading,
+    imagesCount: vue.images.length
+  });
 })()
-""".strip(),
-        )
-        if crop_confirm_result == 'clicked':
-            print("[INFO] 已自动点击了一点号的封面裁剪确认按钮")
-            time.sleep(1.5)
-    
-    if not wait_for_cover_upload(target_id, timeout_seconds=12):
-        raise RuntimeError(f"一点号封面上传后未检测到预览或成功状态: {path.name}")
-    print(f"[INFO] 已向一点号封面上传控件注入文件: {path}")
+"""
+        res = json.loads(run_cdp("eval", target_id, state_expr))
+        if res.get("status") == "missing":
+            time.sleep(0.5)
+            continue
+        if not res.get("isUploading") and res.get("imagesCount", 0) > 0:
+            upload_success = True
+            break
+        time.sleep(0.5)
+
+    if not upload_success:
+        raise RuntimeError("一点号封面上传超时，未能成功上传封面图")
+
+    # 5. 一点号上传后只把图片放入 images，必须显式设置为当前封面。
+    set_current_cover_expr = """
+(() => {
+  const el = document.querySelector('.cover-crop-container');
+  if (!el || !el.__vue__) return 'missing';
+  const vue = el.__vue__;
+  const latestImg = vue.images[vue.images.length - 1];
+  if (latestImg) {
+    vue.setCurrentCover(latestImg);
+    return 'called';
+  }
+  return 'no_img';
+})()
+"""
+    set_res = run_cdp("eval", target_id, set_current_cover_expr)
+    if set_res != "called":
+        raise RuntimeError(f"无法调用一点号 Vue 封面设置函数: {set_res}")
+
+    print("[INFO] 等待一点号封面设置同步...")
+    cover_synced = False
+    for _ in range(20):
+        time.sleep(0.5)
+        cover_state_expr = """
+(() => {
+  const el = document.querySelector('.cover-crop-container');
+  if (!el || !el.__vue__) return JSON.stringify({error: 'missing'});
+  const vue = el.__vue__;
+  if (vue.singleCover && vue.singleCover.url) {
+    return JSON.stringify({status: 'done', url: vue.singleCover.url});
+  }
+  return JSON.stringify({status: 'waiting'});
+})()
+"""
+        state = json.loads(run_cdp("eval", target_id, cover_state_expr))
+        if state.get("status") == "done":
+            cover_synced = True
+            break
+
+    if not cover_synced:
+        raise RuntimeError("一点号封面设置超时，未能成功设置封面图")
+
+    print(f"[INFO] 已成功上传并设置一点号封面图: {path}")
 
 
 def select_cover_type(target_id, option_text):
@@ -576,8 +710,14 @@ def main():
         result = inject_article(target_id, title, html)
         page_state = "article_injected"
         print(f"[INFO] 已写入一点号编辑器: {result}")
+        take_screenshot(target_id, "injected")
 
-        if args.ai_declaration_mode != "force_off":
+        # 将设置面板滚动到可视区域，以确保AI声明与封面上传元素处于激活与交互状态
+        scroll_settings_into_view(target_id)
+        take_screenshot(target_id, "settings_scrolled")
+
+        need_ai_declaration = should_declare_ai(title, html, args.ai_declaration_mode)
+        if need_ai_declaration:
             smoke_step = "attempt_ai_declaration"
             attempt_ai_declaration(target_id)
             page_state = "ai_declared"
@@ -585,6 +725,7 @@ def main():
             smoke_step = "clear_ai_declaration"
             clear_result = ensure_content_statement(target_id, YIDIAN_NO_DECLARATION)
             print(f"[INFO] 已切换一点号内容声明为无需声明: {clear_result}")
+        take_screenshot(target_id, "ai_declaration")
 
         smoke_step = "apply_cover"
         if args.cover_mode == "force_on" and not args.cover:
@@ -597,6 +738,7 @@ def main():
             print(f"[INFO] 已切换一点号封面为默认: {cover_result}")
             if not wait_for_default_cover(target_id):
                 raise RuntimeError("一点号默认封面未选中，无法继续保存草稿")
+        take_screenshot(target_id, "cover_applied")
 
         if args.mode == "draft":
             smoke_step = "draft_saved"
@@ -604,6 +746,8 @@ def main():
             if action != "clicked":
                 raise RuntimeError(f"点击存草稿失败: {action}")
             page_state = "draft_saved"
+            take_screenshot(target_id, "draft_saved")
+            verify_in_management_list(target_id, title, is_draft=True)
             emit_smoke_state(target_id, smoke_step, page_state)
             print(f"[OK] 已存草稿: {article_path}")
             return
@@ -626,6 +770,7 @@ def main():
             publish_ready = wait_for_button(target_id, "发布", timeout_seconds=10)
             if not publish_ready:
                 raise RuntimeError("发布按钮仍不可点击，请检查页面是否还有未填项")
+            take_screenshot(target_id, "before_publish")
 
             smoke_step = "publish_click"
             action = click_action(target_id, "发布")
@@ -660,6 +805,8 @@ def main():
                     raise RuntimeError(f"点击查看文章失败: {view_action}")
 
             page_state = "published"
+            take_screenshot(target_id, "published")
+            verify_in_management_list(target_id, title, is_draft=False)
             emit_smoke_state(target_id, smoke_step, page_state)
             print(f"[OK] 已发布成功: {article_path}")
         except Exception as exc:
@@ -684,6 +831,7 @@ def main():
                 action = click_action(target_id, "存草稿")
                 if action == "clicked":
                     page_state = "draft_saved"
+                    verify_in_management_list(target_id, title, is_draft=True)
                     emit_smoke_state(target_id, smoke_step, page_state)
                     print(f"[WARN] 一点号直接发表失败，已成功以降级保存草稿模式保存该文章！")
                     print(f"[OK] 已存草稿: {article_path}")
@@ -692,6 +840,7 @@ def main():
                     print(f"[ERROR] 降级存草稿失败: {action}")
             raise
     except Exception as exc:
+        take_screenshot(target_id, "error")
         emit_smoke_state(target_id, smoke_step, page_state, error=exc)
         raise
 

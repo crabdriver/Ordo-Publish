@@ -3,10 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-import tiandi_engine.state.session as session_module
-from tiandi_engine.results.errors import ErrorType
-from tiandi_engine.models.workbench import CoverAssignment, TemplateAssignment
-from tiandi_engine.state.session import (
+import ordo_engine.state.session as session_module
+from ordo_engine.results.errors import ErrorType
+from ordo_engine.models.workbench import CoverAssignment, TemplateAssignment
+from ordo_engine.state.session import (
     advance_after_success,
     build_session,
     finalize_article,
