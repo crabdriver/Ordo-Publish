@@ -15,7 +15,7 @@ except ImportError:
 
 from ordo_engine.platforms.playwright.engine import PlaywrightEngine
 from ordo_engine.platforms.playwright.human import HumanBehavior
-from ordo_engine.run_state import record_step, article_key
+from ordo_engine.run_state import article_key, record_step, state_file_for
 
 
 SMOKE_STATE_PREFIX = "[SMOKE_STATE] "
@@ -283,6 +283,7 @@ class PlaywrightBasePublisher(ABC):
                 self.platform,
                 getattr(self, "_mode", "draft"),
                 smoke_step,
+                state_file=state_file_for(self.engine.base_dir),
             )
         except Exception:
             pass
