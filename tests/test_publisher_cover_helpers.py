@@ -16,6 +16,17 @@ import zhihu_publisher
 from ordo_engine.assignment.cover_contract import validate_cover
 
 
+def _toutiao_successful_cdp(command, _target_id, *args, **_kwargs):
+    if command != "eval":
+        return "ok"
+    expression = args[0]
+    if ".pic-select-image-item" in expression:
+        return '{"ok": true, "x": 10, "y": 20}'
+    if ".image-item-remove" in expression:
+        return "0"
+    return "no-drawer"
+
+
 class ZhihuApplyCoverTests(unittest.TestCase):
     def test_apply_cover_calls_setfile_with_known_selector(self):
         mock_run = MagicMock()
@@ -138,7 +149,7 @@ class ToutiaoStrictSettingTests(unittest.TestCase):
             ), patch.object(
                 toutiao_publisher,
                 "run_cdp",
-                return_value="ok",
+                side_effect=_toutiao_successful_cdp,
             ) as mocked_run:
                 toutiao_publisher.apply_cover("toutiao-target", cover_path)
 
@@ -168,7 +179,7 @@ class ToutiaoStrictSettingTests(unittest.TestCase):
                 calls.append((command, target_id, *args))
                 if command == "click" and args[0] == ".article-cover-add":
                     raise RuntimeError("Element not found: .article-cover-add")
-                return "ok"
+                return _toutiao_successful_cdp(command, target_id, *args, **kwargs)
 
             with patch.object(toutiao_publisher, "choose_cover_mode", return_value="checked"), patch.object(
                 toutiao_publisher,
@@ -209,7 +220,7 @@ class ToutiaoStrictSettingTests(unittest.TestCase):
             ), patch.object(
                 toutiao_publisher,
                 "run_cdp",
-                return_value="ok",
+                side_effect=_toutiao_successful_cdp,
             ), patch.object(
                 toutiao_publisher,
                 "click_visible_button",
@@ -241,7 +252,7 @@ class ToutiaoStrictSettingTests(unittest.TestCase):
             ), patch.object(
                 toutiao_publisher,
                 "run_cdp",
-                return_value="ok",
+                side_effect=_toutiao_successful_cdp,
             ), patch.object(
                 toutiao_publisher,
                 "click_visible_button",

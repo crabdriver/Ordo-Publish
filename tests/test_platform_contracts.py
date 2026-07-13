@@ -75,7 +75,7 @@ class PlatformContractTests(unittest.TestCase):
         self.assertIn("unset WECHAT_PROXY HTTP_PROXY HTTPS_PROXY http_proxy https_proxy", ssh_exec[-1])
         self.assertIn("export ORDO_WORKER=1", ssh_exec[-1])
 
-    def test_zhihu_prepare_includes_theme_cover_and_template_mode_in_command(self):
+    def test_zhihu_prepare_returns_in_process_context(self):
         registry = build_platform_registry(Path("/tmp/repo"))
         prepared = registry["zhihu"].prepare(
             markdown_file="/tmp/article.md",
@@ -89,23 +89,17 @@ class PlatformContractTests(unittest.TestCase):
         )
 
         self.assertEqual(prepared["platform"], "zhihu")
-        cmd = prepared["command"]
-        self.assertIn("zhihu_publisher.py", str(cmd[1]))
-        self.assertIn("--theme", cmd)
-        self.assertEqual(cmd[cmd.index("--theme") + 1], "editorial")
-        self.assertIn("--cover", cmd)
-        self.assertEqual(cmd[cmd.index("--cover") + 1], "/tmp/cover.png")
-        self.assertIn("--template-mode", cmd)
-        self.assertEqual(cmd[cmd.index("--template-mode") + 1], "rich")
-        self.assertIn("--article-id", cmd)
-        self.assertEqual(cmd[cmd.index("--article-id") + 1], "rev-1")
-        self.assertIn("--cover-mode", cmd)
-        self.assertEqual(cmd[cmd.index("--cover-mode") + 1], "force_on")
-        self.assertIn("--ai-declaration-mode", cmd)
-        self.assertEqual(cmd[cmd.index("--ai-declaration-mode") + 1], "force_off")
-        self.assertEqual(prepared.get("article_id"), "rev-1")
+        self.assertNotIn("command", prepared)
+        self.assertEqual(prepared["markdown_file"], "/tmp/article.md")
+        self.assertEqual(prepared["mode"], "draft")
+        self.assertEqual(prepared["theme_name"], "editorial")
+        self.assertEqual(prepared["cover_path"], "/tmp/cover.png")
+        self.assertEqual(prepared["template_mode"], "rich")
+        self.assertEqual(prepared["article_id"], "rev-1")
+        self.assertEqual(prepared["cover_mode"], "force_on")
+        self.assertEqual(prepared["ai_declaration_mode"], "force_off")
 
-    def test_jianshu_prepare_accepts_publish_option_modes(self):
+    def test_jianshu_prepare_returns_in_process_context(self):
         registry = build_platform_registry(Path("/tmp/repo"))
         prepared = registry["jianshu"].prepare(
             markdown_file="/tmp/article.md",
@@ -114,13 +108,14 @@ class PlatformContractTests(unittest.TestCase):
             ai_declaration_mode="force_off",
         )
 
-        cmd = prepared["command"]
-        self.assertIn("--cover-mode", cmd)
-        self.assertEqual(cmd[cmd.index("--cover-mode") + 1], "auto")
-        self.assertIn("--ai-declaration-mode", cmd)
-        self.assertEqual(cmd[cmd.index("--ai-declaration-mode") + 1], "force_off")
+        self.assertNotIn("command", prepared)
+        self.assertEqual(prepared["platform"], "jianshu")
+        self.assertEqual(prepared["markdown_file"], "/tmp/article.md")
+        self.assertEqual(prepared["mode"], "draft")
+        self.assertEqual(prepared["cover_mode"], "auto")
+        self.assertEqual(prepared["ai_declaration_mode"], "force_off")
 
-    def test_toutiao_prepare_accepts_scheduled_publish_at(self):
+    def test_toutiao_prepare_returns_in_process_scheduled_context(self):
         registry = build_platform_registry(Path("/tmp/repo"))
         prepared = registry["toutiao"].prepare(
             markdown_file="/tmp/article.md",
@@ -128,10 +123,11 @@ class PlatformContractTests(unittest.TestCase):
             scheduled_publish_at="2026-03-30T09:30",
         )
 
-        cmd = prepared["command"]
-        self.assertIn("--scheduled-publish-at", cmd)
-        self.assertEqual(cmd[cmd.index("--scheduled-publish-at") + 1], "2026-03-30T09:30")
-        self.assertEqual(prepared.get("scheduled_publish_at"), "2026-03-30T09:30")
+        self.assertNotIn("command", prepared)
+        self.assertEqual(prepared["platform"], "toutiao")
+        self.assertEqual(prepared["markdown_file"], "/tmp/article.md")
+        self.assertEqual(prepared["mode"], "publish")
+        self.assertEqual(prepared["scheduled_publish_at"], "2026-03-30T09:30")
 
     def test_browser_publish_scripts_accept_theme_cover_in_help(self):
         repo_root = Path(__file__).resolve().parent.parent
