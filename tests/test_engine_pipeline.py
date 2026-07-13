@@ -79,6 +79,16 @@ class DummyAdapter(BasePlatformAdapter):
 
 
 class EnginePipelineTests(unittest.TestCase):
+    def setUp(self):
+        self.engine_type_patcher = patch(
+            "ordo_engine.runner.pipeline._resolve_engine_type",
+            return_value="cdp",
+        )
+        self.engine_type_patcher.start()
+
+    def tearDown(self):
+        self.engine_type_patcher.stop()
+
     def test_run_platform_task_uses_adapter_result(self):
         registry = {
             "wechat": DummyAdapter(
@@ -152,6 +162,25 @@ class EnginePipelineTests(unittest.TestCase):
 
         self.assertEqual(len(results), 4)
         self.assertEqual(exit_code, 1)
+
+    def test_run_publish_pipeline_scopes_state_to_base_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            registry = {"wechat": DummyAdapter(base_dir, "wechat", returncode=0, stdout="ok")}
+            args = Namespace(mode="draft", continue_on_error=False)
+
+            run_publish_pipeline(
+                base_dir=base_dir,
+                args=args,
+                article_paths=[article],
+                platforms=["wechat"],
+                registry=registry,
+            )
+
+            state_file = base_dir / ".ordo" / "publish-state.json"
+            self.assertTrue(state_file.exists())
 
     def test_run_platform_task_passes_context_and_merges_into_payload(self):
         captured = {}

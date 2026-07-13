@@ -1,87 +1,155 @@
-"""发布幂等与运行状态持久化
-
-解决两个无人值守可靠性问题：
-1. 重跑时在同一平台内堆积重复草稿（幂等/去重）
-2. 失败可恢复：以状态文件记录每篇文章在各平台的最终状态，
-   重跑时跳过已完成项（这是 PublishState 状态机的持久化落地）
-
-状态文件：<base>/.ordo/publish-state.json
-"""
+"""发布幂等与运行状态持久化。"""
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
+import tempfile
 import time
 from pathlib import Path
-from typing import Optional
 
-STATE_FILE = Path(__file__).resolve().parents[2] / ".ordo" / "publish-state.json"
 
-# 视为「已完成」的状态（重跑时跳过，避免重复草稿）
-_DONE_STATES = {"published", "draft_saved", "draft_only"}
+def state_file_for(base_dir) -> Path:
+    return Path(base_dir) / ".ordo" / "publish-state.json"
+
+
+STATE_FILE = state_file_for(Path(__file__).resolve().parents[1])
+
+DONE_BY_MODE = {
+    "draft": {"draft_saved", "draft_only", "skipped_existing"},
+    "publish": {"published", "scheduled", "skipped_existing"},
+}
+
+
+class StateCorruptionError(RuntimeError):
+    """状态文件存在，但不是有效 JSON 对象。"""
 
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+def _frontmatter_article_id(content: str) -> str | None:
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    for line in lines[1:]:
+        if line.strip() in {"---", "..."}:
+            return None
+        match = re.match(r"^\s*article_id\s*:\s*(.*?)\s*$", line)
+        if match:
+            value = match.group(1)
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            return value or None
+    return None
+
+
 def article_key(markdown_path) -> str:
-    """用文章正文内容哈希作为幂等键（改名不影响去重）"""
-    p = Path(markdown_path)
-    content = p.read_text(encoding="utf-8") if p.exists() else str(p)
-    return _hash(content)
+    """优先用发布包 article_id；旧 Markdown 回退正文哈希。"""
+    path = Path(markdown_path)
+    content = path.read_text(encoding="utf-8") if path.exists() else str(path)
+    return _frontmatter_article_id(content) or _hash(content)
 
 
-def _load() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-    return {}
+def load_state(state_file=STATE_FILE) -> dict:
+    path = Path(state_file)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise StateCorruptionError(f"状态文件 JSON 损坏: {path}") from exc
+    if not isinstance(data, dict):
+        raise StateCorruptionError(f"状态文件根节点必须是对象: {path}")
+    return data
 
 
-def _save(data: dict):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+def save_state(state_file, data: dict) -> None:
+    path = Path(state_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temp:
+            temp_path = Path(temp.name)
+            json.dump(data, temp, ensure_ascii=False, indent=2)
+            temp.flush()
+            os.fsync(temp.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
 
 
-def is_done(article_key: str, platform: str, mode: str) -> bool:
-    data = _load()
-    rec = data.get(article_key, {}).get(platform)
-    if not rec:
-        return False
-    return rec.get("status") in _DONE_STATES
+def get_record(identity: str, platform: str, mode: str, *, state_file=STATE_FILE) -> dict | None:
+    record = load_state(state_file).get(identity, {}).get(platform, {}).get(mode)
+    return record if isinstance(record, dict) else None
 
 
-def mark_done(article_key: str, platform: str, status: str, mode: str, url: str = ""):
-    data = _load()
-    data.setdefault(article_key, {})[platform] = {
+def is_done(identity: str, platform: str, mode: str, *, state_file=STATE_FILE) -> bool:
+    record = get_record(identity, platform, mode, state_file=state_file)
+    return bool(record and record.get("status") in DONE_BY_MODE.get(mode, set()))
+
+
+def mark_done(
+    identity: str,
+    platform: str,
+    status: str,
+    mode: str,
+    url: str = "",
+    *,
+    state_file=STATE_FILE,
+) -> None:
+    data = load_state(state_file)
+    data.setdefault(identity, {}).setdefault(platform, {})[mode] = {
         "status": status,
         "mode": mode,
         "url": url,
         "ts": int(time.time()),
     }
-    _save(data)
+    save_state(state_file, data)
 
 
-def record_step(article_key: str, platform: str, step: str):
-    """记录当前所处状态机步骤（断点续跑的持久化依据）"""
-    data = _load()
-    rec = data.setdefault(article_key, {}).setdefault(platform, {})
-    rec["last_step"] = step
-    rec["ts"] = int(time.time())
-    _save(data)
+def record_step(
+    identity: str,
+    platform: str,
+    mode: str,
+    step: str,
+    *,
+    state_file=STATE_FILE,
+) -> None:
+    """记录当前状态机步骤。"""
+    data = load_state(state_file)
+    record = data.setdefault(identity, {}).setdefault(platform, {}).setdefault(mode, {})
+    record.update({"last_step": step, "mode": mode, "ts": int(time.time())})
+    save_state(state_file, data)
 
 
-def reset(article_key: str = None, platform: str = None):
-    """清空状态（调试/重新发布用）"""
-    if article_key is None:
-        STATE_FILE.unlink(missing_ok=True)
+def reset(
+    identity: str | None = None,
+    platform: str | None = None,
+    mode: str | None = None,
+    *,
+    state_file=STATE_FILE,
+) -> None:
+    """按全部、文章、平台或模式清空状态。"""
+    path = Path(state_file)
+    if identity is None:
+        path.unlink(missing_ok=True)
         return
-    data = _load()
-    if platform:
-        data.get(article_key, {}).pop(platform, None)
+    data = load_state(path)
+    if platform is None:
+        data.pop(identity, None)
+    elif mode is None:
+        data.get(identity, {}).pop(platform, None)
     else:
-        data.pop(article_key, None)
-    _save(data)
+        data.get(identity, {}).get(platform, {}).pop(mode, None)
+    save_state(path, data)

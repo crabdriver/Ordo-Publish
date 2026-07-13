@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from ordo_engine.platforms.registry import build_platform_registry, _resolve_engine_type
-from ordo_engine.run_state import article_key, is_done, mark_done
+from ordo_engine.run_state import article_key, is_done, mark_done, state_file_for
 from ordo_engine.platforms.playwright.engine import PlaywrightEngine
 
 
@@ -105,6 +105,7 @@ def run_publish_pipeline(
     printer=None,
 ):
     registry = registry or build_platform_registry(Path(base_dir))
+    state_file = state_file_for(base_dir)
     results = []
     exit_code = 0
 
@@ -164,7 +165,7 @@ def run_publish_pipeline(
                     theme_name = theme_resolver(article_path)
 
                 # ── 幂等：已完成则跳过，避免重跑堆积重复草稿 ──
-                if is_done(akey, platform, args.mode):
+                if is_done(akey, platform, args.mode, state_file=state_file):
                     print(f"[SKIP] {platform} 《{Path(article_path).name}》已完成，跳过（幂等）")
                     results.append(_synthetic_skip(platform, article_path, args.mode))
                     continue
@@ -189,7 +190,14 @@ def run_publish_pipeline(
                 # ── 成功后记录幂等状态，重跑不再重复 ──
                 if result["returncode"] == 0:
                     final_status = result.get("page_state") or result.get("status") or "draft_only"
-                    mark_done(akey, platform, final_status, args.mode, result.get("current_url", ""))
+                    mark_done(
+                        akey,
+                        platform,
+                        final_status,
+                        args.mode,
+                        result.get("current_url", ""),
+                        state_file=state_file,
+                    )
 
                 if append_record:
                     append_record(result)

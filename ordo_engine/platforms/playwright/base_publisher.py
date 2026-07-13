@@ -191,6 +191,7 @@ class PlaywrightBasePublisher(ABC):
         """标准发布流水线"""
         # 记录文章幂等键，使状态机每一步都持久化到运行状态文件（支撑失败可恢复）
         self._article_key = article_key(article.markdown_path)
+        self._mode = mode
         try:
             # Step 1: Navigate to editor
             self.page = self.navigate_to_editor()
@@ -277,7 +278,12 @@ class PlaywrightBasePublisher(ABC):
             payload["error"] = error
         # 状态机步骤持久化（支撑断点续跑）
         try:
-            record_step(getattr(self, "_article_key", ""), self.platform, smoke_step)
+            record_step(
+                getattr(self, "_article_key", ""),
+                self.platform,
+                getattr(self, "_mode", "draft"),
+                smoke_step,
+            )
         except Exception:
             pass
         print(f"{SMOKE_STATE_PREFIX}{json.dumps(payload, ensure_ascii=False)}")
