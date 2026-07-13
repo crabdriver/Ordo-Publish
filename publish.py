@@ -1631,6 +1631,11 @@ def parse_args(argv=None):
         help="读取 Ordo_Scribe_AI创作看板.md，跳过看板中已发表的文章",
     )
     parser.add_argument(
+        "--force-republish",
+        action="store_true",
+        help="显式清除本次文章/平台/mode 的幂等终态并重发；默认关闭",
+    )
+    parser.add_argument(
         "--assume-yes",
         action="store_true",
         help="远端版本校验不一致时继续执行，适合非交互发布",

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 from ordo_engine.platforms.base import BasePlatformAdapter, SubprocessPlatformAdapter
 from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
 from ordo_engine.platforms.playwright.base_publisher import PublishResult
-from ordo_engine.run_state import article_key, mark_done, state_file_for
+from ordo_engine.run_state import article_key, is_done, mark_done, state_file_for
 from ordo_engine.runner.pipeline import run_platform_task, run_publish_pipeline
 
 
@@ -358,19 +358,51 @@ class EnginePipelineTests(unittest.TestCase):
             )
             adapter = PlaywrightPlatformAdapter(base_dir, "zhihu", MagicMock)
 
+            appended = []
+            printed = []
             results, exit_code = run_publish_pipeline(
                 base_dir=base_dir,
                 args=Namespace(mode="publish", continue_on_error=False, headed=False),
                 article_paths=[article],
                 platforms=["zhihu"],
                 registry={"zhihu": adapter},
+                append_record=appended.append,
+                printer=printed.append,
                 engine_factory=lambda **_kwargs: (_ for _ in ()).throw(
                     AssertionError("browser started for completed task")
                 ),
             )
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(results[0]["status"], "skipped")
+        self.assertEqual(results[0]["status"], "skipped_existing")
+        self.assertEqual(appended, results)
+        self.assertEqual(printed, results)
+
+    def test_force_republish_resets_only_selected_article_platform_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            identity = article_key(article)
+            state_file = state_file_for(base_dir)
+            mark_done(identity, "wechat", "draft_only", "draft", state_file=state_file)
+            mark_done(identity, "wechat", "published", "publish", state_file=state_file)
+            registry = {"wechat": DummyAdapter(base_dir, "wechat", stdout="ok")}
+
+            results, exit_code = run_publish_pipeline(
+                base_dir=base_dir,
+                args=Namespace(
+                    mode="draft", continue_on_error=False, force_republish=True
+                ),
+                article_paths=[article],
+                platforms=["wechat"],
+                registry=registry,
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(results[0]["status"], "draft_only")
+            self.assertTrue(is_done(identity, "wechat", "draft", state_file=state_file))
+            self.assertTrue(is_done(identity, "wechat", "publish", state_file=state_file))
 
     def test_run_publish_pipeline_stops_on_first_error_when_continue_disabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:

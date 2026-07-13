@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 
 from ordo_engine.platforms.registry import build_platform_registry
-from ordo_engine.run_state import article_key, is_done, mark_done, state_file_for
+from ordo_engine.run_state import article_key, is_done, mark_done, reset, state_file_for
 from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
 from ordo_engine.platforms.playwright.engine import PlaywrightEngine
 
@@ -13,8 +13,8 @@ def _synthetic_skip(platform, article_path, mode):
         "platform": platform,
         "article": str(article_path),
         "returncode": 0,
-        "status": "skipped",
-        "page_state": "skipped",
+        "status": "skipped_existing",
+        "page_state": "skipped_existing",
         "mode": mode,
         "summary": "已完成，按幂等策略跳过",
         "stage": "publish",
@@ -112,6 +112,12 @@ def run_publish_pipeline(
     results = []
     exit_code = 0
 
+    if getattr(args, "force_republish", False):
+        for article_path in article_paths:
+            identity = article_key(article_path)
+            for platform in platforms:
+                reset(identity, platform, args.mode, state_file=state_file)
+
     # 仅浏览器适配器需要引擎。一个 pipeline 只允许一个独立 context。
     shared_engine = None
     browser_platforms = [
@@ -186,7 +192,12 @@ def run_publish_pipeline(
                 # ── 幂等：已完成则跳过，避免重跑堆积重复草稿 ──
                 if is_done(akey, platform, args.mode, state_file=state_file):
                     print(f"[SKIP] {platform} 《{Path(article_path).name}》已完成，跳过（幂等）")
-                    results.append(_synthetic_skip(platform, article_path, args.mode))
+                    result = _synthetic_skip(platform, article_path, args.mode)
+                    results.append(result)
+                    if append_record:
+                        append_record(result)
+                    if printer:
+                        printer(result)
                     continue
 
                 result = run_platform_task(

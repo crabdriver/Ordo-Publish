@@ -151,6 +151,10 @@ class PublishPreflightTests(unittest.TestCase):
         args = publish.parse_args(["article.md", "--mode", "publish", "--remote", "vps"])
         self.assertEqual(args.remote, "vps")
 
+    def test_force_republish_is_explicit_and_defaults_off(self):
+        self.assertFalse(publish.parse_args(["article.md"]).force_republish)
+        self.assertTrue(publish.parse_args(["article.md", "--force-republish"]).force_republish)
+
     def test_draft_mode_defaults_to_local_remote(self):
         args = publish.parse_args(["article.md", "--mode", "draft"])
         self.assertEqual(args.remote, "local")

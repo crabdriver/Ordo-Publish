@@ -25,6 +25,7 @@ DEFAULT_WATCH_DIR = Path("/Users/wizard/tiandidadao/润色")
 STATE_FILE = BASE_DIR / ".ordo" / "auto_publish_state.json"
 PUBLISH_RECORDS_FILE = BASE_DIR / "publish_records.csv"
 PUBLISH_LOCK_FILE = BASE_DIR / ".ordo" / "publish.lock"
+PUBLISH_TIMEOUT_SECONDS = 900
 WECHAT_PLATFORM = "wechat"
 BROWSER_PLATFORMS = ("zhihu", "toutiao", "jianshu", "yidian", "bilibili")
 ALL_PLATFORMS = (WECHAT_PLATFORM, *BROWSER_PLATFORMS)
@@ -35,6 +36,9 @@ TERMINAL_BY_MODE = {
 }
 RATE_LIMIT_STATUSES = {"limit_reached", "rate_limited"}
 UNVERIFIED_STATUSES = {"submitted_unverified"}
+REQUIRED_RECORD_FIELDS = {
+    "article", "article_id", "platform", "mode", "status", "error_type", "returncode",
+}
 
 # 兼容旧调用者；新命令会合并全部浏览器平台。
 WECHAT_PLATFORMS = WECHAT_PLATFORM
@@ -54,10 +58,10 @@ class PublishSummary:
     unverified: list[str] = field(default_factory=list)
     failed: list[str] = field(default_factory=list)
 
-    def add(self, platform: str, status: str, error_type: str = "") -> None:
+    def add(self, platform: str, status: str, error_type: str = "", returncode: int = 1) -> None:
         if status == "skipped_existing":
-            self.skipped.append(platform)
-        elif status in TERMINAL_BY_MODE[MODE_BY_PLATFORM[platform]]:
+            (self.skipped if returncode == 0 else self.failed).append(platform)
+        elif status in TERMINAL_BY_MODE[MODE_BY_PLATFORM[platform]] and returncode == 0:
             self.succeeded.append(platform)
         elif status in RATE_LIMIT_STATUSES or error_type == "rate_limited":
             self.rate_limited.append(platform)
@@ -157,11 +161,18 @@ def record_matches_article(row, article: Path, *, article_id=None):
 
 def read_record_rows(records_path=None):
     path = Path(records_path or PUBLISH_RECORDS_FILE)
-    if not path.exists() or path.stat().st_size == 0:
+    if not path.exists():
         return []
+    if path.stat().st_size == 0:
+        raise RuntimeError(f"发布记录 CSV 为空: {path}")
     try:
         with path.open("r", encoding="utf-8", newline="") as fp:
-            return list(csv.DictReader(fp))
+            reader = csv.DictReader(fp)
+            fields = set(reader.fieldnames or ())
+            missing = REQUIRED_RECORD_FIELDS - fields
+            if missing:
+                raise RuntimeError(f"发布记录 CSV 缺少字段 {sorted(missing)}: {path}")
+            return list(reader)
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
         raise RuntimeError(f"发布记录 CSV 不可读: {path}") from exc
 
@@ -170,7 +181,11 @@ def _is_terminal(platform, record):
     if not isinstance(record, dict):
         return False
     mode = MODE_BY_PLATFORM[platform]
-    return record.get("mode") == mode and record.get("status") in TERMINAL_BY_MODE[mode]
+    return (
+        record.get("mode") == mode
+        and record.get("status") in TERMINAL_BY_MODE[mode]
+        and _parse_returncode(record.get("returncode")) == 0
+    )
 
 
 def _latest_records(article: Path, rows=None):
@@ -183,7 +198,12 @@ def _latest_records(article: Path, rows=None):
             continue
         if (row.get("mode") or "").strip() != MODE_BY_PLATFORM[platform]:
             continue
-        latest[platform] = dict(row)
+        candidate = dict(row)
+        current = latest.get(platform)
+        if current is None or (not _is_terminal(platform, current) and _is_terminal(platform, candidate)):
+            latest[platform] = candidate
+        elif not _is_terminal(platform, current):
+            latest[platform] = candidate
     return latest
 
 
@@ -205,6 +225,8 @@ def merge_record_successes(existing, article: Path):
         key: dict(value) for key, value in (data.get("platforms") or {}).items() if isinstance(value, dict)
     }
     for platform, row in _latest_records(article).items():
+        if _is_terminal(platform, platform_state.get(platform)):
+            continue
         platform_state[platform] = {
             "mode": row.get("mode") or MODE_BY_PLATFORM[platform],
             "status": row.get("status") or "unknown",
@@ -219,11 +241,12 @@ def merge_record_successes(existing, article: Path):
 def build_publish_cmd(
     article: Path, *, platforms: str, mode: str, remote: str = "local",
     cover=None, template_theme=None, wechat_theme=None, no_auto_launch=False,
+    force_republish=False,
 ):
     cmd = [
         sys.executable, str(BASE_DIR / "publish.py"), str(article),
         "--platform", platforms, "--mode", mode, "--remote", remote,
-        "--skip-published", "--continue-on-error",
+        "--continue-on-error",
     ]
     if cover:
         cmd.extend(["--cover", str(cover), "--cover-mode", "force_on"])
@@ -233,14 +256,16 @@ def build_publish_cmd(
         cmd.extend(["--wechat-theme-mode", "fixed", "--wechat-theme", wechat_theme])
     if no_auto_launch:
         cmd.append("--no-auto-launch")
+    if force_republish:
+        cmd.append("--force-republish")
     return cmd
 
 
-def run_cmd(cmd, *, dry_run=False, env=None):
+def run_cmd(cmd, *, dry_run=False, env=None, timeout=PUBLISH_TIMEOUT_SECONDS):
     print("[CMD] " + " ".join(cmd))
     if dry_run:
         return 0
-    return subprocess.run(cmd, cwd=str(BASE_DIR), env=env).returncode
+    return subprocess.run(cmd, cwd=str(BASE_DIR), env=env, timeout=timeout).returncode
 
 
 def _new_command_outcomes(article, platforms, mode, row_offset, command_returncode):
@@ -275,6 +300,24 @@ def _pending_platforms(existing):
     return [platform for platform in ALL_PLATFORMS if not _is_terminal(platform, platform_state.get(platform))]
 
 
+def _persist_article_progress(
+    state, key, article, platform_state, *, started_at, cover, template_theme, wechat_theme,
+):
+    success = all(_is_terminal(platform, platform_state.get(platform)) for platform in ALL_PLATFORMS)
+    old = dict(state["articles"].get(key) or {})
+    state["articles"][key] = {
+        **old, "path": key, "title": article.stem,
+        "status": "success" if success else "attempted",
+        "started_at": old.get("started_at") or started_at,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "cover": str(cover) if cover else None,
+        "template_theme": template_theme, "wechat_theme": wechat_theme,
+        "platforms": platform_state,
+    }
+    save_state(state)
+    return success
+
+
 def publish_article(
     article: Path, *, force=False, dry_run=False, state=None,
     default_template_theme=None, default_wechat_theme=None,
@@ -302,13 +345,14 @@ def publish_article(
     groups = []
     if WECHAT_PLATFORM in pending:
         groups.append(([WECHAT_PLATFORM], "draft", build_publish_cmd(
-            article, platforms=WECHAT_PLATFORM, mode="draft", cover=cover, wechat_theme=wechat_theme
+            article, platforms=WECHAT_PLATFORM, mode="draft", cover=cover,
+            wechat_theme=wechat_theme, force_republish=force,
         )))
     browser_pending = [p for p in BROWSER_PLATFORMS if p in pending]
     if browser_pending:
         groups.append((browser_pending, "publish", build_publish_cmd(
             article, platforms=",".join(browser_pending), mode="publish",
-            cover=cover, template_theme=template_theme,
+            cover=cover, template_theme=template_theme, force_republish=force,
         )))
     if dry_run:
         for _platforms, _mode, cmd in groups:
@@ -328,20 +372,13 @@ def publish_article(
         outcomes = _new_command_outcomes(article, platforms, mode, row_offset, returncode)
         for platform, outcome in outcomes.items():
             platform_state[platform] = {**outcome, "updated_at": datetime.now().isoformat(timespec="seconds")}
-            summary.add(platform, outcome["status"], outcome["error_type"])
-
-    success = all(_is_terminal(platform, platform_state.get(platform)) for platform in ALL_PLATFORMS)
-    old = dict(state["articles"].get(key) or {})
-    state["articles"][key] = {
-        **old, "path": key, "title": article.stem,
-        "status": "success" if success else "attempted",
-        "started_at": old.get("started_at") or started_at,
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
-        "cover": str(cover) if cover else None,
-        "template_theme": template_theme, "wechat_theme": wechat_theme,
-        "platforms": platform_state,
-    }
-    save_state(state)
+            summary.add(
+                platform, outcome["status"], outcome["error_type"], outcome["returncode"]
+            )
+        success = _persist_article_progress(
+            state, key, article, platform_state, started_at=started_at, cover=cover,
+            template_theme=template_theme, wechat_theme=wechat_theme,
+        )
     summary.print()
     return "success" if success else "attempted"
 

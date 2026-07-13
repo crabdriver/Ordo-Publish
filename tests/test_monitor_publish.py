@@ -177,6 +177,90 @@ class MonitorPublishTests(unittest.TestCase):
             platforms = state["articles"][str(article.resolve())]["platforms"]
             self.assertTrue(all(item["status"] == "unknown" for item in platforms.values()))
 
+    def test_terminal_status_with_nonzero_returncode_is_not_success(self):
+        summary = monitor_publish.PublishSummary()
+        summary.add("zhihu", "published", "", 1)
+        self.assertEqual(summary.succeeded, [])
+        self.assertEqual(summary.failed, ["zhihu"])
+        self.assertFalse(monitor_publish._is_terminal(
+            "zhihu", {"mode": "publish", "status": "published", "returncode": 1}
+        ))
+
+    def test_historical_terminal_record_is_not_overwritten_by_later_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            records = root / "records.csv"
+            append_record(records, article=article, platform="zhihu", mode="publish", status="published")
+            append_record(records, article=article, platform="zhihu", mode="publish", status="failed", returncode=1)
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records):
+                merged = monitor_publish.merge_record_successes({}, article)
+            self.assertTrue(monitor_publish._is_terminal("zhihu", merged["platforms"]["zhihu"]))
+
+    def test_existing_state_terminal_is_not_overwritten_by_csv_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            records = root / "records.csv"
+            append_record(records, article=article, platform="zhihu", mode="publish", status="failed", returncode=1)
+            existing = {"platforms": {"zhihu": {
+                "mode": "publish", "status": "published", "returncode": 0,
+            }}}
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records):
+                merged = monitor_publish.merge_record_successes(existing, article)
+            self.assertEqual(merged["platforms"]["zhihu"]["status"], "published")
+
+    def test_existing_empty_or_invalid_csv_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for content in ("", "platform,status\nzhihu,published\n"):
+                records = root / "records.csv"
+                records.write_text(content, encoding="utf-8")
+                with self.subTest(content=content), self.assertRaisesRegex(RuntimeError, "CSV"):
+                    monitor_publish.read_record_rows(records)
+
+    def test_force_command_uses_narrow_force_republish_flag_and_not_skip_published(self):
+        cmd = monitor_publish.build_publish_cmd(
+            Path("/tmp/a.md"), platforms="zhihu", mode="publish", force_republish=True
+        )
+        self.assertIn("--force-republish", cmd)
+        self.assertNotIn("--skip-published", cmd)
+
+    def test_wechat_state_is_saved_before_browser_command_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            records = root / "records.csv"
+            state_file = root / "state.json"
+            calls = 0
+
+            def fake_run(cmd, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    append_record(records, article=article, platform="wechat", mode="draft", status="draft_only")
+                    return 0
+                raise RuntimeError("browser crashed")
+
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records), patch.object(
+                monitor_publish, "STATE_FILE", state_file
+            ), patch.object(monitor_publish, "run_cmd", side_effect=fake_run):
+                with self.assertRaisesRegex(RuntimeError, "browser crashed"):
+                    monitor_publish.publish_article(article)
+
+            saved = json.loads(state_file.read_text(encoding="utf-8"))
+            wechat = saved["articles"][str(article.resolve())]["platforms"]["wechat"]
+            self.assertEqual(wechat["status"], "draft_only")
+
+    def test_run_cmd_has_finite_timeout(self):
+        with patch.object(monitor_publish.subprocess, "run") as run:
+            run.return_value.returncode = 0
+            monitor_publish.run_cmd(["publish"])
+        self.assertEqual(run.call_args.kwargs["timeout"], monitor_publish.PUBLISH_TIMEOUT_SECONDS)
+
     def test_rows_before_command_do_not_count_as_command_result(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
