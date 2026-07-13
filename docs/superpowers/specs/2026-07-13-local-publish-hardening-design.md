@@ -24,7 +24,7 @@ Out of scope: UI redesign, content-variant copy, theme behavior, platform select
 
 `scripts/monitor_publish.py` remains the queue scanner and automatic entrypoint. It selects pending articles, acquires a repository-local run lock, and invokes the local publish pipeline. It must not call `require_vps_ready`, SSH, SCP, remote CDP, or `--remote vps`.
 
-Each article is submitted to one local `publish.py` process with all still-pending platforms. This preserves one browser process/context for browser platforms. WeChat continues through its official API adapter and must not cause browser startup when it is the only pending platform.
+Each article is submitted through at most two local mode groups: a WeChat API draft group and one browser-platform publish group containing all still-pending browser platforms. This preserves one browser process/context for browser platforms while keeping the established WeChat draft workflow. WeChat must not cause browser startup when it is the only pending platform.
 
 `publish.py --remote vps` remains available only when explicitly supplied by a human. `publish` mode defaults to `local`.
 
