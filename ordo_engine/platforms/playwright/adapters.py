@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from ordo_engine.platforms.base import BasePlatformAdapter, classify_process_result, infer_error_type
-from ordo_engine.platforms.playwright.base_publisher import is_terminal_outcome
+from ordo_engine.platforms.base import is_terminal_outcome
 from ordo_engine.platforms.playwright.engine import BrowserCleanupError
 from ordo_engine.results.errors import is_retryable_error
 from ordo_engine.results.record import ExecutionResult

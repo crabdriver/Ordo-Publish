@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 from ordo_engine.platforms.registry import build_platform_registry
+from ordo_engine.platforms.base import is_terminal_outcome
 from ordo_engine.run_state import article_key, is_done, mark_done, state_file_for
 from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
 from ordo_engine.platforms.playwright.engine import PlaywrightEngine
@@ -75,8 +76,15 @@ def run_platform_task(
     )
     process_result = adapter.publish(prepared)
     structured_result = adapter.collect_result(process_result, mode=mode)
+    raw_returncode = process_result.get("returncode", 1)
+    effective_returncode = (
+        raw_returncode
+        if raw_returncode != 0 or is_terminal_outcome(structured_result.status, mode)
+        else 1
+    )
     payload = {
         **process_result,
+        "returncode": effective_returncode,
         "mode": mode,
         "status": structured_result.status,
         "summary": structured_result.summary,

@@ -37,6 +37,14 @@ PLATFORM_CHANGED_MARKERS = [
 SMOKE_STATE_PREFIX = "[SMOKE_STATE] "
 
 
+def is_terminal_outcome(status: str, mode: str) -> bool:
+    if status == "skipped_existing":
+        return True
+    if mode == "publish":
+        return status in {"published", "scheduled"}
+    return status in {"draft_only", "draft_saved"}
+
+
 def _extract_smoke_state(text):
     if not text:
         return "", None

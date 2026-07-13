@@ -120,7 +120,7 @@ python3 publish.py article.md --platform zhihu --mode publish --remote local
 单次扫描：
 
 ```bash
-.venv/bin/python scripts/monitor_publish.py --once --template-theme sspai
+.venv/bin/python scripts/monitor_publish.py --once --watch-dir /path/to/polished --template-theme sspai
 ```
 
 指定单篇：
@@ -132,7 +132,7 @@ python3 publish.py article.md --platform zhihu --mode publish --remote local
 循环扫描：
 
 ```bash
-.venv/bin/python scripts/monitor_publish.py --daemon --interval 300 --template-theme sspai
+.venv/bin/python scripts/monitor_publish.py --daemon --watch-dir /path/to/polished --interval 300 --template-theme sspai
 ```
 
 每篇待处理文章最多拆成两组：

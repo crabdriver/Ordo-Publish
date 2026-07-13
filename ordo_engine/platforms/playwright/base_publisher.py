@@ -15,6 +15,7 @@ except ImportError:
 
 from ordo_engine.platforms.playwright.engine import PlaywrightEngine
 from ordo_engine.platforms.playwright.human import HumanBehavior
+from ordo_engine.platforms.base import is_terminal_outcome
 from ordo_engine.run_state import article_key, get_record, mark_done, record_step, state_file_for
 
 
@@ -60,14 +61,6 @@ class PublishResult:
     message: str = ""
     error: Optional[str] = None
     screenshots: list = field(default_factory=list)
-
-
-def is_terminal_outcome(status: str, mode: str) -> bool:
-    if status == "skipped_existing":
-        return True
-    if mode == "publish":
-        return status in {"published", "scheduled"}
-    return status in {"draft_only", "draft_saved"}
 
 
 class PlaywrightBasePublisher(ABC):
