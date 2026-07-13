@@ -62,6 +62,14 @@ class PublishResult:
     screenshots: list = field(default_factory=list)
 
 
+def is_terminal_outcome(status: str, mode: str) -> bool:
+    if status == "skipped_existing":
+        return True
+    if mode == "publish":
+        return status in {"published", "scheduled"}
+    return status in {"draft_only", "draft_saved"}
+
+
 class PlaywrightBasePublisher(ABC):
     """所有 Playwright 平台发布器的抽象基类
 
@@ -301,7 +309,7 @@ class PlaywrightBasePublisher(ABC):
     def _reconcile(self, mode: str) -> PublishResult:
         """危险提交状态只做核验；无法确认时绝不再次提交。"""
         self._submission_started = True
-        self.page = self.engine.get_page_for_platform(self.platform)
+        self.page = self.engine.context.new_page()
         result = self.verify_result(mode)
         if not self._is_terminal(result.status, mode):
             result = self._unverified_result(result, reconciliation=True)
@@ -323,11 +331,7 @@ class PlaywrightBasePublisher(ABC):
 
     @staticmethod
     def _is_terminal(status: str, mode: str) -> bool:
-        if status == "skipped_existing":
-            return True
-        if mode == "publish":
-            return status in {"published", "scheduled"}
-        return status in {"draft_only", "draft_saved"}
+        return is_terminal_outcome(status, mode)
 
     def _persist_result(self, result: PublishResult, mode: str) -> None:
         if self._is_terminal(result.status, mode):

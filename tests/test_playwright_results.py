@@ -28,11 +28,13 @@ class FakePage:
         self.text = text
         self.management_text = management_text
         self.feedback = list(feedback)
+        self.visited_urls = []
 
     def evaluate(self, _script):
         return self.text
 
     def goto(self, url, **_kwargs):
+        self.visited_urls.append(url)
         self.url = url
         self.text = self.management_text
 
@@ -49,7 +51,7 @@ class FakeLocator:
         return len(self.texts)
 
     def all_inner_texts(self):
-        return list(self.texts)
+        return [item[0] if isinstance(item, tuple) else item for item in self.texts]
 
     def nth(self, index):
         locator = FakeLocator(self.texts)
@@ -57,10 +59,17 @@ class FakeLocator:
         return locator
 
     def is_visible(self):
-        return True
+        item = self.texts[self.index]
+        return item[1] if isinstance(item, tuple) else True
 
     def inner_text(self):
-        return self.texts[self.index]
+        item = self.texts[self.index]
+        return item[0] if isinstance(item, tuple) else item
+
+
+class MessageOnlyPage(FakePage):
+    def locator(self, selector):
+        return FakeLocator(self.feedback if ".message" in selector else [])
 
 
 def verify_common(page, *, mode="publish", title="目标标题"):
@@ -167,6 +176,20 @@ def test_explicit_toast_success_is_terminal_success():
     assert result.status == "published"
 
 
+def test_hidden_historical_success_toast_is_not_evidence():
+    with patch("ordo_engine.platforms.playwright._common.time.sleep"):
+        result = verify_common(FakePage(feedback=[("发布成功", False)]))
+
+    assert result.status == "submitted_unverified"
+
+
+def test_generic_message_container_is_not_publish_feedback():
+    with patch("ordo_engine.platforms.playwright._common.time.sleep"):
+        result = verify_common(MessageOnlyPage(feedback=["发布成功"]))
+
+    assert result.status == "submitted_unverified"
+
+
 @pytest.mark.parametrize(
     ("mode", "feedback", "success_markers", "draft_markers"),
     [
@@ -267,20 +290,22 @@ def test_zhihu_management_navigation_without_title_is_unverified():
 
 
 @pytest.mark.parametrize(
-    ("status", "expected_returncode"),
+    ("status", "expected_returncode", "expected_verified_status"),
     [
-        ("published", 0),
-        ("scheduled", 0),
-        ("draft_only", 0),
-        ("draft_saved", 0),
-        ("skipped_existing", 0),
-        ("limit_reached", 1),
-        ("submitted_unverified", 1),
-        ("unknown", 1),
-        ("failed", 1),
+        ("published", 0, "published"),
+        ("scheduled", 0, "scheduled"),
+        ("draft_only", 1, "failed"),
+        ("draft_saved", 1, "failed"),
+        ("skipped_existing", 0, "skipped_existing"),
+        ("limit_reached", 1, "limit_reached"),
+        ("submitted_unverified", 1, "submitted_unverified"),
+        ("unknown", 1, "unknown"),
+        ("failed", 1, "failed"),
     ],
 )
-def test_adapter_returncode_only_accepts_terminal_outcomes(tmp_path, status, expected_returncode):
+def test_adapter_returncode_only_accepts_terminal_outcomes(
+    tmp_path, status, expected_returncode, expected_verified_status
+):
     article = tmp_path / "article.md"
     article.write_text("# 标题\n正文", encoding="utf-8")
 
@@ -298,7 +323,30 @@ def test_adapter_returncode_only_accepts_terminal_outcomes(tmp_path, status, exp
     result = adapter.publish(prepared)
 
     assert result["returncode"] == expected_returncode
-    assert adapter.verify(result, "publish") == status
+    assert adapter.verify(result, "publish") == expected_verified_status
+
+
+@pytest.mark.parametrize(
+    ("mode", "status"),
+    [("publish", "draft_only"), ("draft", "published")],
+)
+def test_adapter_rejects_mode_mismatched_terminal_outcome(tmp_path, mode, status):
+    article = tmp_path / "article.md"
+    article.write_text("# 标题\n正文", encoding="utf-8")
+
+    class ResultPublisher:
+        def __init__(self, _engine):
+            pass
+
+        def publish(self, _article, _mode):
+            return PublishResult(platform="stub", status=status, page_state=status)
+
+    adapter = PlaywrightPlatformAdapter(tmp_path, "stub", ResultPublisher)
+    adapter.set_shared_engine(MagicMock())
+    result = adapter.publish(adapter.prepare(article, mode))
+
+    assert result["returncode"] != 0
+    assert adapter.verify(result, mode) == "failed"
 
 
 def test_rate_limit_is_retryable_next_run():
@@ -354,6 +402,23 @@ class StatefulPublisher(PlaywrightBasePublisher):
             platform=self.platform,
             status=self.verification,
             page_state=self.verification,
+        )
+
+
+class CommonVerifierPublisher(StatefulPublisher):
+    def verify_result(self, mode):
+        self.events.append("verify")
+        return verify_result_common(
+            self.page,
+            self.platform,
+            mode,
+            r"/article/\d+$",
+            ["发布成功"],
+            ["草稿已保存"],
+            ["发布上限"],
+            "https://example.test/manage",
+            "https://example.test/drafts",
+            expected_title=self._article.title,
         )
 
 
@@ -444,6 +509,38 @@ def test_crash_after_click_records_unverified_and_rerun_never_submits(tmp_path):
     assert second.fill_calls == 0
     assert second.navigate_calls == 0
     assert second.events == ["verify"]
+
+
+@pytest.mark.parametrize(
+    ("management_text", "expected_status"),
+    [("其他文章\n目标标题", "published"), ("只有其他文章", "submitted_unverified")],
+)
+def test_recovery_uses_blank_page_and_management_title_only(
+    tmp_path, management_text, expected_status
+):
+    article = tmp_path / "article.md"
+    article.write_text("# 标题", encoding="utf-8")
+    identity = article_key(article)
+    state_file = state_file_for(tmp_path)
+    record_step(identity, "stub", "publish", "submitted", state_file=state_file)
+
+    unrelated = FakePage(url="https://example.test/article/999")
+    blank = FakePage(url="about:blank", management_text=management_text)
+    engine = MagicMock(base_dir=tmp_path)
+    engine.context.pages = [unrelated]
+    engine.context.new_page.return_value = blank
+    engine.screenshot.return_value = None
+    publisher = CommonVerifierPublisher(engine)
+
+    with patch("ordo_engine.platforms.playwright._common.time.sleep"):
+        result = publisher.publish(payload(article), "publish")
+
+    assert result.status == expected_status
+    assert blank.visited_urls == ["https://example.test/manage"]
+    assert all("editor" not in url for url in blank.visited_urls)
+    assert publisher.navigate_calls == 0
+    engine.get_page_for_platform.assert_not_called()
+    assert unrelated.url == "https://example.test/article/999"
 
 
 @pytest.mark.parametrize("hazard", ["submit_started", "submitted", "submitted_unverified"])

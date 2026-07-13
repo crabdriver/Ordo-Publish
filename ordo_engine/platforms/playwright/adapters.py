@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from ordo_engine.platforms.base import BasePlatformAdapter, classify_process_result, infer_error_type
+from ordo_engine.platforms.playwright.base_publisher import is_terminal_outcome
 from ordo_engine.results.errors import is_retryable_error
 from ordo_engine.results.record import ExecutionResult
 
@@ -117,9 +118,9 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
             return {
                 "platform": self.platform,
                 "command": f"playwright:{self.platform}",
-                "returncode": 0 if result.status in {
-                    "published", "scheduled", "draft_only", "draft_saved", "skipped_existing"
-                } else 1,
+                "returncode": 0 if is_terminal_outcome(
+                    result.status, prepared_context["mode"]
+                ) else 1,
                 "outcome_status": result.status,
                 "stdout": stdout_text,
                 "stderr": result.error or "",
@@ -145,6 +146,10 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
 
     def verify(self, process_result, mode):
         outcome_status = process_result.get("outcome_status")
+        if outcome_status in {
+            "published", "scheduled", "draft_only", "draft_saved", "skipped_existing",
+        } and not is_terminal_outcome(outcome_status, mode):
+            return "failed"
         if outcome_status in {
             "published", "scheduled", "draft_only", "draft_saved", "skipped_existing",
             "limit_reached", "submitted_unverified", "unknown", "failed",

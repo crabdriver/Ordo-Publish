@@ -21,7 +21,7 @@ from ordo_engine.platforms.playwright.base_publisher import PublishResult
 from markdown_utils import render_markdown_plain_text, should_declare_ai
 
 
-FEEDBACK_SELECTOR = '[role="alert"], [role="status"], .toast, .Toast, .message, .notification'
+FEEDBACK_SELECTOR = '[role="alert"], [role="status"], .toast, .Toast'
 
 
 def find_visible_button(page: Page, texts: list, button_class: str = None) -> Optional[Locator]:
@@ -184,7 +184,13 @@ def _page_text(page: Page) -> str:
 
 def _feedback_text(page: Page) -> str:
     try:
-        return "\n".join(page.locator(FEEDBACK_SELECTOR).all_inner_texts())
+        feedback = page.locator(FEEDBACK_SELECTOR)
+        texts = []
+        for index in range(feedback.count()):
+            item = feedback.nth(index)
+            if item.is_visible():
+                texts.append(item.inner_text())
+        return "\n".join(texts)
     except Exception:
         return ""
 
