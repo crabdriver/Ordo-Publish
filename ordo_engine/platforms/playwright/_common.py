@@ -190,7 +190,8 @@ def _feedback_text(page: Page) -> str:
 
 
 def _has_feedback_marker(feedback_text: str, markers: list) -> bool:
-    return any(marker in feedback_text for marker in markers)
+    lines = {_normalize_title(line) for line in feedback_text.splitlines() if _normalize_title(line)}
+    return any(_normalize_title(marker) in lines for marker in markers)
 
 
 def verify_result_common(page: Page, platform: str, mode: str, published_url_pattern: str,

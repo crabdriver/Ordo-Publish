@@ -167,8 +167,29 @@ def test_explicit_toast_success_is_terminal_success():
     assert result.status == "published"
 
 
+@pytest.mark.parametrize(
+    ("mode", "feedback", "success_markers", "draft_markers"),
+    [
+        ("publish", "未发布成功，请重试", ["发布成功"], ["草稿"]),
+        ("draft", "保存草稿失败", ["发布成功"], ["保存草稿"]),
+    ],
+)
+def test_negative_feedback_does_not_match_positive_marker(mode, feedback, success_markers, draft_markers):
+    result = verify_result_common(
+        FakePage(feedback=[feedback]),
+        "测试平台",
+        mode,
+        r"/article/\d+$",
+        success_markers,
+        draft_markers,
+        ["发布上限"],
+    )
+
+    assert result.status == "submitted_unverified"
+
+
 def test_explicit_alert_limit_is_retryable_nonzero(tmp_path):
-    page = FakePage(text="普通页面", feedback=["今日达到发布上限，请明天再来"])
+    page = FakePage(text="普通页面", feedback=["发布上限"])
 
     result = verify_common(page)
 
