@@ -148,23 +148,22 @@ def detect_import_mode(source_path: Path) -> str:
 def prepare_browser_context(base_dir, platforms: Sequence[str], *, output: Callable[[str], None]) -> dict[str, object]:
     browser_platforms = [platform for platform in platforms if platform in BROWSER_PLATFORMS]
     if not browser_platforms:
-        return {"tabs": [], "workbench": {}, "cdp_connection": None}
+        return {
+            "tabs": [],
+            "workbench": {},
+            "cdp_connection": None,
+            "browser_mode": None,
+            "profile_dir": None,
+        }
 
-    tabs, launched_app = publish.ensure_chrome_ready(browser_platforms, base_dir=base_dir)
-    if launched_app:
-        output(f"[INFO] 已自动启动浏览器: {launched_app}")
-    opened = publish.open_missing_platform_tabs(browser_platforms)
-    if opened:
-        output(f"[INFO] 已自动补开平台标签页: {', '.join(opened)}")
-    tabs = publish.list_tabs(base_dir=base_dir)
-    workbench = publish.bind_workbench(browser_platforms, tabs)
-    warmed = publish.warm_platforms(browser_platforms)
-    if warmed:
-        output(f"[INFO] 已自动预热平台标签页: {', '.join(warmed)}")
+    profile_dir = Path(base_dir).expanduser().resolve() / ".ordo" / "automation-profile"
+    output(f"[INFO] 浏览器模式: standalone；profile={profile_dir}")
     return {
-        "tabs": tabs,
-        "workbench": workbench,
-        "cdp_connection": publish.get_cdp_connection_metadata(base_dir=base_dir),
+        "tabs": [],
+        "workbench": {},
+        "cdp_connection": None,
+        "browser_mode": "standalone",
+        "profile_dir": str(profile_dir),
     }
 
 
@@ -302,4 +301,3 @@ def execute_publish_flow(
         "publish_result": publish_result,
         "operations_path": str(operations_path),
     }
-

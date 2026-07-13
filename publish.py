@@ -813,44 +813,23 @@ def run_preflight_checks(
             except Exception as e:
                 warnings.append(f"文章 《{path.name}》 标题预检读取异常: {e}")
 
-    if mode == "publish" and "jianshu" in platforms:
-        jianshu_target = workbench.get("jianshu")
-        if jianshu_target:
-            try:
-                body = get_page_text_snippet(jianshu_target, limit=3000)
-                if "每天只能发布 2 篇公开文章" in body:
-                    warnings.append("简书今天已达到公开文章发布上限（每天最多 2 篇），本轮将自动降级为保存草稿执行。")
-            except subprocess.CalledProcessError:
-                warnings.append("简书预检读取失败，发布时再做实际判断")
+    browser_platforms = [
+        platform for platform in platforms if platform in BROWSER_PLATFORMS
+    ]
+    if browser_platforms:
+        from ordo_engine.platforms.playwright.engine import PlaywrightEngine
 
-    missing_browser_targets = []
-    for platform in platforms:
-        if platform in BROWSER_PLATFORMS and not workbench.get(platform):
-            missing_browser_targets.append(platform)
-            blockers.append(f"未找到 `{platform}` 的可用标签页，请先在当前远程调试 Chrome 中打开并登录")
-
-    for platform in platforms:
-        if platform in BROWSER_PLATFORMS and workbench.get(platform):
-            label = BROWSER_PLATFORM_LABELS.get(platform, platform)
-            try:
-                state = inspect_browser_platform_state(platform, workbench[platform])
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
-                warnings.append(f"{label}预检读取失败，发布时再做实际判断")
-            else:
-                persist_browser_session_health(root, platform, state, cdp_connection=cdp_connection)
-                if not state.get("editor_ready"):
-                    detail = state.get("detail") or "页面未进入可写编辑器态"
-                    current_url = state.get("current_url") or ""
-                    location_detail = f" 当前页面：{current_url}" if current_url else ""
-                    if state.get("page_state") == "login_required":
-                        blockers.append(f"{label}预检未通过（需重新登录）：{detail}.{location_detail}".strip())
-                    else:
-                        warnings.append(f"{label}当前未就绪，脚本将尝试自动导航/切换进入编辑器页：{detail}.{location_detail}".strip())
-
-    if cdp_connection and any(platform in BROWSER_PLATFORMS for platform in platforms):
-        detail = cdp_connection.get("detail")
-        if detail:
-            warnings.append(detail)
+        try:
+            engine = PlaywrightEngine(base_dir=root, headless=True)
+            initialized = engine.profile_is_initialized
+        except RuntimeError as exc:
+            blockers.append(f"standalone 浏览器 profile 不安全：{exc}")
+        else:
+            if not initialized:
+                blockers.append(
+                    "standalone 浏览器 profile 尚未初始化；"
+                    "请运行 publish.py --bootstrap-browser"
+                )
 
     non_wechat_cover_platforms = [p for p in platforms if p in COVER_PLATFORMS_SET]
     if non_wechat_cover_platforms and not article_paths:
@@ -1289,7 +1268,11 @@ def warm_platforms(platforms):
 
 
 def resolve_wechat_theme_mode(args, available_themes):
-    if args.wechat_theme_mode in {"fixed", "console"}:
+    if args.wechat_theme_mode == "console":
+        raise RuntimeError(
+            "wechat_theme_mode=console 已禁用；请改用 fixed/random"
+        )
+    if args.wechat_theme_mode == "fixed":
         return args.wechat_theme_mode
     return "random"
 
@@ -1408,6 +1391,11 @@ def wait_for_console_confirmation(target_id, expected_index, timeout_seconds=Non
 
 
 def run_console_queue(args, platforms, article_paths, available_themes):
+    raise RuntimeError(
+        "浏览器发布主控台已禁用；请改用 wechat_theme_mode=fixed/random"
+    )
+
+    # Legacy implementation retained temporarily for record compatibility.
     args_mode = getattr(args, "mode", "draft")
     args_wechat_theme = getattr(args, "wechat_theme", "chinese")
     args_no_auto_launch = getattr(args, "no_auto_launch", False)

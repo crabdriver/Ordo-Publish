@@ -13,6 +13,13 @@ import publish
 
 
 class PublishPreflightTests(unittest.TestCase):
+    def _initialize_browser_profile(self, base: Path):
+        profile = base / ".ordo" / "automation-profile"
+        profile.mkdir(parents=True, exist_ok=True)
+        (profile / ".ordo-profile-initialized").write_text(
+            "ordo-automation-profile-v1\n", encoding="utf-8"
+        )
+
     def _write_cover(self, path: Path, size=(1280, 720)):
         Image.new("RGB", size, color=(23, 45, 67)).save(path)
 
@@ -343,19 +350,26 @@ class PublishPreflightTests(unittest.TestCase):
 
         self.assertEqual(res["returncode"], 0)
 
-    def test_run_preflight_checks_warns_with_cdp_connection_source(self):
-        blockers, warnings = publish.run_preflight_checks(
-            platforms=["zhihu"],
-            mode="draft",
-            workbench={"zhihu": "target-1"},
-            cdp_connection={
-                "source": "windows_devtools_port_file",
-                "detail": "当前 CDP 连接来源：LOCALAPPDATA/Google/Chrome/User Data/DevToolsActivePort",
-            },
-        )
+    def test_run_preflight_checks_ignores_cdp_connection_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._initialize_browser_profile(base)
+            with patch.object(
+                publish,
+                "inspect_browser_platform_state",
+                side_effect=AssertionError("CDP inspection called"),
+            ):
+                blockers, warnings = publish.run_preflight_checks(
+                    platforms=["zhihu"],
+                    mode="draft",
+                    workbench={"zhihu": "target-1"},
+                    base_dir=base,
+                    cover_mode="force_off",
+                    cdp_connection={"detail": "legacy CDP"},
+                )
 
         self.assertEqual(blockers, [])
-        self.assertTrue(any("当前 CDP 连接来源" in item for item in warnings))
+        self.assertFalse(any("CDP" in item for item in warnings))
 
     def test_run_preflight_checks_warns_when_config_json_invalid(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -364,6 +378,7 @@ class PublishPreflightTests(unittest.TestCase):
             covers = base / "covers"
             covers.mkdir()
             self._write_cover(covers / "cover_1.png")
+            self._initialize_browser_profile(base)
 
             blockers, warnings = publish.run_preflight_checks(
                 platforms=["zhihu"],
@@ -484,191 +499,79 @@ class PublishPreflightTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertTrue(any("必须走 VPS" in item for item in blockers), blockers)
 
-    def test_run_preflight_checks_requires_browser_tabs_for_browser_platforms(self):
-        with patch.object(
-            publish,
-            "get_wechat_config_status",
-            return_value={
-                "appid_ready": True,
-                "secret_ready": True,
-                "covers_ready": True,
-                "ai_cover_ready": False,
-            },
-        ):
+    def test_run_preflight_checks_does_not_require_browser_tabs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._initialize_browser_profile(base)
             blockers, _warnings = publish.run_preflight_checks(
                 platforms=["zhihu", "toutiao"],
                 mode="draft",
                 workbench={"zhihu": "target-1"},
-            )
-
-        self.assertIn("未找到 `toutiao` 的可用标签页，请先在当前远程调试 Chrome 中打开并登录", blockers)
-
-    def test_run_preflight_checks_still_inspects_existing_tabs_when_some_targets_missing(self):
-        with patch.object(
-            publish,
-            "inspect_browser_platform_state",
-            return_value={
-                "editor_ready": False,
-                "page_state": "login_required",
-                "current_url": "https://www.zhihu.com/signin",
-                "detail": "当前标签页仍处于登录或校验状态",
-            },
-        ), patch.object(
-            publish,
-            "persist_browser_session_health",
-            return_value={},
-        ):
-            blockers, warnings = publish.run_preflight_checks(
-                platforms=["zhihu", "toutiao"],
-                mode="draft",
-                workbench={"zhihu": "target-1"},
-            )
-
-        self.assertEqual(warnings, [])
-        self.assertTrue(any("未找到 `toutiao`" in item for item in blockers))
-        self.assertTrue(any("知乎预检未通过" in item for item in blockers))
-
-    def test_run_preflight_checks_blocks_when_browser_page_is_not_editor_ready(self):
-        with patch.object(
-            publish,
-            "inspect_browser_platform_state",
-            return_value={
-                "editor_ready": False,
-                "page_state": "login_required",
-                "current_url": "https://www.zhihu.com/signin",
-                "detail": "当前标签页不在知乎写作页",
-            },
-        ), patch.object(
-            publish,
-            "discover_cover_pool_status",
-            return_value={"ok": True, "cover_dir": "/tmp/covers", "error": None},
-        ):
-            blockers, warnings = publish.run_preflight_checks(
-                platforms=["zhihu"],
-                mode="draft",
-                workbench={"zhihu": "target-1"},
-            )
-
-        self.assertEqual(warnings, [])
-        self.assertTrue(any("知乎预检未通过" in item for item in blockers))
-        self.assertTrue(any("https://www.zhihu.com/signin" in item for item in blockers))
-
-    def test_run_preflight_checks_warns_when_browser_preflight_cannot_read_page_state(self):
-        with patch.object(
-            publish,
-            "inspect_browser_platform_state",
-            side_effect=subprocess.CalledProcessError(1, ["node", "live_cdp.mjs"]),
-        ):
-            blockers, warnings = publish.run_preflight_checks(
-                platforms=["toutiao"],
-                mode="draft",
-                workbench={"toutiao": "target-1"},
+                base_dir=base,
+                cover_mode="force_off",
             )
 
         self.assertEqual(blockers, [])
-        self.assertTrue(any("头条号预检读取失败" in item for item in warnings))
 
-    def test_run_preflight_checks_persists_healthy_browser_session_state(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            (base / "covers").mkdir()
-            self._write_cover(base / "covers" / "cover_1.png")
-            with patch.object(
-                publish,
-                "inspect_browser_platform_state",
-                return_value={
-                    "editor_ready": True,
-                    "page_state": "editor_ready",
-                    "current_url": "https://zhuanlan.zhihu.com/write",
-                    "detail": "写作编辑器已就绪",
-                },
-            ):
-                publish.run_preflight_checks(
-                    platforms=["zhihu"],
-                    mode="draft",
-                    workbench={"zhihu": "target-1"},
-                    base_dir=base,
-                    cdp_connection={
-                        "source": "managed_browser_port",
-                        "detail": "当前 CDP 连接来源：Ordo 托管浏览器调试端口 9333",
-                    },
-                )
-
-            payload = json.loads((base / ".ordo" / "browser-session" / "state.json").read_text(encoding="utf-8"))
-
-        self.assertEqual(payload["mode"], "managed")
-        self.assertEqual(payload["platforms"]["zhihu"]["status"], "healthy")
-        self.assertEqual(payload["platforms"]["zhihu"]["page_state"], "editor_ready")
-        self.assertTrue(payload["platforms"]["zhihu"]["last_healthy_at"])
-
-    def test_run_preflight_checks_marks_browser_session_relogin_required(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            (base / "covers").mkdir()
-            self._write_cover(base / "covers" / "cover_1.png")
-            with patch.object(
-                publish,
-                "inspect_browser_platform_state",
-                return_value={
-                    "editor_ready": False,
-                    "page_state": "login_required",
-                    "current_url": "https://www.zhihu.com/signin",
-                    "detail": "需要重新登录",
-                },
-            ):
-                blockers, _warnings = publish.run_preflight_checks(
-                    platforms=["zhihu"],
-                    mode="draft",
-                    workbench={"zhihu": "target-1"},
-                    base_dir=base,
-                    cdp_connection={
-                        "source": "managed_browser_port",
-                        "detail": "当前 CDP 连接来源：Ordo 托管浏览器调试端口 9333",
-                    },
-                )
-
-            payload = json.loads((base / ".ordo" / "browser-session" / "state.json").read_text(encoding="utf-8"))
-
-        self.assertTrue(any("知乎预检未通过" in item for item in blockers))
-        self.assertEqual(payload["platforms"]["zhihu"]["status"], "expired_or_relogin_required")
-        self.assertTrue(payload["platforms"]["zhihu"]["last_relogin_required_at"])
-
-    def test_run_preflight_checks_blocks_jianshu_daily_limit(self):
-        with patch.object(
-            publish,
+    def test_standalone_preflight_only_reads_profile_marker(self):
+        forbidden = (
+            "inspect_browser_platform_state",
             "get_page_text_snippet",
-            return_value="每天只能发布 2 篇公开文章，今天已达上限",
-        ), patch.object(
-            publish,
-            "get_wechat_config_status",
-            return_value={
-                "appid_ready": True,
-                "secret_ready": True,
-                "covers_ready": True,
-                "ai_cover_ready": False,
-            },
-        ), patch.object(
-            publish,
-            "inspect_browser_platform_state",
-            return_value={
-                "editor_ready": True,
-                "page_state": "editor_ready",
-                "current_url": "https://www.jianshu.com/writer#/notebooks/1/notes/1",
-                "detail": "写作编辑器已就绪",
-            },
-        ):
-            blockers, warnings = publish.run_preflight_checks(
-                platforms=["jianshu"],
+            "ensure_chrome_ready",
+            "open_missing_platform_tabs",
+            "list_tabs",
+            "list_tabs_or_none",
+            "launch_chrome",
+            "run_cdp",
+        )
+        patches = [
+            patch.object(
+                publish,
+                name,
+                side_effect=AssertionError(f"forbidden helper called: {name}"),
+            )
+            for name in forbidden
+        ]
+        mocks = [item.start() for item in patches]
+        self.addCleanup(lambda: [item.stop() for item in patches])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            blockers, _warnings = publish.run_preflight_checks(
+                platforms=["zhihu"],
                 mode="publish",
-                workbench={"jianshu": "note-1"},
+                workbench={},
+                base_dir=Path(tmpdir),
+                cover_mode="force_off",
             )
 
+        self.assertTrue(any("--bootstrap-browser" in item for item in blockers), blockers)
+        for mock in mocks:
+            mock.assert_not_called()
+
+    def test_run_preflight_checks_does_not_probe_jianshu_page(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._initialize_browser_profile(base)
+            with patch.object(
+                publish,
+                "get_page_text_snippet",
+                side_effect=AssertionError("CDP page text called"),
+            ):
+                blockers, warnings = publish.run_preflight_checks(
+                    platforms=["jianshu"],
+                    mode="publish",
+                    workbench={"jianshu": "note-1"},
+                    base_dir=base,
+                    cover_mode="force_off",
+                )
+
         self.assertEqual(blockers, [])
-        self.assertTrue(any("简书今天已达到公开文章发布上限" in item for item in warnings))
+        self.assertEqual(warnings, [])
 
     def test_preflight_blocks_publish_when_non_wechat_cover_pool_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
+            self._initialize_browser_profile(base)
             missing_dir = base / "no_covers_here"
             with patch.object(
                 publish,
@@ -705,6 +608,7 @@ class PublishPreflightTests(unittest.TestCase):
     def test_preflight_skips_cover_pool_warning_when_cover_mode_force_off(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
+            self._initialize_browser_profile(base)
             missing_dir = base / "no_covers_here"
             with patch.object(
                 publish,
@@ -755,6 +659,7 @@ class PublishPreflightTests(unittest.TestCase):
     def test_preflight_warns_draft_when_non_wechat_cover_pool_empty_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
+            self._initialize_browser_profile(base)
             empty_covers = base / "covers"
             empty_covers.mkdir()
             with patch.object(
