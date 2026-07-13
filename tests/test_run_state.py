@@ -85,6 +85,22 @@ def test_record_step_uses_same_mode_nested_key(tmp_path):
     }
 
 
+def test_record_step_preserves_existing_terminal_status(tmp_path):
+    state_file = tmp_path / "state.json"
+    run_state.mark_done(
+        "article-1", "zhihu", "published", "publish", state_file=state_file
+    )
+    run_state.record_step(
+        "article-1", "zhihu", "publish", "submit_started", state_file=state_file
+    )
+
+    record = run_state.get_record(
+        "article-1", "zhihu", "publish", state_file=state_file
+    )
+    assert record["status"] == "published"
+    assert record["last_step"] == "submit_started"
+
+
 def test_save_state_atomically_replaces_file_and_fsyncs(tmp_path):
     state_file = tmp_path / ".ordo" / "publish-state.json"
 

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 from ordo_engine.platforms.base import BasePlatformAdapter, SubprocessPlatformAdapter
 from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
 from ordo_engine.platforms.playwright.base_publisher import PublishResult
-from ordo_engine.run_state import article_key, is_done, mark_done, state_file_for
+from ordo_engine.run_state import article_key, get_record, is_done, mark_done, state_file_for
 from ordo_engine.runner.pipeline import run_platform_task, run_publish_pipeline
 
 
@@ -381,16 +381,18 @@ class EnginePipelineTests(unittest.TestCase):
         self.assertEqual(appended, results)
         self.assertEqual(printed, results)
 
-    def test_force_republish_resets_only_selected_article_platform_mode(self):
+    def test_force_republish_calls_adapter_and_success_overwrites_terminal(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
             article = base_dir / "a.md"
             article.write_text("# A", encoding="utf-8")
             identity = article_key(article)
             state_file = state_file_for(base_dir)
-            mark_done(identity, "wechat", "draft_only", "draft", state_file=state_file)
+            mark_done(identity, "wechat", "skipped_existing", "draft", state_file=state_file)
             mark_done(identity, "wechat", "published", "publish", state_file=state_file)
-            registry = {"wechat": DummyAdapter(base_dir, "wechat", stdout="ok")}
+            adapter = DummyAdapter(base_dir, "wechat", stdout="ok")
+            adapter.publish = MagicMock(wraps=adapter.publish)
+            registry = {"wechat": adapter}
 
             results, exit_code = run_publish_pipeline(
                 base_dir=base_dir,
@@ -404,8 +406,42 @@ class EnginePipelineTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(results[0]["status"], "draft_only")
+            adapter.publish.assert_called_once()
             self.assertTrue(is_done(identity, "wechat", "draft", state_file=state_file))
             self.assertTrue(is_done(identity, "wechat", "publish", state_file=state_file))
+            self.assertEqual(
+                get_record(identity, "wechat", "draft", state_file=state_file)["status"],
+                "draft_only",
+            )
+
+    def test_force_publish_failure_keeps_previous_terminal(self):
+        class PublishFails(DummyAdapter):
+            def publish(self, prepared_context):
+                self.called = True
+                raise RuntimeError("login failed")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            identity = article_key(article)
+            state_file = state_file_for(base_dir)
+            mark_done(identity, "wechat", "draft_only", "draft", state_file=state_file)
+            adapter = PublishFails(base_dir, "wechat")
+
+            with self.assertRaisesRegex(RuntimeError, "login failed"):
+                run_publish_pipeline(
+                    base_dir=base_dir,
+                    args=Namespace(mode="draft", continue_on_error=False, force_republish=True),
+                    article_paths=[article], platforms=["wechat"], registry={"wechat": adapter},
+                )
+
+            self.assertTrue(adapter.called)
+            self.assertTrue(is_done(identity, "wechat", "draft", state_file=state_file))
+            self.assertEqual(
+                get_record(identity, "wechat", "draft", state_file=state_file)["status"],
+                "draft_only",
+            )
 
     def test_force_preserves_terminal_when_context_resolution_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:

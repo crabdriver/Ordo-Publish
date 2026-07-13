@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 
 from ordo_engine.platforms.registry import build_platform_registry
-from ordo_engine.run_state import article_key, is_done, mark_done, reset, state_file_for
+from ordo_engine.run_state import article_key, is_done, mark_done, state_file_for
 from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
 from ordo_engine.platforms.playwright.engine import PlaywrightEngine
 
@@ -58,7 +58,6 @@ def run_platform_task(
     ai_declaration_mode=None,
     scheduled_publish_at=None,
     registry=None,
-    force_republish=False,
 ):
     registry = registry or build_platform_registry(Path(base_dir))
     adapter = registry[platform]
@@ -74,11 +73,6 @@ def run_platform_task(
         ai_declaration_mode=ai_declaration_mode,
         scheduled_publish_at=scheduled_publish_at,
     )
-    if force_republish:
-        reset(
-            article_key(markdown_file), platform, mode,
-            state_file=state_file_for(base_dir),
-        )
     process_result = adapter.publish(prepared)
     structured_result = adapter.collect_result(process_result, mode=mode)
     payload = {
@@ -216,7 +210,6 @@ def run_publish_pipeline(
                     ai_declaration_mode=ai_declaration_mode,
                     scheduled_publish_at=scheduled_publish_at,
                     registry=registry,
-                    force_republish=getattr(args, "force_republish", False),
                 )
                 result["article"] = str(article_path)
                 result["run_id"] = getattr(args, "run_id", None)
