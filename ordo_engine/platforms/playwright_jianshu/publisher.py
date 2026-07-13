@@ -101,4 +101,5 @@ class JianshuPlaywrightPublisher(PlaywrightBasePublisher):
             JianshuLocators.LIMIT_MARKERS,
             JianshuLocators.MANAGEMENT_URL,
             JianshuLocators.DRAFT_MANAGEMENT_URL,
+            expected_title=self._article.title,
         )

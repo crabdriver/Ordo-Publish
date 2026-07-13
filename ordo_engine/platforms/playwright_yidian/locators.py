@@ -7,7 +7,7 @@ class YidianLocators:
     EDITOR_URL = "https://mp.yidianzixun.com/#/Writing/articleEditor"
     MANAGEMENT_URL = "https://mp.yidianzixun.com/#/ArticleManual/original/article"
     DRAFT_MANAGEMENT_URL = "https://mp.yidianzixun.com/#/ArticleManual/original/draft"
-    PUBLISHED_URL_PATTERN = r"mp\.yidianzixun\.com/#/ArticleManual"
+    PUBLISHED_URL_PATTERN = r"^https?://(?:www\.)?yidianzixun\.com/article/[A-Za-z0-9_-]+(?:[/?#]|$)"
 
     TITLE_INPUT = (
         'input.post-title, '

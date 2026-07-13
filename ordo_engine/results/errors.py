@@ -13,7 +13,7 @@ class ErrorType(str, Enum):
     UNKNOWN_ERROR = "unknown_error"
 
 
-RETRYABLE_ERRORS = {ErrorType.TRANSIENT_ERROR}
+RETRYABLE_ERRORS = {ErrorType.TRANSIENT_ERROR, ErrorType.RATE_LIMITED}
 BLOCKING_ERRORS = {ErrorType.CONFIG_ERROR, ErrorType.ENVIRONMENT_ERROR}
 
 

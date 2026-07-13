@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 import time
+import unicodedata
 from pathlib import Path
 from typing import Optional
 
@@ -167,12 +168,29 @@ def save_draft_common(human: HumanBehavior, page: Page, draft_texts: list, platf
     print(f"[INFO] {platform}草稿已保存")
 
 
+def _normalize_title(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value or "").split())
+
+
+def _page_text(page: Page) -> str:
+    try:
+        return page.evaluate("() => document.body.innerText || ''")
+    except Exception:
+        return ""
+
+
+def _has_exact_marker(page_text: str, markers: list) -> bool:
+    lines = {_normalize_title(line) for line in page_text.splitlines()}
+    return any(_normalize_title(marker) in lines for marker in markers)
+
+
 def verify_result_common(page: Page, platform: str, mode: str, published_url_pattern: str,
                           success_markers: list, draft_markers: list, limit_markers: list,
-                          management_url: str = None, draft_management_url: str = None) -> PublishResult:
+                          management_url: str = None, draft_management_url: str = None,
+                          *, expected_title: str = "") -> PublishResult:
     """通用结果验证逻辑"""
     current_url = page.url
-    page_text = page.evaluate("() => document.body.innerText || ''")
+    page_text = _page_text(page)
 
     # 限流检查
     if any(m in page_text for m in limit_markers):
@@ -191,14 +209,14 @@ def verify_result_common(page: Page, platform: str, mode: str, published_url_pat
                 smoke_step="verify", message=f"已发布到{platform}: {current_url}",
             )
 
-        if any(m in page_text for m in success_markers):
+        if _has_exact_marker(page_text, success_markers):
             return PublishResult(
                 platform=platform, status="published",
                 current_url=current_url, page_state="published",
                 smoke_step="verify",
             )
     else:
-        if any(m in page_text for m in draft_markers):
+        if _has_exact_marker(page_text, draft_markers):
             return PublishResult(
                 platform=platform, status="draft_only",
                 current_url=current_url, page_state="draft_saved",
@@ -207,17 +225,33 @@ def verify_result_common(page: Page, platform: str, mode: str, published_url_pat
 
     # 跳转到管理页面验证
     url = draft_management_url if (mode == "draft" and draft_management_url) else management_url
-    if url:
+    if url and expected_title:
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             time.sleep(3)
         except Exception:
-            pass
+            return PublishResult(
+                platform=platform, status="submitted_unverified",
+                current_url=page.url, page_state="submitted_unverified",
+                smoke_step="verify", message="提交结果无法确认：管理页导航失败",
+            )
 
-    status = "draft_only" if mode == "draft" else "published"
-    page_state = "draft_saved" if mode == "draft" else "published"
+        expected = _normalize_title(expected_title)
+        management_titles = {
+            _normalize_title(line) for line in _page_text(page).splitlines()
+            if _normalize_title(line)
+        }
+        if expected and expected in management_titles:
+            status = "draft_only" if mode == "draft" else "published"
+            page_state = "draft_saved" if mode == "draft" else "published"
+            return PublishResult(
+                platform=platform, status=status,
+                current_url=page.url, page_state=page_state,
+                smoke_step="verify",
+            )
+
     return PublishResult(
-        platform=platform, status=status,
-        current_url=page.url, page_state=page_state,
-        smoke_step="verify",
+        platform=platform, status="submitted_unverified",
+        current_url=page.url, page_state="submitted_unverified",
+        smoke_step="verify", message="提交结果无法确认：未找到精确标题证据",
     )

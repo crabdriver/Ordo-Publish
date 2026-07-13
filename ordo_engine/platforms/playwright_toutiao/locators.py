@@ -7,7 +7,7 @@ class ToutiaoLocators:
     EDITOR_URL = "https://mp.toutiao.com/profile_v4/graphic/publish"
     MANAGEMENT_URL = "https://mp.toutiao.com/profile_v4/graphic/manuscript"
     DRAFT_MANAGEMENT_URL = "https://mp.toutiao.com/profile_v4/graphic/manuscript?status=draft"
-    PUBLISHED_URL_PATTERN = r"mp\.toutiao\.com/profile_v4/graphic/(?:manuscript|details)"
+    PUBLISHED_URL_PATTERN = r"^https?://(?:www\.)?toutiao\.com/article/\d+(?:[/?#]|$)"
 
     TITLE_INPUT = (
         'textarea[placeholder="请输入文章标题（2～30个字）"], '

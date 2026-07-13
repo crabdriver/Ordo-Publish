@@ -117,7 +117,10 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
             return {
                 "platform": self.platform,
                 "command": f"playwright:{self.platform}",
-                "returncode": 0 if result.status not in ("failed",) else 1,
+                "returncode": 0 if result.status in {
+                    "published", "scheduled", "draft_only", "draft_saved", "skipped_existing"
+                } else 1,
+                "outcome_status": result.status,
                 "stdout": stdout_text,
                 "stderr": result.error or "",
                 "current_url": result.current_url,
@@ -141,6 +144,12 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
             }
 
     def verify(self, process_result, mode):
+        outcome_status = process_result.get("outcome_status")
+        if outcome_status in {
+            "published", "scheduled", "draft_only", "draft_saved", "skipped_existing",
+            "limit_reached", "submitted_unverified", "unknown", "failed",
+        }:
+            return outcome_status
         return classify_process_result(self.platform, mode, process_result)
 
     def collect_result(self, process_result, mode):

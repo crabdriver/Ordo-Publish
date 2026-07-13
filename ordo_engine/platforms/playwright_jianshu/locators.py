@@ -7,7 +7,7 @@ class JianshuLocators:
     EDITOR_URL = "https://www.jianshu.com/writer#/"
     MANAGEMENT_URL = "https://www.jianshu.com/writer#/notebooks"
     DRAFT_MANAGEMENT_URL = "https://www.jianshu.com/writer#/notebooks"
-    PUBLISHED_URL_PATTERN = r"jianshu\.com/(?:p|writer)/\w+"
+    PUBLISHED_URL_PATTERN = r"^https?://(?:www\.)?jianshu\.com/p/[A-Za-z0-9_-]+(?:[/?#]|$)"
 
     TITLE_INPUT = (
         'input._24i7u, '

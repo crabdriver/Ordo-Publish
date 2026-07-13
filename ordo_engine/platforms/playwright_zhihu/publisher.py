@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import time
 from pathlib import Path
 
@@ -17,6 +16,7 @@ from ordo_engine.platforms.playwright.base_publisher import (
 )
 from ordo_engine.platforms.playwright.engine import PlaywrightEngine
 from ordo_engine.platforms.playwright.human import HumanBehavior
+from ordo_engine.platforms.playwright._common import verify_result_common
 from ordo_engine.platforms.playwright_zhihu.locators import ZhihuLocators
 
 
@@ -211,74 +211,15 @@ class ZhihuPlaywrightPublisher(PlaywrightBasePublisher):
 
     def verify_result(self, mode: str) -> PublishResult:
         """验证结果"""
-        current_url = self.page.url
-        page_text = self.page.evaluate("() => document.body.innerText || ''")
-
-        # Rate limit check
-        if any(m in page_text for m in ZhihuLocators.LIMIT_MARKERS):
-            return PublishResult(
-                platform=self.platform,
-                status="limit_reached",
-                current_url=current_url,
-                page_state="limit_reached",
-                smoke_step="verify",
-                message="达到发布上限",
-            )
-
-        if mode == "publish":
-            if re.search(ZhihuLocators.PUBLISHED_URL_PATTERN, current_url):
-                print(f"[INFO] 已发布到知乎: {current_url}")
-                return PublishResult(
-                    platform=self.platform,
-                    status="published",
-                    current_url=current_url,
-                    page_state="published",
-                    smoke_step="verify",
-                    message=f"已发布到知乎: {current_url}",
-                )
-
-            if any(m in page_text for m in ZhihuLocators.PUBLISH_SUCCESS_MARKERS):
-                return PublishResult(
-                    platform=self.platform,
-                    status="published",
-                    current_url=current_url,
-                    page_state="published",
-                    smoke_step="verify",
-                )
-
-            return self._verify_in_management(mode)
-        else:
-            if any(m in page_text for m in ZhihuLocators.DRAFT_SUCCESS_MARKERS):
-                return PublishResult(
-                    platform=self.platform,
-                    status="draft_only",
-                    current_url=current_url,
-                    page_state="draft_saved",
-                    smoke_step="verify",
-                    message="已写入知乎草稿页",
-                )
-            return self._verify_in_management(mode)
-
-    def _verify_in_management(self, mode: str) -> PublishResult:
-        """跳转到管理页面验证"""
-        is_draft = mode == "draft"
-        url = (
-            ZhihuLocators.DRAFT_MANAGEMENT_URL
-            if is_draft
-            else ZhihuLocators.MANAGEMENT_URL
-        )
-        self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(3)
-
-        status = "draft_only" if is_draft else "published"
-        page_state = "draft_saved" if is_draft else "published"
-
-        return PublishResult(
-            platform=self.platform,
-            status=status,
-            current_url=self.page.url,
-            page_state=page_state,
-            smoke_step="verify",
+        return verify_result_common(
+            self.page, "知乎", mode,
+            ZhihuLocators.PUBLISHED_URL_PATTERN,
+            ZhihuLocators.PUBLISH_SUCCESS_MARKERS,
+            ZhihuLocators.DRAFT_SUCCESS_MARKERS,
+            ZhihuLocators.LIMIT_MARKERS,
+            ZhihuLocators.MANAGEMENT_URL,
+            ZhihuLocators.DRAFT_MANAGEMENT_URL,
+            expected_title=self._article.title,
         )
 
     def _find_editor_element(self):

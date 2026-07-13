@@ -105,4 +105,5 @@ class YidianPlaywrightPublisher(PlaywrightBasePublisher):
             YidianLocators.LIMIT_MARKERS,
             YidianLocators.MANAGEMENT_URL,
             YidianLocators.DRAFT_MANAGEMENT_URL,
+            expected_title=self._article.title,
         )

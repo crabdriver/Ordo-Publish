@@ -14,7 +14,7 @@ class ZhihuLocators:
     DRAFT_MANAGEMENT_URL = (
         "https://www.zhihu.com/creator/manage/creation/draft?type=article"
     )
-    PUBLISHED_URL_PATTERN = r"zhuanlan\.zhihu\.com/p/\d+"
+    PUBLISHED_URL_PATTERN = r"^https?://zhuanlan\.zhihu\.com/p/\d+(?:[/?#]|$)"
 
     # ── 编辑器元素 ──────────────────────────────────────────
     TITLE_INPUT = 'textarea[placeholder*="标题"], input[placeholder*="标题"]'

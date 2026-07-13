@@ -89,4 +89,5 @@ class ToutiaoPlaywrightPublisher(PlaywrightBasePublisher):
             ToutiaoLocators.LIMIT_MARKERS,
             ToutiaoLocators.MANAGEMENT_URL,
             ToutiaoLocators.DRAFT_MANAGEMENT_URL,
+            expected_title=self._article.title,
         )

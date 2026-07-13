@@ -15,7 +15,7 @@ except ImportError:
 
 from ordo_engine.platforms.playwright.engine import PlaywrightEngine
 from ordo_engine.platforms.playwright.human import HumanBehavior
-from ordo_engine.run_state import article_key, record_step, state_file_for
+from ordo_engine.run_state import article_key, get_record, mark_done, record_step, state_file_for
 
 
 SMOKE_STATE_PREFIX = "[SMOKE_STATE] "
@@ -28,6 +28,7 @@ class PublishState(str, Enum):
     BODY_FILLED = "body_filled"
     COVER_UPLOADED = "cover_uploaded"
     SETTINGS_CONFIGURED = "settings_configured"
+    SUBMIT_STARTED = "submit_started"
     SUBMITTED = "submitted"
     VERIFIED = "verified"
     ERROR = "error"
@@ -192,7 +193,19 @@ class PlaywrightBasePublisher(ABC):
         # 记录文章幂等键，使状态机每一步都持久化到运行状态文件（支撑失败可恢复）
         self._article_key = article_key(article.markdown_path)
         self._mode = mode
+        self._article = article
+        self._submission_started = False
         try:
+            prior = get_record(
+                self._article_key,
+                self.platform,
+                mode,
+                state_file=self._state_file,
+            )
+            prior_step = (prior or {}).get("last_step") or (prior or {}).get("status")
+            if prior_step in {"submit_started", "submitted", "submitted_unverified", "unknown"}:
+                return self._reconcile(mode)
+
             # Step 1: Navigate to editor
             self.page = self.navigate_to_editor()
             self.human = self._init_human(self.page)
@@ -229,6 +242,9 @@ class PlaywrightBasePublisher(ABC):
             self._take_screenshot("settings_configured")
 
             # Step 6: Submit
+            self.state = PublishState.SUBMIT_STARTED
+            self._emit_state("submit_started")
+            self._submission_started = True
             if mode == "publish":
                 self.click_publish()
             else:
@@ -240,14 +256,31 @@ class PlaywrightBasePublisher(ABC):
 
             # Step 7: Verify
             result = self.verify_result(mode)
+            if not self._is_terminal(result.status, mode) and result.status != "limit_reached":
+                result = self._unverified_result(result)
             self.state = PublishState.VERIFIED
-            self._emit_state("verified", page_state=result.page_state)
+            # 结果尚未落盘时保持 submitted 写前状态，避免崩溃后重复提交。
+            self._emit_state("verified", page_state=result.page_state, persist=False)
             self._take_screenshot("verified")
 
             result.screenshots = list(self._screenshots)
+            self._persist_result(result, mode)
             return result
 
         except Exception as exc:
+            if self._submission_started:
+                result = PublishResult(
+                    platform=self.platform,
+                    status="submitted_unverified",
+                    page_state="submitted_unverified",
+                    current_url=self.page.url if self.page else "",
+                    smoke_step="verify",
+                    message="提交可能已发生，需要人工复核",
+                    error=str(exc),
+                    screenshots=list(self._screenshots),
+                )
+                self._emit_state("submitted_unverified", page_state="submitted_unverified", error=str(exc))
+                return result
             self.state = PublishState.ERROR
             self._emit_state("error", page_state="error", error=str(exc))
             self._take_screenshot(f"error_{self.state.value}")
@@ -261,13 +294,67 @@ class PlaywrightBasePublisher(ABC):
                 screenshots=list(self._screenshots),
             )
 
+    @property
+    def _state_file(self):
+        return state_file_for(self.engine.base_dir)
+
+    def _reconcile(self, mode: str) -> PublishResult:
+        """危险提交状态只做核验；无法确认时绝不再次提交。"""
+        self._submission_started = True
+        self.page = self.engine.get_page_for_platform(self.platform)
+        result = self.verify_result(mode)
+        if not self._is_terminal(result.status, mode):
+            result = self._unverified_result(result, reconciliation=True)
+        self._persist_result(result, mode)
+        return result
+
+    def _unverified_result(self, result: PublishResult, *, reconciliation: bool = False) -> PublishResult:
+        message = "历史提交无法确认，需要人工复核；未再次提交" if reconciliation else "提交结果无法确认，需要人工复核"
+        return PublishResult(
+            platform=self.platform,
+            status="submitted_unverified",
+            page_state="submitted_unverified",
+            current_url=result.current_url or (self.page.url if self.page else ""),
+            smoke_step="verify",
+            message=message,
+            error=result.error,
+            screenshots=list(self._screenshots),
+        )
+
+    @staticmethod
+    def _is_terminal(status: str, mode: str) -> bool:
+        if status == "skipped_existing":
+            return True
+        if mode == "publish":
+            return status in {"published", "scheduled"}
+        return status in {"draft_only", "draft_saved"}
+
+    def _persist_result(self, result: PublishResult, mode: str) -> None:
+        if self._is_terminal(result.status, mode):
+            mark_done(
+                self._article_key,
+                self.platform,
+                result.status,
+                mode,
+                result.current_url,
+                state_file=self._state_file,
+            )
+            return
+        record_step(
+            self._article_key,
+            self.platform,
+            mode,
+            result.status,
+            state_file=self._state_file,
+        )
+
     def _take_screenshot(self, step: str):
         if self.page and self.engine:
             path = self.engine.screenshot(self.page, self.platform, step)
             if path:
                 self._screenshots.append(path)
 
-    def _emit_state(self, smoke_step: str, *, page_state: str = "", error: str = ""):
+    def _emit_state(self, smoke_step: str, *, page_state: str = "", error: str = "", persist: bool = True):
         """输出 smoke state JSON 到 stdout（兼容旧 pipeline），并持久化步骤到运行状态文件"""
         payload = {
             "current_url": self.page.url if self.page else "",
@@ -277,13 +364,14 @@ class PlaywrightBasePublisher(ABC):
         if error:
             payload["error"] = error
         # 状态机步骤持久化（支撑断点续跑）
-        record_step(
-            getattr(self, "_article_key", ""),
-            self.platform,
-            getattr(self, "_mode", "draft"),
-            smoke_step,
-            state_file=state_file_for(self.engine.base_dir),
-        )
+        if persist:
+            record_step(
+                getattr(self, "_article_key", ""),
+                self.platform,
+                getattr(self, "_mode", "draft"),
+                smoke_step,
+                state_file=self._state_file,
+            )
         print(f"{SMOKE_STATE_PREFIX}{json.dumps(payload, ensure_ascii=False)}")
 
     # ── 子类必须实现的抽象方法 ─────────────────────────────────

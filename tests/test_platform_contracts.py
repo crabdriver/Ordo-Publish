@@ -220,7 +220,7 @@ class PlatformContractTests(unittest.TestCase):
 
         self.assertEqual(result.status, "limit_reached")
         self.assertEqual(result.error_type, ErrorType.RATE_LIMITED)
-        self.assertFalse(result.retryable)
+        self.assertTrue(result.retryable)
 
     def test_collect_result_does_not_treat_review_lock_as_daily_limit(self):
         registry = build_platform_registry(Path("/tmp/repo"))

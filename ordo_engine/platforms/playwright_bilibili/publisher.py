@@ -233,4 +233,5 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
             BilibiliLocators.LIMIT_MARKERS,
             BilibiliLocators.MANAGEMENT_URL,
             BilibiliLocators.DRAFT_MANAGEMENT_URL,
+            expected_title=self._article.title,
         )

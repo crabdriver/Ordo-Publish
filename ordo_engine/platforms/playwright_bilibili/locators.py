@@ -12,7 +12,7 @@ class BilibiliLocators:
     EDITOR_URL = "https://member.bilibili.com/platform/upload/text/new-edit"
     MANAGEMENT_URL = "https://member.bilibili.com/platform/upload/text/manage"
     DRAFT_MANAGEMENT_URL = "https://member.bilibili.com/platform/upload/text/manage?tab=draft"
-    PUBLISHED_URL_PATTERN = r"member\.bilibili\.com/(?:platform/upload/text/(?:manage|new-edit)|opus)"
+    PUBLISHED_URL_PATTERN = r"^https?://(?:www\.)?bilibili\.com/(?:read/cv\d+|opus/\d+)(?:[/?#]|$)"
 
     # 标题框在 iframe 内：<textarea class="title-input__inner" placeholder="请输入标题（建议30字以内）">
     TITLE_INPUT = (
