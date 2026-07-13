@@ -120,6 +120,7 @@ def run_publish_pipeline(
             shared_engine = PlaywrightEngine(
                 mode="standalone",
                 headless=not getattr(args, "headed", False),
+                base_dir=Path(base_dir),
             )
             shared_engine.connect()
             for adapter in registry.values():

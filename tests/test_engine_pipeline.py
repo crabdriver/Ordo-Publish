@@ -112,6 +112,32 @@ class EnginePipelineTests(unittest.TestCase):
         self.assertEqual(result["summary"], "ok")
         self.assertEqual(result["platform"], "wechat")
 
+    def test_shared_engine_uses_pipeline_base_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            registry = {"wechat": DummyAdapter(base_dir, "wechat", stdout="ok")}
+            args = Namespace(mode="draft", continue_on_error=False)
+
+            with patch(
+                "ordo_engine.runner.pipeline._resolve_engine_type",
+                return_value="standalone",
+            ), patch("ordo_engine.runner.pipeline.PlaywrightEngine") as engine_factory:
+                run_publish_pipeline(
+                    base_dir=base_dir,
+                    args=args,
+                    article_paths=[article],
+                    platforms=["wechat"],
+                    registry=registry,
+                )
+
+            engine_factory.assert_called_once_with(
+                mode="standalone",
+                headless=True,
+                base_dir=base_dir,
+            )
+
     def test_run_publish_pipeline_stops_on_first_error_when_continue_disabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             article_a = Path(tmpdir) / "a.md"

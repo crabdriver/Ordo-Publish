@@ -277,16 +277,13 @@ class PlaywrightBasePublisher(ABC):
         if error:
             payload["error"] = error
         # 状态机步骤持久化（支撑断点续跑）
-        try:
-            record_step(
-                getattr(self, "_article_key", ""),
-                self.platform,
-                getattr(self, "_mode", "draft"),
-                smoke_step,
-                state_file=state_file_for(self.engine.base_dir),
-            )
-        except Exception:
-            pass
+        record_step(
+            getattr(self, "_article_key", ""),
+            self.platform,
+            getattr(self, "_mode", "draft"),
+            smoke_step,
+            state_file=state_file_for(self.engine.base_dir),
+        )
         print(f"{SMOKE_STATE_PREFIX}{json.dumps(payload, ensure_ascii=False)}")
 
     # ── 子类必须实现的抽象方法 ─────────────────────────────────

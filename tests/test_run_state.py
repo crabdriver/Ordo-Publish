@@ -88,11 +88,19 @@ def test_record_step_uses_same_mode_nested_key(tmp_path):
 def test_save_state_atomically_replaces_file_and_fsyncs(tmp_path):
     state_file = tmp_path / ".ordo" / "publish-state.json"
 
-    with patch.object(run_state.os, "fsync", wraps=run_state.os.fsync) as fsync:
+    with patch.object(run_state.os, "fsync", wraps=run_state.os.fsync) as fsync, patch.object(
+        run_state.os,
+        "replace",
+        wraps=run_state.os.replace,
+    ) as replace:
         run_state.save_state(state_file, {"article-1": {}})
 
     assert json.loads(state_file.read_text(encoding="utf-8")) == {"article-1": {}}
     fsync.assert_called_once()
+    replace.assert_called_once()
+    temp_path, target_path = map(Path, replace.call_args.args)
+    assert temp_path.parent == state_file.parent
+    assert target_path == state_file
     assert list(state_file.parent.iterdir()) == [state_file]
 
 
