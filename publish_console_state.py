@@ -1,7 +1,6 @@
 from ordo_engine.state.session import (
     FAILURE_STATUSES,
     SKIPPED_STATUSES,
-    SUCCESS_STATUSES,
     advance_after_success,
     build_session,
     finalize_article,
@@ -12,7 +11,6 @@ from ordo_engine.state.session import (
 )
 
 __all__ = [
-    "SUCCESS_STATUSES",
     "SKIPPED_STATUSES",
     "FAILURE_STATUSES",
     "advance_after_success",

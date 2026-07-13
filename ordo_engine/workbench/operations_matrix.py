@@ -5,6 +5,8 @@ import re
 import uuid
 from pathlib import Path
 
+from ordo_engine.platforms.base import is_terminal_outcome
+
 WORKBENCH_ROOT = Path(".ordo") / "workbench"
 OPERATIONS_ROOT = WORKBENCH_ROOT / "operations"
 
@@ -141,7 +143,11 @@ def build_retry_queue(*, preflight_report=None, publish_result=None):
             }
         )
     for result in (publish_result or {}).get("results", []):
-        if str(result.get("status") or "") in {"published", "draft_only", "scheduled", "success_unknown"}:
+        status = str(result.get("status") or "")
+        mode = str(result.get("mode") or (publish_result or {}).get("mode") or "draft")
+        if result.get("returncode") == 0 and status == "skipped_existing":
+            continue
+        if result.get("returncode") == 0 and is_terminal_outcome(status, mode):
             continue
         queue.append(
             {

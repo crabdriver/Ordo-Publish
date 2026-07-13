@@ -17,6 +17,7 @@ from ordo_engine.assignment.templates import assign_templates, scan_theme_pool
 from ordo_engine.config import load_engine_config
 from ordo_engine.importers.sources import UnsupportedSourceError, import_file, import_pasted_text, list_import_candidates
 from ordo_engine.models.workbench import ArticleDraft, ImportFailure, ImportJob, PublishJob
+from ordo_engine.platforms.base import is_terminal_outcome
 from ordo_engine.runner.pipeline import run_platform_task
 
 WORKBENCH_ROOT = Path(".ordo") / "workbench"
@@ -27,7 +28,6 @@ LAST_RESULT_PATH = WORKBENCH_ROOT / "last-result.json"
 SESSION_PATH = Path(".ordo") / "publish-console" / "publish-console-session.json"
 BROWSER_SESSION_STATE_PATH = Path(".ordo") / "browser-session" / "state.json"
 RECORDS_PATH = Path("publish_records.csv")
-SUCCESS_STATUSES = {"published", "scheduled", "draft_only", "success_unknown"}
 SKIP_STATUSES = {"skipped_existing"}
 BROWSER_PLATFORMS = ("zhihu", "toutiao", "jianshu", "yidian", "bilibili")
 PUBLISH_OPTION_MODES = {"auto", "force_on", "force_off", "random"}
@@ -617,15 +617,26 @@ def _build_context_lookup(plan_payload):
     return mapping
 
 
-def _status_counts(results):
+def _is_skipped_result(result):
+    return result.get("returncode") == 0 and result.get("status") in SKIP_STATUSES
+
+
+def _is_success_result(result, mode):
+    return (
+        result.get("returncode") == 0
+        and result.get("status") not in SKIP_STATUSES
+        and is_terminal_outcome(str(result.get("status") or ""), mode)
+    )
+
+
+def _status_counts(results, mode):
     success = failure = skipped = 0
     recoverable = True
     for result in results:
-        status = result.get("status")
-        if status in SUCCESS_STATUSES:
-            success += 1
-        elif status in SKIP_STATUSES:
+        if _is_skipped_result(result):
             skipped += 1
+        elif _is_success_result(result, mode):
+            success += 1
         else:
             failure += 1
             recoverable = recoverable and bool(result.get("retryable", False))
@@ -747,8 +758,15 @@ def run_publish_job(
             if result["returncode"] != 0 and not continue_on_error:
                 break
 
-        success_count, failure_count, skip_count, recoverable = _status_counts(results)
-        last_failed_result = next((item for item in reversed(results) if item.get("returncode") != 0), None)
+        success_count, failure_count, skip_count, recoverable = _status_counts(results, mode)
+        last_failed_result = next(
+            (
+                item
+                for item in reversed(results)
+                if not _is_skipped_result(item) and not _is_success_result(item, mode)
+            ),
+            None,
+        )
         publish_job.update(
             {
                 "status": "completed" if failure_count == 0 else "failed",
@@ -770,6 +788,7 @@ def run_publish_job(
         )
         payload = {
             "publish_job": publish_job,
+            "mode": mode,
             "events": events,
             "results": results,
         }
@@ -852,8 +871,13 @@ def read_recent_history(base_dir, *, limit: int = 20):
         recovery_status = "empty"
     can_restore_plan = bool(last_plan) and not issues and not missing_staged_articles
     failure_count = int((last_result or {}).get("publish_job", {}).get("failure_count") or 0)
+    result_mode = str(
+        (last_result or {}).get("mode")
+        or (last_plan or {}).get("mode")
+        or "draft"
+    )
     has_failed_results = failure_count > 0 or any(
-        item.get("status") not in SUCCESS_STATUSES and item.get("status") not in SKIP_STATUSES
+        not _is_skipped_result(item) and not _is_success_result(item, result_mode)
         for item in (last_result or {}).get("results", [])
     )
     return {

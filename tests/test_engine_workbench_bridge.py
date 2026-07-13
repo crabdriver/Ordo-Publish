@@ -72,6 +72,11 @@ class DummyAdapter(BasePlatformAdapter):
         )
 
 
+class UnknownSuccessAdapter(DummyAdapter):
+    def verify(self, process_result, mode):
+        return "success_unknown"
+
+
 class WorkbenchBridgeTests(unittest.TestCase):
     def setUp(self):
         self._environ_patcher = patch.dict(
@@ -597,6 +602,22 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(result["publish_job"]["success_count"], 1)
         self.assertEqual(result["results"][0]["status"], "draft_only")
 
+    def test_run_publish_job_treats_success_unknown_as_failed(self):
+        from ordo_engine.workbench.bridge import run_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            plan = self._minimal_plan(base, ["wechat"])
+            registry = {
+                "wechat": UnknownSuccessAdapter(base, "wechat", returncode=0),
+            }
+
+            result = run_publish_job(base, plan, registry=registry)
+
+        self.assertEqual(result["publish_job"]["status"], "failed")
+        self.assertEqual(result["publish_job"]["success_count"], 0)
+        self.assertEqual(result["publish_job"]["failure_count"], 1)
+
     def test_run_publish_job_supports_sparse_context_map_for_retry_plans(self):
         from ordo_engine.workbench.bridge import run_publish_job
 
@@ -838,6 +859,50 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(history["last_plan"]["publish_job"]["job_id"], "plan-1")
         self.assertEqual(history["last_result"]["publish_job"]["status"], "failed")
         self.assertEqual(history["recovery"]["status"], "recoverable")
+
+    def test_read_recent_history_treats_success_unknown_as_failed_result(self):
+        from ordo_engine.workbench.bridge import read_recent_history
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            article = base / "article.md"
+            article.write_text("# Article", encoding="utf-8")
+            workbench_dir = base / ".ordo" / "workbench"
+            workbench_dir.mkdir(parents=True)
+            plan = {
+                "publish_job": {"job_id": "plan-unknown"},
+                "mode": "draft",
+                "staged_articles": [
+                    {"article_id": "article", "markdown_path": str(article)}
+                ],
+            }
+            (workbench_dir / "last-plan.json").write_text(
+                json.dumps(plan), encoding="utf-8"
+            )
+            (workbench_dir / "last-result.json").write_text(
+                json.dumps(
+                    {
+                        "publish_job": {
+                            "job_id": "plan-unknown",
+                            "failure_count": 0,
+                        },
+                        "mode": "draft",
+                        "results": [
+                            {
+                                "article_id": "article",
+                                "platform": "wechat",
+                                "status": "success_unknown",
+                                "returncode": 0,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            history = read_recent_history(base, limit=5)
+
+        self.assertTrue(history["recovery"]["can_restore_failures"])
 
     def test_read_recent_history_tolerates_corrupt_snapshots_and_reports_state(self):
         from ordo_engine.workbench.bridge import read_recent_history

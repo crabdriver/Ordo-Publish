@@ -62,6 +62,57 @@ class EngineSessionTests(unittest.TestCase):
         self.assertEqual(platform_state["error_type"], "config_error")
         self.assertFalse(platform_state["retryable"])
 
+    def test_record_platform_result_marks_success_unknown_failed(self):
+        session = build_session(
+            article_paths=["/tmp/a.md"],
+            platforms=["wechat"],
+            mode="draft",
+            available_themes=["chinese"],
+            default_theme="chinese",
+        )
+
+        record_platform_result(
+            session,
+            0,
+            {"platform": "wechat", "status": "success_unknown", "returncode": 0},
+        )
+
+        self.assertEqual(session["items"][0]["platforms"]["wechat"]["status"], "failed")
+
+    def test_record_platform_result_marks_terminal_nonzero_failed(self):
+        session = build_session(
+            article_paths=["/tmp/a.md"],
+            platforms=["wechat"],
+            mode="draft",
+            available_themes=["chinese"],
+            default_theme="chinese",
+        )
+
+        record_platform_result(
+            session,
+            0,
+            {"platform": "wechat", "status": "draft_only", "returncode": 1},
+        )
+
+        self.assertEqual(session["items"][0]["platforms"]["wechat"]["status"], "failed")
+
+    def test_record_platform_result_marks_mode_mismatch_failed(self):
+        session = build_session(
+            article_paths=["/tmp/a.md"],
+            platforms=["wechat"],
+            mode="publish",
+            available_themes=["chinese"],
+            default_theme="chinese",
+        )
+
+        record_platform_result(
+            session,
+            0,
+            {"platform": "wechat", "status": "draft_only", "returncode": 0},
+        )
+
+        self.assertEqual(session["items"][0]["platforms"]["wechat"]["status"], "failed")
+
     def test_finalize_article_and_advance_match_existing_console_behavior(self):
         session = build_session(
             article_paths=["/tmp/a.md", "/tmp/b.md"],
@@ -72,7 +123,7 @@ class EngineSessionTests(unittest.TestCase):
         )
 
         mark_publishing(session, 0)
-        record_platform_result(session, 0, {"platform": "wechat", "status": "published", "stdout": "", "stderr": ""})
+        record_platform_result(session, 0, {"platform": "wechat", "status": "draft_only", "returncode": 0, "stdout": "", "stderr": ""})
         record_platform_result(session, 0, {"platform": "zhihu", "status": "failed", "stdout": "", "stderr": "boom"})
         article_status = finalize_article(session, 0)
 

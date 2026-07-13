@@ -2,10 +2,10 @@ import json
 import time
 from pathlib import Path
 
+from ordo_engine.platforms.base import is_terminal_outcome
 from ordo_engine.results.errors import ErrorType
 
 
-SUCCESS_STATUSES = {"published", "scheduled", "draft_only", "success_unknown"}
 SKIPPED_STATUSES = {"skipped_existing"}
 FAILURE_STATUSES = {"failed", "limit_reached"}
 
@@ -134,10 +134,10 @@ def record_platform_result(session, index, result):
     platform_state = session["items"][index]["platforms"][platform]
     raw_status = result.get("status", "")
 
-    if raw_status in SUCCESS_STATUSES:
-        platform_state["status"] = "success"
-    elif raw_status in SKIPPED_STATUSES:
+    if result.get("returncode") == 0 and raw_status in SKIPPED_STATUSES:
         platform_state["status"] = "skipped"
+    elif result.get("returncode") == 0 and is_terminal_outcome(raw_status, session["mode"]):
+        platform_state["status"] = "success"
     else:
         platform_state["status"] = "failed"
 
