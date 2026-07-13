@@ -1762,6 +1762,21 @@ def apply_vps_config_defaults(args, base_dir=BASE_DIR):
     return args
 
 
+def require_local_standalone_engine(args, base_dir=BASE_DIR):
+    if getattr(args, "remote", None) != "local":
+        return
+    if not any(
+        platform in BROWSER_PLATFORMS
+        for platform in parse_platforms(getattr(args, "platform", "all"))
+    ):
+        return
+    if getattr(args, "engine", "standalone") != "standalone":
+        raise SystemExit("[BLOCK] 本地浏览器发布仅允许 standalone 隔离引擎")
+    configured = load_engine_config(base_dir).project_config.get("engine", "standalone")
+    if configured != "standalone":
+        raise SystemExit("[BLOCK] config.json 的本地浏览器引擎必须为 standalone")
+
+
 def run_remote_cdp_preflight(remote_executor):
     cmd = [
         "bash",
@@ -1781,6 +1796,7 @@ def main():
         bootstrap_browser_profile(BASE_DIR, parse_platforms(args.platform))
         return
     args = apply_vps_config_defaults(args)
+    require_local_standalone_engine(args, BASE_DIR)
 
     # 选择器存活探针模式：只检查不发布
     if getattr(args, "probe", False):
@@ -1960,67 +1976,9 @@ def main():
     print(f"[INFO] 本次文章数量: {len(article_paths)}")
 
     browser_platforms = [platform for platform in platforms if platform in BROWSER_PLATFORMS]
-    tabs = []
-    cdp_connection = None
-
-    # 解析引擎类型：优先 CLI 参数，其次 config.json
-    from ordo_engine.platforms.registry import _resolve_engine_type
-    engine_type = _resolve_engine_type(BASE_DIR)
-    is_standalone = engine_type == "standalone"
-
-    if is_standalone:
-        # standalone 模式：启动独立无头浏览器，不需要 CDP 前置检查
+    if browser_platforms:
         print("[INFO] 使用 standalone 引擎：独立无头浏览器模式，跳过 CDP 前置检查")
-    elif browser_platforms:
-        if args.no_auto_launch:
-            tabs = list_tabs_or_none()
-        else:
-            tabs, launched_app = ensure_chrome_ready(browser_platforms)
-            if launched_app:
-                print(f"[INFO] 已自动启动浏览器: {launched_app}")
-        cdp_connection = get_cdp_connection_metadata()
-
-        if not tabs:
-            raise RuntimeError("没有检测到可用的 Chrome 标签页，请先打开 Chrome 并启用远程调试")
-
-    if not is_standalone:
-        if not args.no_auto_open:
-            opened = open_missing_platform_tabs(platforms, auto_launch=not args.no_auto_launch)
-            if opened:
-                print(f"[INFO] 已自动打开平台标签页: {', '.join(opened)}")
-            if browser_platforms:
-                tabs = list_tabs()
-
-        if args.rebind_workbench and WORKBENCH_FILE.exists():
-            WORKBENCH_FILE.unlink()
-
-        workbench = bind_workbench(platforms, tabs)
-        bound_platforms = [platform for platform in platforms if workbench.get(platform)]
-        if bound_platforms:
-            print(f"[INFO] 已绑定固定工作台标签页: {', '.join(bound_platforms)}")
-
-        if not args.no_warmup:
-            warmed = warm_platforms(platforms)
-            if warmed:
-                print(f"[INFO] 已自动预热平台标签页: {', '.join(warmed)}")
-
-        blockers, warnings = run_preflight_checks(
-            platforms,
-            args.mode,
-            workbench,
-            cdp_connection=cdp_connection,
-            cover_mode=args.cover_mode,
-            article_paths=article_paths,
-            cover_override=Path(args.cover).expanduser().resolve() if args.cover else None,
-        )
-        for warning in warnings:
-            print(f"[WARN] {warning}")
-        for blocker in blockers:
-            print(f"[BLOCK] {blocker}")
-        if blockers:
-            raise SystemExit(1)
-    else:
-        workbench = {}
+    workbench = {}
 
     theme_mode = "fixed"
     available_themes = []

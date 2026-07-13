@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from PIL import Image, ImageCms
 
@@ -218,6 +218,87 @@ class PublishPreflightTests(unittest.TestCase):
 
             marker = base_dir / ".ordo" / "automation-profile" / ".ordo-profile-initialized"
             self.assertFalse(marker.exists())
+
+    def test_bootstrap_close_failure_does_not_mark_profile(self):
+        class Engine:
+            def __init__(self, **_kwargs):
+                self.mark_profile_initialized = MagicMock()
+
+            def connect(self):
+                pass
+
+            def get_page_for_platform(self, _platform):
+                pass
+
+            def close(self):
+                raise RuntimeError("context close failed")
+
+        engine = Engine()
+        with self.assertRaisesRegex(RuntimeError, "context close failed"):
+            publish.bootstrap_browser_profile(
+                Path("/tmp/repo"),
+                ["zhihu"],
+                engine_factory=lambda **_kwargs: engine,
+                input_fn=lambda _prompt: "YES",
+            )
+
+        engine.mark_profile_initialized.assert_not_called()
+
+    def test_local_playwright_engine_is_rejected_before_legacy_browser_access(self):
+        legacy_names = (
+            "ensure_chrome_ready",
+            "list_tabs_or_none",
+            "open_missing_platform_tabs",
+            "launch_chrome",
+        )
+        patches = [patch.object(publish, name) for name in legacy_names]
+        mocks = [item.start() for item in patches]
+        self.addCleanup(lambda: [item.stop() for item in patches])
+
+        with patch.object(
+            publish.sys,
+            "argv",
+            ["publish.py", "missing.md", "--remote", "local", "--engine", "playwright"],
+        ):
+            with self.assertRaisesRegex(SystemExit, "standalone"):
+                publish.main()
+
+        for mock in mocks:
+            mock.assert_not_called()
+
+    def test_local_config_playwright_is_rejected_before_legacy_browser_access(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            (base_dir / "config.json").write_text(
+                '{"engine": "playwright"}', encoding="utf-8"
+            )
+            with patch.object(publish, "BASE_DIR", base_dir), patch.object(
+                publish.sys,
+                "argv",
+                ["publish.py", "missing.md", "--remote", "local"],
+            ), patch.object(publish, "ensure_chrome_ready") as ensure, patch.object(
+                publish, "list_tabs_or_none"
+            ) as list_tabs, patch.object(
+                publish, "open_missing_platform_tabs"
+            ) as open_tabs:
+                with self.assertRaisesRegex(SystemExit, "standalone"):
+                    publish.main()
+
+            ensure.assert_not_called()
+            list_tabs.assert_not_called()
+            open_tabs.assert_not_called()
+
+    def test_wechat_only_does_not_consult_legacy_browser_engine_config(self):
+        args = publish.parse_args(
+            ["article.md", "--remote", "local", "--platform", "wechat"]
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            (base_dir / "config.json").write_text(
+                '{"engine": "playwright"}', encoding="utf-8"
+            )
+
+            publish.require_local_standalone_engine(args, base_dir)
 
     def test_parse_bootstrap_browser_does_not_require_markdown_path(self):
         args = publish.parse_args(["--bootstrap-browser", "--platform", "zhihu"])

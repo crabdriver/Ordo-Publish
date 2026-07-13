@@ -8,6 +8,7 @@ from typing import Optional
 
 from ordo_engine.platforms.base import BasePlatformAdapter, classify_process_result, infer_error_type
 from ordo_engine.platforms.playwright.base_publisher import is_terminal_outcome
+from ordo_engine.platforms.playwright.engine import BrowserCleanupError
 from ordo_engine.results.errors import is_retryable_error
 from ordo_engine.results.record import ExecutionResult
 
@@ -109,20 +110,28 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
                 publisher = self.publisher_class(engine)
                 result = publisher.publish(article, prepared_context["mode"])
             finally:
+                cleanup_errors = []
                 leased_page = None
                 try:
                     leased_page = engine.release_page_for_platform(self.platform)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    cleanup_errors.append(exc)
                 page = getattr(publisher, "page", None)
                 if page is not None and page is not leased_page:
                     try:
                         page.close()
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        cleanup_errors.append(exc)
                 # 仅当引擎为自身创建时才关闭；共享引擎由 pipeline 统一关闭
                 if not shared:
-                    engine.close()
+                    try:
+                        engine.close()
+                    except Exception as exc:
+                        cleanup_errors.append(exc)
+                if cleanup_errors:
+                    raise BrowserCleanupError(
+                        f"浏览器清理失败: {cleanup_errors[0]}"
+                    ) from cleanup_errors[0]
 
             sys.stdout = old_stdout
             stdout_text = captured_stdout.getvalue()
@@ -141,6 +150,8 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
                 "smoke_step": result.smoke_step,
             }
 
+        except BrowserCleanupError:
+            raise
         except Exception as exc:
             sys.stdout = old_stdout
             tb = traceback.format_exc()

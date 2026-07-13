@@ -72,6 +72,10 @@ try {
 """
 
 
+class BrowserCleanupError(RuntimeError):
+    pass
+
+
 class PlaywrightEngine:
     """管理 Playwright 浏览器连接（standalone 模式）
 
@@ -97,7 +101,9 @@ class PlaywrightEngine:
         # cdp 旧路径已移除，仅保留 standalone
         self.mode = "standalone"
         self.debug_port = debug_port
-        self.base_dir = base_dir or Path(__file__).resolve().parents[3]
+        self.base_dir = Path(
+            base_dir or Path(__file__).resolve().parents[3]
+        ).resolve()
         self._playwright: Optional[Playwright] = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None  # standalone 模式的 context
@@ -130,7 +136,7 @@ class PlaywrightEngine:
     @property
     def profile_is_initialized(self) -> bool:
         """只接受显式 bootstrap 写入的版本化标志。"""
-        marker = self.profile_dir / PROFILE_MARKER_NAME
+        marker = self._validate_profile_paths()
         if not marker.is_file():
             return False
         try:
@@ -143,11 +149,27 @@ class PlaywrightEngine:
         return self.profile_is_initialized
 
     def mark_profile_initialized(self) -> None:
+        marker = self._validate_profile_paths()
         self.profile_dir.mkdir(parents=True, exist_ok=True)
-        (self.profile_dir / PROFILE_MARKER_NAME).write_text(
+        marker = self._validate_profile_paths()
+        marker.write_text(
             PROFILE_MARKER_CONTENT,
             encoding="utf-8",
         )
+
+    def _validate_profile_paths(self) -> Path:
+        base_dir = self.base_dir.resolve()
+        ordo_dir = base_dir / ".ordo"
+        profile_dir = ordo_dir / "automation-profile"
+        marker = profile_dir / PROFILE_MARKER_NAME
+        for path in (ordo_dir, profile_dir, marker):
+            if path.is_symlink():
+                raise RuntimeError(f"浏览器 profile 路径禁止 symlink: {path}")
+        try:
+            profile_dir.resolve(strict=False).relative_to(base_dir)
+        except ValueError as exc:
+            raise RuntimeError(f"浏览器 profile 逃逸仓库: {profile_dir}") from exc
+        return marker
 
     def connect(self):
         """启动独立浏览器"""
@@ -191,6 +213,7 @@ class PlaywrightEngine:
 
     def _launch_standalone(self):
         """Standalone 模式：启动独立的无头 Chrome 实例"""
+        self._validate_profile_paths()
         if self.headless and not self.profile_is_initialized:
             raise RuntimeError(
                 "自动发布 profile 尚未初始化；请先运行 publish.py --bootstrap-browser"
@@ -296,13 +319,12 @@ class PlaywrightEngine:
         return page
 
     def release_page_for_platform(self, platform: str) -> Optional[Page]:
-        """释放平台 page lease。清理失败不覆盖原发布结果。"""
-        page = self._platform_pages.pop(platform, None)
+        """释放平台 page lease；关闭失败时保留 lease 并向上抛错。"""
+        page = self._platform_pages.get(platform)
         if page is not None:
-            try:
-                page.close()
-            except Exception:
-                pass
+            page.close()
+            if self._platform_pages.get(platform) is page:
+                self._platform_pages.pop(platform, None)
         return page
 
     def screenshot(self, page: Page, platform: str, step: str) -> Optional[Path]:
@@ -323,17 +345,23 @@ class PlaywrightEngine:
         standalone 模式：关闭浏览器并释放所有内存
         cdp 模式：仅断开连接（不关闭用户的浏览器）
         """
+        errors = []
         if self._is_standalone:
             for platform in list(self._platform_pages):
-                self.release_page_for_platform(platform)
+                try:
+                    self.release_page_for_platform(platform)
+                except Exception as exc:
+                    errors.append(exc)
             # 关闭所有页面
             if self._context:
                 try:
                     # 关闭 context 会关闭所有页面并释放浏览器进程
                     self._context.close()
-                except Exception:
-                    pass
-                self._context = None
+                except Exception as exc:
+                    errors.append(exc)
+                else:
+                    self._context = None
+                    self._platform_pages.clear()
         else:
             # CDP 模式：不关闭浏览器，只断开连接
             self._browser = None
@@ -341,10 +369,13 @@ class PlaywrightEngine:
         if self._playwright:
             try:
                 self._playwright.stop()
-            except Exception:
-                pass
-            self._playwright = None
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                self._playwright = None
 
+        if errors:
+            raise BrowserCleanupError(f"浏览器清理失败: {errors[0]}") from errors[0]
         if self._is_standalone:
             print("[engine] 独立浏览器已关闭，内存已释放")
 

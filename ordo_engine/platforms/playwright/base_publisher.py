@@ -127,6 +127,11 @@ class PlaywrightBasePublisher(ABC):
                 txt = ""
             return any(m in txt for m in login_markers)
 
+        if self.engine.headless and not _title_ready() and _on_login_page():
+            raise RuntimeError(
+                f"{platform} 登录已失效；请运行 publish.py --bootstrap-browser"
+            )
+
         # 等待页面加载/客户端重定向稳定
         time.sleep(3)
         try:
@@ -158,6 +163,10 @@ class PlaywrightBasePublisher(ABC):
                 print(f"[INFO] {platform} 停留在编辑器页但标题框未出现，判定为需要登录")
 
         if needs_login:
+            if self.engine.headless:
+                raise RuntimeError(
+                    f"{platform} 登录已失效；请运行 publish.py --bootstrap-browser"
+                )
             print(f"[INFO] 检测到 {platform} 需要登录，请在浏览器窗口中扫码/登录...")
             print(f"[INFO] 等待登录完成（最多 300 秒）")
 

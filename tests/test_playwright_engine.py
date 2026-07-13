@@ -13,6 +13,7 @@ from ordo_engine.platforms.playwright.base_publisher import (
     PublishResult,
 )
 from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
+from ordo_engine.platforms.playwright_bilibili.publisher import BilibiliPlaywrightPublisher
 from ordo_engine.run_state import article_key, state_file_for
 
 
@@ -48,6 +49,42 @@ class StubPublisher(PlaywrightBasePublisher):
 
 
 class TestPlaywrightEngine(unittest.TestCase):
+    def test_profile_rejects_ordo_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as outside:
+            base_dir = Path(tmpdir)
+            (base_dir / ".ordo").symlink_to(Path(outside), target_is_directory=True)
+            engine = PlaywrightEngine(base_dir=base_dir, headless=False)
+
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                engine.mark_profile_initialized()
+
+            self.assertFalse((Path(outside) / "automation-profile" / ".ordo-profile-initialized").exists())
+
+    def test_profile_rejects_profile_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as outside:
+            base_dir = Path(tmpdir)
+            (base_dir / ".ordo").mkdir()
+            (base_dir / ".ordo" / "automation-profile").symlink_to(
+                Path(outside), target_is_directory=True
+            )
+            engine = PlaywrightEngine(base_dir=base_dir, headless=False)
+
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                engine.mark_profile_initialized()
+
+            self.assertFalse((Path(outside) / ".ordo-profile-initialized").exists())
+
+    def test_profile_rejects_marker_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as tmpdir, tempfile.NamedTemporaryFile() as outside:
+            base_dir = Path(tmpdir)
+            profile = base_dir / ".ordo" / "automation-profile"
+            profile.mkdir(parents=True)
+            (profile / ".ordo-profile-initialized").symlink_to(Path(outside.name))
+            engine = PlaywrightEngine(base_dir=base_dir, headless=False)
+
+            with self.assertRaisesRegex(RuntimeError, "symlink"):
+                _ = engine.profile_is_initialized
+
     def test_new_platform_page_is_leased_before_initial_navigation(self):
         engine = PlaywrightEngine(base_dir=Path("/tmp/repo"), headless=False)
         page = MagicMock(url="about:blank")
@@ -73,6 +110,73 @@ class TestPlaywrightEngine(unittest.TestCase):
 
         self.assertIs(released, page)
         page.close.assert_called_once_with()
+
+    def test_release_keeps_lease_and_raises_when_page_close_fails(self):
+        engine = PlaywrightEngine(base_dir=Path("/tmp/repo"), headless=False)
+        page = MagicMock()
+        page.close.side_effect = RuntimeError("page close failed")
+        engine._platform_pages["zhihu"] = page
+
+        with self.assertRaisesRegex(RuntimeError, "page close failed"):
+            engine.release_page_for_platform("zhihu")
+
+        self.assertIs(engine._platform_pages["zhihu"], page)
+
+    def test_engine_close_attempts_pages_context_and_driver_then_raises_first_error(self):
+        engine = PlaywrightEngine(base_dir=Path("/tmp/repo"), headless=False)
+        bad_page = MagicMock()
+        bad_page.close.side_effect = RuntimeError("page close failed")
+        good_page = MagicMock()
+        context = MagicMock()
+        context.close.side_effect = RuntimeError("context close failed")
+        driver = MagicMock()
+        driver.stop.side_effect = RuntimeError("driver stop failed")
+        engine._platform_pages = {"zhihu": bad_page, "jianshu": good_page}
+        engine._context = context
+        engine._playwright = driver
+
+        with self.assertRaisesRegex(RuntimeError, "page close failed"):
+            engine.close()
+
+        bad_page.close.assert_called_once_with()
+        good_page.close.assert_called_once_with()
+        context.close.assert_called_once_with()
+        driver.stop.assert_called_once_with()
+        self.assertIn("zhihu", engine._platform_pages)
+        self.assertNotIn("jianshu", engine._platform_pages)
+        self.assertIs(engine._context, context)
+        self.assertIs(engine._playwright, driver)
+
+    def test_headless_login_failure_does_not_sleep_screenshot_or_poll(self):
+        engine = MagicMock(headless=True)
+        page = MagicMock(url="https://example.test/login")
+        page.locator.return_value.count.return_value = 0
+        page.evaluate.return_value = "请登录"
+        publisher = StubPublisher(engine)
+
+        with patch("time.sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "--bootstrap-browser"):
+                publisher._wait_for_login_if_needed(
+                    page, "editor", "#title", "测试平台"
+                )
+
+        sleep.assert_not_called()
+        engine.screenshot.assert_not_called()
+
+    def test_bilibili_headless_login_failure_does_not_wait(self):
+        engine = MagicMock(headless=True)
+        page = MagicMock(url="https://member.bilibili.com/login")
+        page.frames = []
+        page.evaluate.return_value = "扫码登录"
+        engine.get_page_for_platform.return_value = page
+        publisher = BilibiliPlaywrightPublisher(engine)
+
+        with patch("ordo_engine.platforms.playwright_bilibili.publisher.time.sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "--bootstrap-browser"):
+                publisher.navigate_to_editor()
+
+        sleep.assert_not_called()
+        engine.screenshot.assert_not_called()
 
     def test_headless_missing_initialized_profile_fails_before_browser_start(self):
         with tempfile.TemporaryDirectory() as tmpdir, patch(
@@ -148,7 +252,7 @@ class TestPlaywrightEngine(unittest.TestCase):
     def test_engine_init(self):
         engine = PlaywrightEngine(debug_port=9999, base_dir=Path("/tmp"))
         self.assertEqual(engine.debug_port, 9999)
-        self.assertEqual(engine.base_dir, Path("/tmp"))
+        self.assertEqual(engine.base_dir, Path("/tmp").resolve())
         self.assertIsNone(engine._browser)
 
     @patch("ordo_engine.platforms.playwright.engine.sync_playwright")

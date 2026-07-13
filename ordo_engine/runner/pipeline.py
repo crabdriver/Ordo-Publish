@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 from ordo_engine.platforms.registry import build_platform_registry
@@ -227,12 +228,18 @@ def run_publish_pipeline(
                     if not getattr(args, "continue_on_error", False):
                         return results, exit_code
     finally:
+        close_error = None
+        active_error = sys.exc_info()[1]
         if shared_engine is not None:
             try:
                 shared_engine.close()
-            except Exception:
-                pass
+            except Exception as exc:
+                close_error = exc
         for adapter in selected_browser_adapters:
             adapter.set_shared_engine(None)
+        if close_error is not None:
+            if active_error is None:
+                raise close_error
+            active_error.add_note(f"共享浏览器关闭失败: {close_error}")
 
     return results, exit_code

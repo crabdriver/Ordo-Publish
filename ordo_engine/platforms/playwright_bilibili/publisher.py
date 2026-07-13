@@ -68,6 +68,11 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
                 txt = ""
             return any(m in txt for m in login_markers)
 
+        if self.engine.headless and not _iframe_title_ready() and _on_login_page():
+            raise RuntimeError(
+                "B站 登录已失效；请运行 publish.py --bootstrap-browser"
+            )
+
         time.sleep(5)
 
         needs_login = False
@@ -92,6 +97,9 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
         if not needs_login:
             needs_login = True
             print("[INFO] B站 停留在编辑器页但 iframe 未渲染，判定为需要登录")
+
+        if self.engine.headless:
+            raise RuntimeError("B站 登录已失效；请运行 publish.py --bootstrap-browser")
 
         print("[INFO] 检测到 B站 需要登录，请在浏览器窗口中扫码/登录...")
         print("[INFO] 等待登录完成（最多 300 秒）")

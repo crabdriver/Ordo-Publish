@@ -247,6 +247,77 @@ class EnginePipelineTests(unittest.TestCase):
         for page in engine.pages:
             page.close.assert_called_once_with()
 
+    def test_cleanup_failure_aborts_pipeline_even_when_continue_enabled(self):
+        calls = []
+
+        class Publisher:
+            page = None
+
+            def __init__(self, _engine):
+                pass
+
+            def publish(self, _article, _mode):
+                calls.append("publish")
+                return PublishResult(
+                    platform="stub", status="published", page_state="published"
+                )
+
+        engine = MagicMock()
+        engine.release_page_for_platform.side_effect = RuntimeError("cleanup failed")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            engine.base_dir = base_dir
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            adapters = {
+                platform: PlaywrightPlatformAdapter(base_dir, platform, Publisher)
+                for platform in ("zhihu", "jianshu")
+            }
+
+            with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+                run_publish_pipeline(
+                    base_dir=base_dir,
+                    args=Namespace(mode="publish", continue_on_error=True, headed=False),
+                    article_paths=[article],
+                    platforms=["zhihu", "jianshu"],
+                    registry=adapters,
+                    engine_factory=MagicMock(return_value=engine),
+                )
+
+        self.assertEqual(calls, ["publish"])
+
+    def test_shared_engine_close_failure_overrides_success(self):
+        class Publisher:
+            page = None
+
+            def __init__(self, _engine):
+                pass
+
+            def publish(self, _article, _mode):
+                return PublishResult(
+                    platform="stub", status="published", page_state="published"
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            engine = MagicMock(base_dir=base_dir)
+            engine.close.side_effect = RuntimeError("context close failed")
+            adapter = PlaywrightPlatformAdapter(base_dir, "zhihu", Publisher)
+
+            with self.assertRaisesRegex(RuntimeError, "context close failed"):
+                run_publish_pipeline(
+                    base_dir=base_dir,
+                    args=Namespace(mode="publish", continue_on_error=False, headed=False),
+                    article_paths=[article],
+                    platforms=["zhihu"],
+                    registry={"zhihu": adapter},
+                    engine_factory=MagicMock(return_value=engine),
+                )
+
+        self.assertIsNone(adapter._shared_engine)
+
     def test_shared_engine_start_failure_aborts_browser_pipeline_without_fallback(self):
         class NeverPublisher:
             def __init__(self, _engine):
