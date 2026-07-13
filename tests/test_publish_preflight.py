@@ -150,6 +150,80 @@ class PublishPreflightTests(unittest.TestCase):
         args = publish.parse_args(["article.md", "--mode", "draft"])
         self.assertEqual(args.remote, "local")
 
+    def test_bootstrap_browser_uses_only_repo_profile_and_marks_after_confirmation(self):
+        class FakeEngine:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.profile_dir = kwargs["base_dir"] / ".ordo" / "automation-profile"
+                self.opened = []
+                self.closed = False
+
+            def connect(self):
+                pass
+
+            def get_page_for_platform(self, platform):
+                self.opened.append(platform)
+
+            def close(self):
+                self.closed = True
+
+            def mark_profile_initialized(self):
+                self.profile_dir.mkdir(parents=True, exist_ok=True)
+                (self.profile_dir / ".ordo-profile-initialized").write_text(
+                    "ordo-automation-profile-v1\n", encoding="utf-8"
+                )
+
+        made = []
+
+        def factory(**kwargs):
+            engine = FakeEngine(**kwargs)
+            made.append(engine)
+            return engine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            publish.bootstrap_browser_profile(
+                base_dir,
+                ["wechat", "zhihu", "jianshu"],
+                engine_factory=factory,
+                input_fn=lambda _prompt: "YES",
+            )
+            marker = base_dir / ".ordo" / "automation-profile" / ".ordo-profile-initialized"
+            self.assertTrue(marker.is_file())
+
+        self.assertEqual(made[0].kwargs, {"mode": "standalone", "headless": False, "base_dir": base_dir})
+        self.assertEqual(made[0].opened, ["zhihu", "jianshu"])
+        self.assertTrue(made[0].closed)
+
+    def test_bootstrap_failure_does_not_write_initialized_marker(self):
+        class FailingEngine:
+            def __init__(self, **kwargs):
+                self.profile_dir = kwargs["base_dir"] / ".ordo" / "automation-profile"
+
+            def connect(self):
+                raise RuntimeError("boom")
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                publish.bootstrap_browser_profile(
+                    base_dir,
+                    ["zhihu"],
+                    engine_factory=FailingEngine,
+                    input_fn=lambda _prompt: "YES",
+                )
+
+            marker = base_dir / ".ordo" / "automation-profile" / ".ordo-profile-initialized"
+            self.assertFalse(marker.exists())
+
+    def test_parse_bootstrap_browser_does_not_require_markdown_path(self):
+        args = publish.parse_args(["--bootstrap-browser", "--platform", "zhihu"])
+        self.assertTrue(args.bootstrap_browser)
+        self.assertIsNone(args.markdown_path)
+
     def test_get_cdp_runtime_env_uses_managed_browser_session_port(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

@@ -88,6 +88,7 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
         # 共享引擎模式：复用 pipeline 创建的单个 context，不自行启停
         shared = self._shared_engine is not None
         engine = self._shared_engine if shared else None
+        publisher = None
 
         try:
             article = self._load_article(prepared_context)
@@ -108,6 +109,12 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
                 publisher = self.publisher_class(engine)
                 result = publisher.publish(article, prepared_context["mode"])
             finally:
+                page = getattr(publisher, "page", None)
+                if page is not None:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
                 # 仅当引擎为自身创建时才关闭；共享引擎由 pipeline 统一关闭
                 if not shared:
                     engine.close()

@@ -30,6 +30,9 @@ PLATFORM_EDITOR_URLS: Dict[str, str] = {
     "bilibili": "https://member.bilibili.com/platform/upload/text/new-edit",
 }
 
+PROFILE_MARKER_NAME = ".ordo-profile-initialized"
+PROFILE_MARKER_CONTENT = "ordo-automation-profile-v1\n"
+
 # System Chrome path (macOS)
 SYSTEM_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
@@ -101,12 +104,18 @@ class PlaywrightEngine:
 
         # Standalone 模式参数
         if headless is None:
-            # 默认无头；首次登录（无 profile）时自动切有头
+            # 默认无头；首次登录只能通过显式 bootstrap 完成。
             headless = True
         self.headless = headless
 
         # Profile 目录：保存登录态
-        self.profile_dir = profile_dir or (self.base_dir / ".ordo" / "automation-profile")
+        expected_profile_dir = self.base_dir / ".ordo" / "automation-profile"
+        if (
+            profile_dir is not None
+            and Path(profile_dir).resolve() != expected_profile_dir.resolve()
+        ):
+            raise ValueError(f"浏览器 profile 必须位于仓库内: {expected_profile_dir}")
+        self.profile_dir = expected_profile_dir
 
         # Chrome 路径：优先系统 Chrome，回退到 Playwright 自带的 Chromium
         self.executable_path = executable_path or (
@@ -118,11 +127,26 @@ class PlaywrightEngine:
         return self.mode == "standalone"
 
     @property
-    def _has_existing_profile(self) -> bool:
-        """检查是否已有登录态（profile 目录非空）"""
-        if not self.profile_dir.exists():
+    def profile_is_initialized(self) -> bool:
+        """只接受显式 bootstrap 写入的版本化标志。"""
+        marker = self.profile_dir / PROFILE_MARKER_NAME
+        if not marker.is_file():
             return False
-        return any(self.profile_dir.iterdir())
+        try:
+            return marker.read_text(encoding="utf-8") == PROFILE_MARKER_CONTENT
+        except OSError:
+            return False
+
+    @property
+    def _has_existing_profile(self) -> bool:
+        return self.profile_is_initialized
+
+    def mark_profile_initialized(self) -> None:
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        (self.profile_dir / PROFILE_MARKER_NAME).write_text(
+            PROFILE_MARKER_CONTENT,
+            encoding="utf-8",
+        )
 
     def connect(self):
         """启动独立浏览器"""
@@ -166,21 +190,18 @@ class PlaywrightEngine:
 
     def _launch_standalone(self):
         """Standalone 模式：启动独立的无头 Chrome 实例"""
+        if self.headless and not self.profile_is_initialized:
+            raise RuntimeError(
+                "自动发布 profile 尚未初始化；请先运行 publish.py --bootstrap-browser"
+            )
+
         # 确保 profile 目录存在
         self.profile_dir.mkdir(parents=True, exist_ok=True)
 
         # 清理可能遗留的孤儿锁，避免后续平台全部 launch 失败
         self._cleanup_stale_lock()
 
-        # 如果无头模式但还没有登录态，自动切有头模式（首次登录需要扫码）
         effective_headless = self.headless
-        if not effective_headless and not self._has_existing_profile:
-            # 用户明确要 headed，或者首次登录 → headed
-            pass
-        elif effective_headless and not self._has_existing_profile:
-            # 无头模式但没登录态 → 自动切有头，让用户扫码
-            print("[engine] 首次使用检测到无登录态，切换为有头模式以便扫码登录")
-            effective_headless = False
 
         launch_kwargs = {
             "user_data_dir": str(self.profile_dir),

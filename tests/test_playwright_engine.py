@@ -48,6 +48,25 @@ class StubPublisher(PlaywrightBasePublisher):
 
 
 class TestPlaywrightEngine(unittest.TestCase):
+    def test_headless_missing_initialized_profile_fails_before_browser_start(self):
+        with tempfile.TemporaryDirectory() as tmpdir, patch(
+            "ordo_engine.platforms.playwright.engine.sync_playwright"
+        ) as mock_sync_playwright:
+            engine = PlaywrightEngine(base_dir=Path(tmpdir), headless=True)
+
+            with self.assertRaisesRegex(RuntimeError, "--bootstrap-browser"):
+                engine.connect()
+
+        mock_sync_playwright.assert_not_called()
+
+    def test_profile_requires_explicit_initialization_marker(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = PlaywrightEngine(base_dir=Path(tmpdir), headless=True)
+            engine.profile_dir.mkdir(parents=True)
+            (engine.profile_dir / "some-chrome-file").write_text("x", encoding="utf-8")
+
+            self.assertFalse(engine.profile_is_initialized)
+
     def test_state_persistence_failure_stops_before_submit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
@@ -113,11 +132,13 @@ class TestPlaywrightEngine(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             engine = PlaywrightEngine(debug_port=9999, base_dir=Path(tmpdir))
+            engine.mark_profile_initialized()
             engine.connect()
 
             mock_p.chromium.launch_persistent_context.assert_called_once()
             launch_kwargs = mock_p.chromium.launch_persistent_context.call_args.kwargs
             self.assertEqual(launch_kwargs["user_data_dir"], str(engine.profile_dir))
+            self.assertTrue(launch_kwargs["headless"])
             self.assertIs(engine._context, mock_p.chromium.launch_persistent_context.return_value)
             self.assertIsNone(engine._browser)
 

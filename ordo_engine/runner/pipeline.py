@@ -1,7 +1,8 @@
 from pathlib import Path
 
-from ordo_engine.platforms.registry import build_platform_registry, _resolve_engine_type
+from ordo_engine.platforms.registry import build_platform_registry
 from ordo_engine.run_state import article_key, is_done, mark_done, state_file_for
+from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
 from ordo_engine.platforms.playwright.engine import PlaywrightEngine
 
 
@@ -103,41 +104,57 @@ def run_publish_pipeline(
     context_resolver=None,
     append_record=None,
     printer=None,
+    engine_factory=None,
 ):
     registry = registry or build_platform_registry(Path(base_dir))
     state_file = state_file_for(base_dir)
     results = []
     exit_code = 0
 
-    # ── 共享引擎（单 context 多 tab）：仅 standalone 浏览器模式启用 ──
-    # 一次启动一个独立 Chrome context，所有浏览器平台复用，
-    # 既省去每个平台冷启动开销，也消除多平台共用 profile 时的 SingletonLock 碰撞。
+    # 仅浏览器适配器需要引擎。一个 pipeline 只允许一个独立 context。
     shared_engine = None
-    engine_type = _resolve_engine_type(Path(base_dir))
-    use_shared = engine_type in ("standalone", "playwright")
-    if use_shared:
+    browser_platforms = [
+        platform
+        for platform in platforms
+        if isinstance(registry[platform], PlaywrightPlatformAdapter)
+    ]
+    has_browser_work = any(
+        not is_done(
+            article_key(article_path),
+            platform,
+            args.mode,
+            state_file=state_file,
+        )
+        for article_path in article_paths
+        for platform in browser_platforms
+    )
+    selected_browser_adapters = (
+        [registry[platform] for platform in browser_platforms]
+        if has_browser_work
+        else []
+    )
+    if selected_browser_adapters:
+        factory = engine_factory or PlaywrightEngine
         try:
-            shared_engine = PlaywrightEngine(
+            shared_engine = factory(
                 mode="standalone",
                 headless=not getattr(args, "headed", False),
                 base_dir=Path(base_dir),
             )
             shared_engine.connect()
-            for adapter in registry.values():
-                if hasattr(adapter, "set_shared_engine"):
-                    adapter.set_shared_engine(shared_engine)
+            for adapter in selected_browser_adapters:
+                adapter.set_shared_engine(shared_engine)
             print("[pipeline] 已启用共享引擎（单 context 多 tab）")
         except Exception as exc:  # noqa: BLE001
-            print(f"[WARN] 共享引擎启动失败，回退为每平台独立启动: {exc}")
             if shared_engine is not None:
                 try:
                     shared_engine.close()
                 except Exception:
                     pass
             shared_engine = None
-            for adapter in registry.values():
-                if hasattr(adapter, "set_shared_engine"):
-                    adapter.set_shared_engine(None)
+            for adapter in selected_browser_adapters:
+                adapter.set_shared_engine(None)
+            raise RuntimeError(f"独立浏览器启动失败: {exc}") from exc
 
     try:
         for article_path in article_paths:
@@ -215,5 +232,7 @@ def run_publish_pipeline(
                 shared_engine.close()
             except Exception:
                 pass
+        for adapter in selected_browser_adapters:
+            adapter.set_shared_engine(None)
 
     return results, exit_code

@@ -1575,6 +1575,12 @@ def parse_args(argv=None):
         help="仅跑「选择器存活探针」：检查各平台关键选择器是否还在，不真正发布",
     )
     parser.add_argument(
+        "--bootstrap-browser",
+        action="store_true",
+        default=False,
+        help="启动仓库隔离 profile 的有头浏览器，人工登录确认后初始化自动发布环境",
+    )
+    parser.add_argument(
         "--platform",
         default="all",
         help="平台列表，逗号分隔，可选 wechat,zhihu,toutiao,jianshu,yidian 或 all",
@@ -1709,6 +1715,40 @@ def parse_args(argv=None):
     return args
 
 
+def bootstrap_browser_profile(
+    base_dir,
+    platforms,
+    *,
+    engine_factory=None,
+    input_fn=input,
+):
+    """显式初始化仓库专用浏览器 profile；不会读取默认 Chrome profile。"""
+    from ordo_engine.platforms.playwright.engine import PlaywrightEngine
+
+    selected = [platform for platform in platforms if platform in BROWSER_PLATFORMS]
+    if not selected:
+        raise ValueError("--bootstrap-browser 至少需要一个浏览器平台")
+
+    factory = engine_factory or PlaywrightEngine
+    engine = factory(mode="standalone", headless=False, base_dir=Path(base_dir))
+    confirmed = False
+    try:
+        engine.connect()
+        for platform in selected:
+            engine.get_page_for_platform(platform)
+        answer = input_fn(
+            "请在隔离浏览器中完成登录。确认全部完成后输入 YES："
+        ).strip()
+        if answer != "YES":
+            raise RuntimeError("未收到明确确认，浏览器 profile 未标记为已初始化")
+        confirmed = True
+    finally:
+        engine.close()
+
+    if confirmed:
+        engine.mark_profile_initialized()
+
+
 def apply_vps_config_defaults(args, base_dir=BASE_DIR):
     if getattr(args, "remote", None) != "vps":
         return args
@@ -1737,6 +1777,9 @@ def run_remote_cdp_preflight(remote_executor):
 
 def main():
     args = parse_args()
+    if args.bootstrap_browser:
+        bootstrap_browser_profile(BASE_DIR, parse_platforms(args.platform))
+        return
     args = apply_vps_config_defaults(args)
 
     # 选择器存活探针模式：只检查不发布
