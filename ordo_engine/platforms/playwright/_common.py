@@ -21,6 +21,9 @@ from ordo_engine.platforms.playwright.base_publisher import PublishResult
 from markdown_utils import render_markdown_plain_text, should_declare_ai
 
 
+FEEDBACK_SELECTOR = '[role="alert"], [role="status"], .toast, .Toast, .message, .notification'
+
+
 def find_visible_button(page: Page, texts: list, button_class: str = None) -> Optional[Locator]:
     """查找包含指定文本的可见按钮"""
     for text in texts:
@@ -179,9 +182,15 @@ def _page_text(page: Page) -> str:
         return ""
 
 
-def _has_exact_marker(page_text: str, markers: list) -> bool:
-    lines = {_normalize_title(line) for line in page_text.splitlines()}
-    return any(_normalize_title(marker) in lines for marker in markers)
+def _feedback_text(page: Page) -> str:
+    try:
+        return "\n".join(page.locator(FEEDBACK_SELECTOR).all_inner_texts())
+    except Exception:
+        return ""
+
+
+def _has_feedback_marker(feedback_text: str, markers: list) -> bool:
+    return any(marker in feedback_text for marker in markers)
 
 
 def verify_result_common(page: Page, platform: str, mode: str, published_url_pattern: str,
@@ -190,15 +199,6 @@ def verify_result_common(page: Page, platform: str, mode: str, published_url_pat
                           *, expected_title: str = "") -> PublishResult:
     """通用结果验证逻辑"""
     current_url = page.url
-    page_text = _page_text(page)
-
-    # 限流检查
-    if any(m in page_text for m in limit_markers):
-        return PublishResult(
-            platform=platform, status="limit_reached",
-            current_url=current_url, page_state="limit_reached",
-            smoke_step="verify", message="达到发布上限",
-        )
 
     if mode == "publish":
         if re.search(published_url_pattern, current_url):
@@ -209,14 +209,23 @@ def verify_result_common(page: Page, platform: str, mode: str, published_url_pat
                 smoke_step="verify", message=f"已发布到{platform}: {current_url}",
             )
 
-        if _has_exact_marker(page_text, success_markers):
+    feedback_text = _feedback_text(page)
+    if _has_feedback_marker(feedback_text, limit_markers):
+        return PublishResult(
+            platform=platform, status="limit_reached",
+            current_url=current_url, page_state="limit_reached",
+            smoke_step="verify", message="达到发布上限",
+        )
+
+    if mode == "publish":
+        if _has_feedback_marker(feedback_text, success_markers):
             return PublishResult(
                 platform=platform, status="published",
                 current_url=current_url, page_state="published",
                 smoke_step="verify",
             )
     else:
-        if _has_exact_marker(page_text, draft_markers):
+        if _has_feedback_marker(feedback_text, draft_markers):
             return PublishResult(
                 platform=platform, status="draft_only",
                 current_url=current_url, page_state="draft_saved",

@@ -23,10 +23,11 @@ from ordo_engine.run_state import article_key, get_record, is_done, record_step,
 
 
 class FakePage:
-    def __init__(self, *, url="https://example.test/editor", text="", management_text=""):
+    def __init__(self, *, url="https://example.test/editor", text="", management_text="", feedback=()):
         self.url = url
         self.text = text
         self.management_text = management_text
+        self.feedback = list(feedback)
 
     def evaluate(self, _script):
         return self.text
@@ -34,6 +35,32 @@ class FakePage:
     def goto(self, url, **_kwargs):
         self.url = url
         self.text = self.management_text
+
+    def locator(self, _selector):
+        return FakeLocator(self.feedback)
+
+
+class FakeLocator:
+    def __init__(self, texts):
+        self.texts = list(texts)
+        self.index = None
+
+    def count(self):
+        return len(self.texts)
+
+    def all_inner_texts(self):
+        return list(self.texts)
+
+    def nth(self, index):
+        locator = FakeLocator(self.texts)
+        locator.index = index
+        return locator
+
+    def is_visible(self):
+        return True
+
+    def inner_text(self):
+        return self.texts[self.index]
 
 
 def verify_common(page, *, mode="publish", title="目标标题"):
@@ -110,7 +137,7 @@ def test_editor_or_management_url_is_not_direct_publish_evidence(url, pattern):
 
 
 def test_navigation_label_containing_success_words_is_not_success_marker():
-    page = FakePage(text="首页\n已发布 文章\n草稿箱")
+    page = FakePage(text="首页\n已发布\n草稿箱")
 
     result = verify_result_common(
         page, "测试平台", "publish", r"/article/\d+$",
@@ -118,6 +145,53 @@ def test_navigation_label_containing_success_words_is_not_success_marker():
     )
 
     assert result.status == "submitted_unverified"
+
+
+def test_direct_url_wins_over_limit_words_in_body_and_feedback():
+    page = FakePage(
+        url="https://example.test/article/42",
+        text="正文引用：发布上限",
+        feedback=["达到发布上限"],
+    )
+
+    result = verify_common(page)
+
+    assert result.status == "published"
+
+
+def test_explicit_toast_success_is_terminal_success():
+    page = FakePage(text="普通页面", feedback=["发布成功"])
+
+    result = verify_common(page)
+
+    assert result.status == "published"
+
+
+def test_explicit_alert_limit_is_retryable_nonzero(tmp_path):
+    page = FakePage(text="普通页面", feedback=["今日达到发布上限，请明天再来"])
+
+    result = verify_common(page)
+
+    assert result.status == "limit_reached"
+
+    article = tmp_path / "article.md"
+    article.write_text("# 标题\n正文", encoding="utf-8")
+
+    class ResultPublisher:
+        def __init__(self, _engine):
+            pass
+
+        def publish(self, _article, _mode):
+            return result
+
+    adapter = PlaywrightPlatformAdapter(tmp_path, "stub", ResultPublisher)
+    adapter.set_shared_engine(MagicMock())
+    process_result = adapter.publish(adapter.prepare(article, "publish"))
+    collected = adapter.collect_result(process_result, "publish")
+
+    assert process_result["returncode"] != 0
+    assert collected.status == "limit_reached"
+    assert collected.retryable
 
 
 def test_zhihu_management_navigation_without_title_is_unverified():
