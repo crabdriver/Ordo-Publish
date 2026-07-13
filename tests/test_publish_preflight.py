@@ -117,13 +117,10 @@ class PublishPreflightTests(unittest.TestCase):
 
         self.assertFalse(any("封面池" in item for item in blockers), blockers)
 
-    @patch("wechat_publisher.WeChatPublisher")
-    def test_wechat_preflight_does_not_require_legacy_pool_for_valid_publication_cover(self, mock_publisher):
-        mock_publisher.return_value.ensure_access_token.return_value = None
+    def test_wechat_preflight_does_not_require_legacy_pool_for_valid_publication_cover(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             article, _cover = self._write_publication_package(root)
-            (root / "secrets.env").write_text("VPS_IP=203.0.113.10\n", encoding="utf-8")
             with patch.object(
                 publish,
                 "get_wechat_config_status",
@@ -133,11 +130,7 @@ class PublishPreflightTests(unittest.TestCase):
                     "covers_ready": False,
                     "ai_cover_ready": False,
                 },
-            ), patch.object(
-                publish.subprocess,
-                "run",
-                return_value=CompletedProcess(["ssh"], 0, stdout="", stderr=""),
-            ):
+            ), patch.object(publish.subprocess, "run") as run:
                 blockers, _warnings = publish.run_preflight_checks(
                     platforms=["wechat"],
                     mode="publish",
@@ -147,11 +140,16 @@ class PublishPreflightTests(unittest.TestCase):
                 )
 
         self.assertFalse(any("缺少可用封面" in item for item in blockers), blockers)
+        run.assert_not_called()
 
-    def test_publish_mode_defaults_to_vps_remote(self):
+    def test_publish_mode_defaults_to_local_remote(self):
         args = publish.parse_args(["article.md", "--mode", "publish"])
-        self.assertEqual(args.remote, "vps")
+        self.assertEqual(args.remote, "local")
         self.assertFalse(args.assume_yes)
+
+    def test_explicit_vps_remote_remains_available_for_manual_emergency_use(self):
+        args = publish.parse_args(["article.md", "--mode", "publish", "--remote", "vps"])
+        self.assertEqual(args.remote, "vps")
 
     def test_draft_mode_defaults_to_local_remote(self):
         args = publish.parse_args(["article.md", "--mode", "draft"])
@@ -474,7 +472,7 @@ class PublishPreflightTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual(blockers, [])
 
-    def test_run_preflight_checks_blocks_wechat_without_vps_ip(self):
+    def test_run_preflight_checks_allows_local_wechat_without_vps_ip_or_network(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             (base / "covers").mkdir()
@@ -488,7 +486,7 @@ class PublishPreflightTests(unittest.TestCase):
                     "covers_ready": True,
                     "ai_cover_ready": False,
                 },
-            ):
+            ), patch.object(publish.subprocess, "run") as run:
                 blockers, warnings = publish.run_preflight_checks(
                     platforms=["wechat"],
                     mode="publish",
@@ -497,7 +495,8 @@ class PublishPreflightTests(unittest.TestCase):
                 )
 
         self.assertEqual(warnings, [])
-        self.assertTrue(any("必须走 VPS" in item for item in blockers), blockers)
+        self.assertEqual(blockers, [])
+        run.assert_not_called()
 
     def test_run_preflight_checks_does_not_require_browser_tabs(self):
         with tempfile.TemporaryDirectory() as tmp:

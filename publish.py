@@ -739,50 +739,6 @@ def run_preflight_checks(
                 }
         if not wechat["appid_ready"] or not wechat["secret_ready"]:
             blockers.append("微信公众号缺少 `WECHAT_APPID` 或 `WECHAT_SECRET`，请先配置 `secrets.env`")
-        else:
-            # 实时检查微信外网 IP 白名单配置
-            try:
-                env = load_simple_env_file(root / "secrets.env")
-                vps_ip = env.get("VPS_IP")
-                if vps_ip:
-                    # 在 VPS 上远程执行微信 Access Token 验证检查，检测白名单状态
-                    vps_port = env.get("VPS_PORT", "22")
-                    vps_user = env.get("VPS_USER", "root")
-                    vps_ssh_key = env.get("VPS_SSH_KEY")
-                    appid = env.get("WECHAT_APPID") or os.environ.get("WECHAT_APPID")
-                    secret = env.get("WECHAT_SECRET") or os.environ.get("WECHAT_SECRET")
-
-                    ssh_opts = ["-p", vps_port, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
-                    if vps_ssh_key:
-                        ssh_opts.extend(["-i", str(Path(vps_ssh_key).expanduser())])
-
-                    test_cmd = (
-                        f"cd ~/ordo-publish && "
-                        f"unset WECHAT_PROXY HTTP_PROXY HTTPS_PROXY http_proxy https_proxy && "
-                        f"export ORDO_WORKER=1 && "
-                        f"if [ -f .venv/bin/python ]; then python_bin=.venv/bin/python; else python_bin=python3; fi; "
-                        f"$python_bin -c 'from wechat_publisher import WeChatPublisher; p = WeChatPublisher(\"{appid}\", \"{secret}\"); p.ensure_access_token()'"
-                    )
-                    chk_cmd = ["ssh"] + ssh_opts + [f"{vps_user}@{vps_ip}", test_cmd]
-                    res = subprocess.run(chk_cmd, capture_output=True, text=True, timeout=30)
-                    if res.returncode != 0:
-                        err_msg = res.stderr.strip() or res.stdout.strip()
-                        raise Exception(f"VPS 上的微信接口预检失败：{err_msg}")
-                else:
-                    blockers.append("微信公众号发布必须走 VPS：secrets.env 缺少 `VPS_IP`，已拒绝本地发送。")
-
-            except Exception as exc:
-                err_str = str(exc)
-                if "IP白名单未配置" in err_str or "40164" in err_str:
-                    import re
-                    m = re.search(r"invalid ip ([\d.]+)", err_str)
-                    ip_str = m.group(1) if m else "未知IP"
-                    blockers.append(
-                        f"微信公众号 IP 白名单校验失败！您的当前网络外网 IP 「{ip_str}」 未加入微信公众平台白名单。请先登录微信后台将该 IP 添加到白名单中！"
-                    )
-                else:
-                    blockers.append(f"微信公众号 API 预检失败：{exc}")
-
         if not article_paths:
             if not wechat["covers_ready"] and not wechat["ai_cover_ready"]:
                 blockers.append("微信公众号缺少可用封面：请提供合格的发布包 `cover.png` 或配置 AI 封面")
@@ -1651,7 +1607,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--remote",
         choices=["local", "vps"],
-        default=None,
+        default="local",
         help="运行模式：local 本地直接执行；vps 上传到 VPS 异步托管执行",
     )
     parser.add_argument(
@@ -1698,8 +1654,6 @@ def parse_args(argv=None):
         help="standalone 模式下使用无头浏览器（默认行为，后台静默）",
     )
     args = parser.parse_args(argv)
-    if args.remote is None:
-        args.remote = "vps" if args.mode == "publish" else "local"
     return args
 
 

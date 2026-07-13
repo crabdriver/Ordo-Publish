@@ -1,39 +1,44 @@
+import csv
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
-import markdown_utils
-from PIL import Image, ImageCms
-
-from ordo_engine.assignment.cover_contract import CoverContractError
+from ordo_engine.results.publish_records import PUBLISH_RECORD_FIELDNAMES
 from ordo_engine.run_lock import run_lock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "monitor_publish.py"
 SPEC = importlib.util.spec_from_file_location("monitor_publish", MODULE_PATH)
 monitor_publish = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = monitor_publish
 SPEC.loader.exec_module(monitor_publish)
 
 
-@contextmanager
-def fake_jianshu_browser(*, dry_run=False):
-    yield {"LIVE_CDP_PORT": "9333"}
+def append_record(path, *, article, platform, mode, status, returncode=0, error_type=""):
+    exists = path.exists()
+    with path.open("a", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(fp, fieldnames=PUBLISH_RECORD_FIELDNAMES)
+        if not exists:
+            writer.writeheader()
+        writer.writerow(
+            {
+                "timestamp": "2026-07-13 06:00:00",
+                "article": str(article),
+                "platform": platform,
+                "mode": mode,
+                "status": status,
+                "error_type": error_type,
+                "returncode": returncode,
+            }
+        )
 
 
 class MonitorPublishTests(unittest.TestCase):
-    def _write_canonical_cover(self, path: Path):
-        profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
-        Image.new("RGB", (2538, 1080), color=(23, 45, 67)).save(
-            path,
-            format="PNG",
-            icc_profile=profile,
-        )
-
     def test_script_entrypoint_can_import_project_modules(self):
         result = subprocess.run(
             [sys.executable, str(MODULE_PATH), "--help"],
@@ -43,365 +48,219 @@ class MonitorPublishTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_vps_default_matches_deployed_runtime(self):
-        self.assertEqual(monitor_publish.DEFAULT_VPS_PATH, "/root/ordo-publish")
-
-    def test_list_articles_only_markdown(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "a.md").write_text("# A", encoding="utf-8")
-            (root / ".hidden.md").write_text("# H", encoding="utf-8")
-            (root / "b.txt").write_text("B", encoding="utf-8")
-
-            self.assertEqual([p.name for p in monitor_publish.list_articles(root)], ["a.md"])
-
-    def test_publish_article_writes_state_lock_after_real_attempt(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            article = root / "第一课.md"
-            article.write_text("# 第一课", encoding="utf-8")
-            state_file = root / "state.json"
-
-            with patch.object(monitor_publish, "STATE_FILE", state_file), patch.object(
-                monitor_publish,
-                "run_cmd",
-                return_value=0,
-            ), patch.object(
-                monitor_publish,
-                "jianshu_dedicated_browser",
-                fake_jianshu_browser,
-            ):
-                result = monitor_publish.publish_article(article)
-                second = monitor_publish.publish_article(article)
-
-            self.assertEqual(result, "success")
-            self.assertEqual(second, "skipped")
-
-    def test_frontmatter_rejects_noncanonical_cover(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            cover = root / "custom.png"
-            self._write_canonical_cover(cover)
-            article = root / "第一课.md"
-            article.write_text(
-                "---\ncover: custom.png\nplatform_covers:\n"
-                "  wechat: custom.png\n  zhihu: custom.png\n  toutiao: custom.png\n"
-                "  yidian: custom.png\n  bilibili: custom.png\n  jianshu: custom.png\n"
-                "template_theme: sspai\n---\n# 第一课",
-                encoding="utf-8",
-            )
-
-            meta = monitor_publish.parse_frontmatter(article)
-
-            self.assertEqual(meta["template_theme"], "sspai")
-            with self.assertRaisesRegex(CoverContractError, "cover.png"):
-                monitor_publish.find_sidecar_cover(article, meta)
-
-    def test_article_id_finds_single_publication_package_cover(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            cover = root / "assets" / "20260709-first-lesson" / "cover.png"
-            cover.parent.mkdir(parents=True)
-            self._write_canonical_cover(cover)
-            article = root / "第一课.md"
-            relative = "assets/20260709-first-lesson/cover.png"
-            platform_lines = "".join(
-                f"  {platform}: {relative}\n"
-                for platform in ("wechat", "zhihu", "toutiao", "yidian", "bilibili", "jianshu")
-            )
-            article.write_text(
-                "---\narticle_id: 20260709-first-lesson\n"
-                f"cover: {relative}\nplatform_covers:\n{platform_lines}---\n# 第一课",
-                encoding="utf-8",
-            )
-
-            meta = monitor_publish.parse_frontmatter(article)
-
-            self.assertEqual(monitor_publish.find_sidecar_cover(article, meta), cover.resolve())
-
-    def test_publish_command_includes_cover_and_template(self):
+    def test_build_publish_command_defaults_to_local(self):
         cmd = monitor_publish.build_publish_cmd(
-            Path("/tmp/a.md"),
-            platforms=monitor_publish.PUBLISH_PLATFORMS,
-            mode="publish",
-            cover=Path("/tmp/c.png"),
-            template_theme="sspai",
+            Path("/tmp/a.md"), platforms="zhihu", mode="publish"
         )
-
-        self.assertIn("--cover", cmd)
-        self.assertIn("--cover-mode", cmd)
-        self.assertIn("--template-theme", cmd)
-        self.assertNotIn("--assume-yes", cmd)
-        self.assertEqual(cmd[cmd.index("--cover") + 1], "/tmp/c.png")
-        self.assertEqual(cmd[cmd.index("--cover-mode") + 1], "force_on")
-        self.assertEqual(cmd[cmd.index("--template-theme") + 1], "sspai")
-
-    def test_publish_command_can_run_local_for_jianshu(self):
-        cmd = monitor_publish.build_publish_cmd(
-            Path("/tmp/a.md"),
-            platforms=monitor_publish.LOCAL_PUBLISH_PLATFORMS,
-            mode="publish",
-            remote="local",
-            no_auto_launch=True,
-        )
-
-        self.assertEqual(cmd[cmd.index("--platform") + 1], "jianshu")
         self.assertEqual(cmd[cmd.index("--remote") + 1], "local")
-        self.assertIn("--no-auto-launch", cmd)
 
-    def test_markdown_frontmatter_is_not_rendered(self):
-        rendered = markdown_utils.render_markdown_plain_text(
-            "---\ncover: c.png\ntemplate_theme: sspai\n---\n# 标题\n\n正文"
-        )
-
-        self.assertNotIn("cover:", rendered)
-        self.assertIn("标题", rendered)
-        self.assertIn("正文", rendered)
-
-    def test_attempted_article_retries_failed_groups_only(self):
+    def test_publish_article_runs_at_most_two_local_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            article = root / "第一课.md"
-            article.write_text("# 第一课", encoding="utf-8")
-            state = {
-                "articles": {
-                    str(article.resolve()): {
-                        "status": "attempted",
-                        "wechat_returncode": 0,
-                        "publish_returncode": 1,
-                        "local_publish_returncode": 1,
-                    }
-                }
-            }
-
-            with patch.object(monitor_publish, "run_cmd", return_value=0) as mocked_run, patch.object(
-                monitor_publish,
-                "save_state",
-            ), patch.object(
-                monitor_publish,
-                "jianshu_dedicated_browser",
-                fake_jianshu_browser,
-            ):
-                result = monitor_publish.publish_article(article, state=state)
-
-            self.assertEqual(result, "success")
-            self.assertEqual(mocked_run.call_count, 5)
-            called_platforms = [call.args[0][call.args[0].index("--platform") + 1] for call in mocked_run.call_args_list]
-            self.assertEqual(called_platforms, ["zhihu", "toutiao", "yidian", "bilibili", "jianshu"])
-
-    def test_publish_article_retries_only_failed_remote_platform(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            article = Path(tmp) / "第一课.md"
-            article.write_text("# 第一课", encoding="utf-8")
-            state = {"articles": {str(article.resolve()): {
-                "status": "attempted",
-                "platforms": {
-                    "wechat": {"returncode": 0},
-                    "zhihu": {"returncode": 0},
-                    "toutiao": {"returncode": 0},
-                    "yidian": {"returncode": 1},
-                    "bilibili": {"returncode": 0},
-                    "jianshu": {"returncode": 0},
-                },
-            }}}
-            with patch.object(monitor_publish, "run_cmd", return_value=0) as run, patch.object(
-                monitor_publish, "save_state"
-            ), patch.object(monitor_publish, "jianshu_dedicated_browser", fake_jianshu_browser):
-                result = monitor_publish.publish_article(article, state=state)
-
-            self.assertEqual(result, "success")
-            self.assertEqual(run.call_count, 1)
-            self.assertEqual(run.call_args.args[0][run.call_args.args[0].index("--platform") + 1], "yidian")
-
-    def test_scan_once_includes_attempted_article(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            article = root / "第一课.md"
-            article.write_text("# 第一课", encoding="utf-8")
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            records = root / "records.csv"
             state_file = root / "state.json"
-            state_file.write_text(
-                '{"articles":{"' + str(article.resolve()) + '":{"status":"attempted"}}}',
-                encoding="utf-8",
-            )
 
-            with patch.object(monitor_publish, "STATE_FILE", state_file), patch.object(
-                monitor_publish,
-                "publish_article",
-                return_value="success",
-            ) as mocked_publish, patch.object(monitor_publish, "require_vps_ready"):
-                todo = monitor_publish.scan_once(root)
-
-            self.assertEqual([p.resolve() for p in todo], [article.resolve()])
-            mocked_publish.assert_called_once()
-
-    def test_scan_once_blocks_when_vps_not_ready(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            article = root / "第一课.md"
-            article.write_text("# 第一课", encoding="utf-8")
-
-            with patch.object(monitor_publish, "require_vps_ready", side_effect=RuntimeError("blocked")), patch.object(
-                monitor_publish,
-                "publish_article",
-            ) as mocked_publish:
-                with self.assertRaisesRegex(RuntimeError, "blocked"):
-                    monitor_publish.scan_once(root)
-
-            mocked_publish.assert_not_called()
-
-    def test_publish_article_imports_successes_from_publish_records(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            article = root / "第一课.md"
-            article.write_text("# 第一课", encoding="utf-8")
-            records = root / "publish_records.csv"
-            records.write_text(
-                "timestamp,article,article_id,platform,mode,theme_name,template_mode,cover_path,status,error_type,current_url,page_state,smoke_step,returncode,stdout,stderr\n"
-                f"t,{article},,wechat,draft,,,,draft_only,,,,,0,,\n"
-                f"t,{article},,zhihu,publish,,,,published,,,,,0,,\n"
-                f"t,{article},,toutiao,publish,,,,published,,,,,0,,\n"
-                f"t,{article},,yidian,publish,,,,published,,,,,0,,\n"
-                f"t,{article},,bilibili,publish,,,,published,,,,,0,,\n",
-                encoding="utf-8",
-            )
-
-            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records), patch.object(
-                monitor_publish,
-                "run_cmd",
-                return_value=0,
-            ) as mocked_run, patch.object(
-                monitor_publish,
-                "jianshu_dedicated_browser",
-                fake_jianshu_browser,
-            ), patch.object(monitor_publish, "save_state"), patch.object(monitor_publish, "require_vps_ready"):
-                result = monitor_publish.publish_article(article, state={"articles": {}})
-
-            self.assertEqual(result, "success")
-            self.assertEqual(mocked_run.call_count, 1)
-            cmd = mocked_run.call_args.args[0]
-            self.assertEqual(cmd[cmd.index("--platform") + 1], "jianshu")
-
-    def test_jianshu_dedicated_browser_starts_and_closes(self):
-        class Proc:
-            terminated = False
-            killed = False
-
-            def terminate(self):
-                self.terminated = True
-
-            def wait(self, timeout=None):
+            def fake_run(cmd, **_kwargs):
+                platforms = cmd[cmd.index("--platform") + 1].split(",")
+                mode = cmd[cmd.index("--mode") + 1]
+                self.assertEqual(cmd[cmd.index("--remote") + 1], "local")
+                for platform in platforms:
+                    status = "draft_only" if mode == "draft" else "published"
+                    append_record(records, article=article, platform=platform, mode=mode, status=status)
                 return 0
 
-            def kill(self):
-                self.killed = True
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records), patch.object(
+                monitor_publish, "STATE_FILE", state_file
+            ), patch.object(monitor_publish, "run_cmd", side_effect=fake_run) as run:
+                result = monitor_publish.publish_article(article)
 
-        proc = Proc()
-        with tempfile.TemporaryDirectory() as tmp, patch.object(
-            monitor_publish,
-            "find_chrome_binary",
-            return_value=Path("/tmp/chrome"),
-        ), patch.object(
-            monitor_publish.subprocess,
-            "Popen",
-            return_value=proc,
-        ) as mocked_popen, patch.object(
-            monitor_publish,
-            "wait_for_cdp_port",
-            return_value=True,
-        ), patch.object(
-            monitor_publish,
-            "close_dedicated_browser",
-        ) as mocked_close:
-            with patch.object(monitor_publish, "BASE_DIR", Path(tmp)):
-                with monitor_publish.jianshu_dedicated_browser() as env:
-                    self.assertEqual(env["LIVE_CDP_PORT"], "9333")
+            self.assertEqual(result, "success")
+            self.assertEqual(run.call_count, 2)
+            commands = [call.args[0] for call in run.call_args_list]
+            self.assertEqual(commands[0][commands[0].index("--platform") + 1], "wechat")
+            self.assertEqual(
+                commands[1][commands[1].index("--platform") + 1],
+                "zhihu,toutiao,jianshu,yidian,bilibili",
+            )
 
-        mocked_popen.assert_called_once()
-        mocked_close.assert_called_once()
-        self.assertTrue(proc.terminated)
-
-    def test_scan_once_skips_article_when_records_cover_all_groups(self):
+    def test_pending_browser_subset_uses_one_stable_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            article = root / "第一课.md"
-            article.write_text("# 第一课", encoding="utf-8")
-            records = root / "publish_records.csv"
-            rows = [
-                "timestamp,article,article_id,platform,mode,theme_name,template_mode,cover_path,status,error_type,current_url,page_state,smoke_step,returncode,stdout,stderr",
-                f"t,{article},,wechat,draft,,,,draft_only,,,,,0,,",
-                f"t,{article},,zhihu,publish,,,,published,,,,,0,,",
-                f"t,{article},,toutiao,publish,,,,published,,,,,0,,",
-                f"t,{article},,yidian,publish,,,,published,,,,,0,,",
-                f"t,{article},,bilibili,publish,,,,published,,,,,0,,",
-                f"t,{article},,jianshu,publish,,,,published,,,,,0,,",
-            ]
-            records.write_text("\n".join(rows) + "\n", encoding="utf-8")
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            records = root / "records.csv"
+            for platform, mode, status in (
+                ("wechat", "draft", "draft_saved"),
+                ("zhihu", "publish", "published"),
+                ("jianshu", "publish", "scheduled"),
+                ("bilibili", "publish", "skipped_existing"),
+            ):
+                append_record(records, article=article, platform=platform, mode=mode, status=status)
 
-            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records), patch.object(monitor_publish, "require_vps_ready"):
+            def fake_run(cmd, **_kwargs):
+                for platform in cmd[cmd.index("--platform") + 1].split(","):
+                    append_record(
+                        records, article=article, platform=platform, mode="publish", status="published"
+                    )
+                return 0
+
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records), patch.object(
+                monitor_publish, "STATE_FILE", root / "state.json"
+            ), patch.object(monitor_publish, "run_cmd", side_effect=fake_run) as run:
+                monitor_publish.publish_article(article)
+
+            self.assertEqual(run.call_count, 1)
+            cmd = run.call_args.args[0]
+            self.assertEqual(cmd[cmd.index("--platform") + 1], "toutiao,yidian")
+
+    def test_typed_rate_limit_is_not_success_and_retries_next_run(self):
+        self._assert_nonterminal_retries("limit_reached", "rate_limited")
+
+    def test_unverified_is_not_success_and_retries_for_safe_reconciliation(self):
+        self._assert_nonterminal_retries("submitted_unverified", "")
+
+    def _assert_nonterminal_retries(self, status, error_type):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            records = root / "records.csv"
+            state_file = root / "state.json"
+            calls = []
+
+            def fake_run(cmd, **_kwargs):
+                calls.append(cmd)
+                platforms = cmd[cmd.index("--platform") + 1].split(",")
+                mode = cmd[cmd.index("--mode") + 1]
+                for platform in platforms:
+                    row_status = status if platform == "zhihu" else (
+                        "draft_only" if mode == "draft" else "published"
+                    )
+                    append_record(
+                        records,
+                        article=article,
+                        platform=platform,
+                        mode=mode,
+                        status=row_status,
+                        returncode=1 if platform == "zhihu" else 0,
+                        error_type=error_type if platform == "zhihu" else "",
+                    )
+                return 1
+
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records), patch.object(
+                monitor_publish, "STATE_FILE", state_file
+            ), patch.object(monitor_publish, "run_cmd", side_effect=fake_run):
+                first = monitor_publish.publish_article(article)
+                second = monitor_publish.publish_article(article)
+
+            self.assertEqual(first, "attempted")
+            self.assertEqual(second, "attempted")
+            self.assertIn("zhihu", calls[-1][calls[-1].index("--platform") + 1].split(","))
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertNotEqual(state["articles"][str(article.resolve())].get("status"), "success")
+
+    def test_missing_new_csv_row_fails_closed_even_when_command_returns_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            state_file = root / "state.json"
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", root / "missing.csv"), patch.object(
+                monitor_publish, "STATE_FILE", state_file
+            ), patch.object(monitor_publish, "run_cmd", return_value=0):
+                result = monitor_publish.publish_article(article)
+
+            self.assertEqual(result, "attempted")
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            platforms = state["articles"][str(article.resolve())]["platforms"]
+            self.assertTrue(all(item["status"] == "unknown" for item in platforms.values()))
+
+    def test_rows_before_command_do_not_count_as_command_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            records = root / "records.csv"
+            append_record(records, article=article, platform="zhihu", mode="publish", status="failed", returncode=1)
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records), patch.object(
+                monitor_publish, "STATE_FILE", root / "state.json"
+            ), patch.object(monitor_publish, "run_cmd", return_value=0):
+                result = monitor_publish.publish_article(article)
+            self.assertEqual(result, "attempted")
+
+    def test_corrupt_state_blocks_before_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            state_file = root / "state.json"
+            state_file.write_text("{bad", encoding="utf-8")
+            with patch.object(monitor_publish, "STATE_FILE", state_file), patch.object(
+                monitor_publish, "run_cmd"
+            ) as run:
+                with self.assertRaisesRegex(RuntimeError, "JSON"):
+                    monitor_publish.publish_article(article)
+            run.assert_not_called()
+
+    def test_save_state_uses_fsync_and_atomic_replace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.json"
+            with patch.object(monitor_publish.os, "fsync", wraps=monitor_publish.os.fsync) as fsync, patch.object(
+                monitor_publish.os, "replace", wraps=monitor_publish.os.replace
+            ) as replace:
+                monitor_publish.save_state({"articles": {}}, target)
+            fsync.assert_called_once()
+            replace.assert_called_once()
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"articles": {}})
+
+    def test_all_terminal_records_skip_without_command_or_vps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            records = root / "records.csv"
+            append_record(records, article=article, platform="wechat", mode="draft", status="draft_only")
+            for platform in monitor_publish.BROWSER_PLATFORMS:
+                append_record(records, article=article, platform=platform, mode="publish", status="published")
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records), patch.object(
+                monitor_publish, "STATE_FILE", root / "state.json"
+            ), patch.object(monitor_publish, "run_cmd") as run:
                 todo = monitor_publish.scan_once(root)
-
             self.assertEqual(todo, [])
+            run.assert_not_called()
+            source = MODULE_PATH.read_text(encoding="utf-8")
+            self.assertNotIn("require_vps_ready", source)
+            self.assertNotIn("jianshu_dedicated_browser", source)
 
-    def test_scan_overlap_skips_before_queue_or_state_access(self):
+    def test_empty_queue_is_terminal_noop(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            monitor_publish, "run_cmd"
+        ) as run:
+            self.assertEqual(monitor_publish.scan_once(Path(tmp)), [])
+            run.assert_not_called()
+
+    def test_scan_overlap_skips_before_state_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            lock_path = root / ".ordo" / "publish.lock"
-
+            lock_path = root / "publish.lock"
             with run_lock(lock_path), patch.object(
                 monitor_publish, "PUBLISH_LOCK_FILE", lock_path
-            ), patch.object(monitor_publish, "load_state") as load_state, patch.object(
-                monitor_publish, "list_articles"
-            ) as list_articles, patch.object(
-                monitor_publish, "require_vps_ready"
-            ) as preflight, patch.object(
-                monitor_publish, "publish_article"
-            ) as publish:
+            ), patch.object(monitor_publish, "load_state") as load_state:
                 result = monitor_publish.scan_once(root)
-
             self.assertEqual(result, "skipped_overlap")
             load_state.assert_not_called()
-            list_articles.assert_not_called()
-            preflight.assert_not_called()
-            publish.assert_not_called()
 
-    def test_direct_article_overlap_skips_without_publishing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            article = root / "第一课.md"
-            article.write_text("# 第一课", encoding="utf-8")
-            lock_path = root / ".ordo" / "publish.lock"
-
-            with run_lock(lock_path), patch.object(
-                monitor_publish, "PUBLISH_LOCK_FILE", lock_path
-            ), patch.object(monitor_publish, "publish_article") as publish:
-                result = monitor_publish.publish_article_once(article)
-
-            self.assertEqual(result, "skipped_overlap")
-            publish.assert_not_called()
-
-    def test_daemon_releases_lock_before_sleep(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            lock_path = root / ".ordo" / "publish.lock"
-            sleep_checked = False
-
-            def stop_after_check(_interval):
-                nonlocal sleep_checked
-                with run_lock(lock_path):
-                    sleep_checked = True
-                raise StopIteration
-
-            with patch.object(
-                monitor_publish, "PUBLISH_LOCK_FILE", lock_path
-            ), patch.object(
-                monitor_publish, "load_state", return_value={"articles": {}}
-            ), patch.object(
-                monitor_publish, "list_articles", return_value=[]
-            ), patch.object(monitor_publish.time, "sleep", side_effect=stop_after_check):
-                with self.assertRaises(StopIteration):
-                    monitor_publish.run_daemon(root, interval=1)
-
-            self.assertTrue(sleep_checked)
+    def test_daemon_reports_scan_exception_then_continues_to_sleep(self):
+        with patch.object(
+            monitor_publish, "scan_once", side_effect=[RuntimeError("boom"), KeyboardInterrupt]
+        ) as scan, patch.object(monitor_publish.time, "sleep") as sleep, patch("builtins.print") as output:
+            with self.assertRaises(KeyboardInterrupt):
+                monitor_publish.run_daemon(Path("/tmp"), interval=7)
+        self.assertEqual(scan.call_count, 2)
+        sleep.assert_called_once_with(7)
+        self.assertTrue(any("boom" in str(call) for call in output.call_args_list))
 
 
 if __name__ == "__main__":
