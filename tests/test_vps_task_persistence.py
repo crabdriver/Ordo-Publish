@@ -240,6 +240,37 @@ class TestVpsTaskPersistence(unittest.TestCase):
                 self.assertEqual(tasks[0]["attempts"], 2)
 
     @patch("ordo_engine.runner.pipeline.run_platform_task")
+    def test_run_job_passes_theme_from_manifest(self, mock_run):
+        bundle_zip = self.temp_path / "bundle.zip"
+        with zipfile.ZipFile(bundle_zip, "w") as z:
+            manifest = {
+                "job_id": "job_theme_test",
+                "mode": "publish",
+                "platforms": ["zhihu"],
+                "articles": [
+                    {
+                        "article_id": "art_001",
+                        "title": "My Article",
+                        "markdown_path": "articles/art_001.md",
+                        "covers": {},
+                        "themes": {"zhihu": "sspai"},
+                    }
+                ],
+            }
+            z.writestr("manifest.json", json.dumps(manifest))
+            z.writestr("articles/art_001.md", "# My Article\nHello")
+
+        mock_run.return_value = {"returncode": 0, "stdout": "已发布到知乎", "stderr": ""}
+
+        with patch.object(ordo_worker, "BASE_DIR", self.temp_path):
+            with self.assertRaises(SystemExit) as cm:
+                ordo_worker.run_job(str(bundle_zip))
+
+        self.assertEqual(cm.exception.code, 0)
+        self.assertEqual(mock_run.call_args.kwargs["theme_name"], "sspai")
+        self.assertEqual(mock_run.call_args.kwargs["template_mode"], "custom")
+
+    @patch("ordo_engine.runner.pipeline.run_platform_task")
     def test_run_job_treats_scheduled_as_success(self, mock_run):
         bundle_zip = self.temp_path / "bundle.zip"
         with zipfile.ZipFile(bundle_zip, "w") as z:

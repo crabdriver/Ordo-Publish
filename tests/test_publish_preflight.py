@@ -7,7 +7,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, ImageCms
 
 import publish
 
@@ -15,6 +15,140 @@ import publish
 class PublishPreflightTests(unittest.TestCase):
     def _write_cover(self, path: Path, size=(1280, 720)):
         Image.new("RGB", size, color=(23, 45, 67)).save(path)
+
+    def _write_canonical_cover(self, path: Path):
+        profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        Image.new("RGB", (2538, 1080), color=(23, 45, 67)).save(
+            path,
+            format="PNG",
+            icc_profile=profile,
+        )
+
+    def _write_publication_package(self, root: Path, *, cover_size=(2538, 1080)):
+        relative = "assets/article-1/cover.png"
+        cover = root / relative
+        cover.parent.mkdir(parents=True)
+        profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        Image.new("RGB", cover_size, color=(23, 45, 67)).save(
+            cover,
+            format="PNG",
+            icc_profile=profile,
+        )
+        article = root / "article.md"
+        platform_lines = "".join(
+            f"  {platform}: {relative}\n"
+            for platform in ("wechat", "zhihu", "toutiao", "yidian", "bilibili", "jianshu")
+        )
+        article.write_text(
+            "---\narticle_id: article-1\n"
+            f"cover: {relative}\nplatform_covers:\n{platform_lines}---\n\n# Article\n",
+            encoding="utf-8",
+        )
+        return article, cover
+
+    def test_publication_cover_assignment_reuses_one_cover_for_all_platforms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            article, cover = self._write_publication_package(Path(tmp))
+
+            assignments = publish.build_publication_cover_assignments(
+                [article],
+                ["wechat", "zhihu", "toutiao", "yidian", "bilibili", "jianshu"],
+            )
+
+        self.assertEqual(len(assignments), 6)
+        self.assertEqual({item.cover_path for item in assignments}, {cover.resolve()})
+
+    def test_publication_cover_assignment_rejects_invalid_manual_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article, _cover = self._write_publication_package(root)
+            invalid = root / "cover.png"
+            self._write_cover(invalid, size=(1200, 510))
+
+            with self.assertRaisesRegex(ValueError, "2538x1080"):
+                publish.build_publication_cover_assignments(
+                    [article],
+                    ["wechat", "zhihu"],
+                    cover_override=invalid,
+                )
+
+    def test_preflight_blocks_invalid_publication_package_cover(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            article, _cover = self._write_publication_package(Path(tmp), cover_size=(1200, 510))
+
+            blockers, _warnings = publish.run_preflight_checks(
+                platforms=[],
+                mode="publish",
+                workbench={},
+                base_dir=Path(tmp),
+                article_paths=[article],
+            )
+
+        self.assertTrue(any("2538x1080" in item for item in blockers), blockers)
+
+    def test_preflight_does_not_require_legacy_pool_for_valid_publication_cover(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article, _cover = self._write_publication_package(root)
+            with patch.object(
+                publish,
+                "inspect_browser_platform_state",
+                return_value={
+                    "editor_ready": True,
+                    "page_state": "editor_ready",
+                    "current_url": "https://zhuanlan.zhihu.com/write",
+                    "detail": "编辑器已就绪",
+                },
+            ):
+                blockers, _warnings = publish.run_preflight_checks(
+                    platforms=["zhihu"],
+                    mode="publish",
+                    workbench={"zhihu": "target-1"},
+                    base_dir=root,
+                    article_paths=[article],
+                )
+
+        self.assertFalse(any("封面池" in item for item in blockers), blockers)
+
+    @patch("wechat_publisher.WeChatPublisher")
+    def test_wechat_preflight_does_not_require_legacy_pool_for_valid_publication_cover(self, mock_publisher):
+        mock_publisher.return_value.ensure_access_token.return_value = None
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article, _cover = self._write_publication_package(root)
+            (root / "secrets.env").write_text("VPS_IP=203.0.113.10\n", encoding="utf-8")
+            with patch.object(
+                publish,
+                "get_wechat_config_status",
+                return_value={
+                    "appid_ready": True,
+                    "secret_ready": True,
+                    "covers_ready": False,
+                    "ai_cover_ready": False,
+                },
+            ), patch.object(
+                publish.subprocess,
+                "run",
+                return_value=CompletedProcess(["ssh"], 0, stdout="", stderr=""),
+            ):
+                blockers, _warnings = publish.run_preflight_checks(
+                    platforms=["wechat"],
+                    mode="publish",
+                    workbench={},
+                    base_dir=root,
+                    article_paths=[article],
+                )
+
+        self.assertFalse(any("缺少可用封面" in item for item in blockers), blockers)
+
+    def test_publish_mode_defaults_to_vps_remote(self):
+        args = publish.parse_args(["article.md", "--mode", "publish"])
+        self.assertEqual(args.remote, "vps")
+        self.assertFalse(args.assume_yes)
+
+    def test_draft_mode_defaults_to_local_remote(self):
+        args = publish.parse_args(["article.md", "--mode", "draft"])
+        self.assertEqual(args.remote, "local")
 
     def test_get_cdp_runtime_env_uses_managed_browser_session_port(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -36,6 +170,23 @@ class PublishPreflightTests(unittest.TestCase):
 
         self.assertEqual(env["LIVE_CDP_PORT"], "9555")
         self.assertTrue(env["ORDO_BROWSER_SESSION_PROFILE_DIR"].endswith(".ordo-managed-profile"))
+
+    def test_run_remote_cdp_preflight_blocks_when_remote_browser_unavailable(self):
+        class Executor:
+            def execute(self, _cmd, timeout=None):
+                return {"returncode": 1, "stdout": "", "stderr": "connect ECONNREFUSED"}
+
+        with self.assertRaisesRegex(RuntimeError, "VPS 浏览器/CDP 预检失败"):
+            publish.run_remote_cdp_preflight(Executor())
+
+    def test_run_remote_cdp_preflight_passes_when_remote_browser_lists(self):
+        class Executor:
+            def execute(self, _cmd, timeout=None):
+                return {"returncode": 0, "stdout": "target\\tTitle\\turl", "stderr": ""}
+
+        res = publish.run_remote_cdp_preflight(Executor())
+
+        self.assertEqual(res["returncode"], 0)
 
     def test_run_preflight_checks_warns_with_cdp_connection_source(self):
         blockers, warnings = publish.run_preflight_checks(
@@ -714,9 +865,8 @@ class ChromeLaunchTests(unittest.TestCase):
         self.assertEqual(app_name, "Google Chrome")
         self.assertEqual(mocked_run.call_count, 2)
 
-    def test_ensure_chrome_ready_launches_managed_browser_when_current_source_is_system(self):
+    def test_ensure_chrome_ready_blocks_when_current_source_is_system(self):
         existing_tabs = [{"target": "sys-1", "title": "知乎", "url": "https://zhuanlan.zhihu.com/write"}]
-        managed_tabs = [{"target": "managed-1", "title": "知乎", "url": "https://zhuanlan.zhihu.com/write"}]
 
         with patch.object(
             publish,
@@ -725,14 +875,11 @@ class ChromeLaunchTests(unittest.TestCase):
         ), patch.object(
             publish,
             "list_tabs_or_none",
-            side_effect=[existing_tabs, managed_tabs],
+            return_value=existing_tabs,
         ), patch.object(
             publish,
             "get_cdp_connection_metadata",
-            side_effect=[
-                {"source": "macos_devtools_port_file", "detail": "system"},
-                {"source": "managed_browser_port", "detail": "managed"},
-            ],
+            return_value={"source": "macos_devtools_port_file", "detail": "system"},
         ), patch.object(
             publish,
             "launch_chrome",
@@ -740,11 +887,10 @@ class ChromeLaunchTests(unittest.TestCase):
         ) as mocked_launch, patch.object(
             publish.time, "sleep", return_value=None
         ):
-            tabs, launched = publish.ensure_chrome_ready(["zhihu"])
+            with self.assertRaisesRegex(RuntimeError, "已阻止自动启动/回退到系统 Chrome"):
+                publish.ensure_chrome_ready(["zhihu"])
 
-        self.assertEqual(tabs, managed_tabs)
-        self.assertEqual(launched, "Google Chrome")
-        mocked_launch.assert_called_once()
+        mocked_launch.assert_not_called()
 
     def test_ensure_chrome_ready_reuses_existing_tabs_when_managed_source_is_active(self):
         tabs = [{"target": "managed-1", "title": "知乎", "url": "https://zhuanlan.zhihu.com/write"}]

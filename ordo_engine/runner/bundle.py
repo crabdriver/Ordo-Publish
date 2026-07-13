@@ -29,6 +29,7 @@ def create_publish_bundle(
     mode: str,
     output_zip_path: Path,
     job_id: Optional[str] = None,
+    theme_mapping: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Path:
     """
     Creates a zip bundle containing markdown articles, cover images, and a manifest.json.
@@ -79,11 +80,14 @@ def create_publish_bundle(
                         shutil.copy2(cover_path, dest_cover_path)
                         article_covers[platform] = f"covers/{dest_cover_name}"
 
+            article_themes = dict((theme_mapping or {}).get(art_path.stem, {}))
+
             manifest_articles.append({
                 "article_id": f"art_{index:03d}",
                 "title": article_title,
                 "markdown_path": f"articles/{dest_art_name}",
                 "covers": article_covers,
+                "themes": article_themes,
                 "original_filename": art_path.name
             })
 

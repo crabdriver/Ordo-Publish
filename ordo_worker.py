@@ -75,14 +75,14 @@ def update_overall_job_status(db_path: Path, job_id: str):
     )
 
 
-def execute_tasks_loop(db_path: Path, job_id: str, tasks_to_run, job_dir: Path, mode: str, cover_mappings: dict):
+def execute_tasks_loop(db_path: Path, job_id: str, tasks_to_run, job_dir: Path, mode: str, cover_mappings: dict, theme_mappings: dict = None):
     from ordo_engine.runner.pipeline import run_platform_task
     from ordo_engine.platforms.registry import build_platform_registry
     
     registry = build_platform_registry(BASE_DIR)
     
     # Inject CDP port to environment
-    os.environ["LIVE_CDP_PORT"] = "9333"
+    os.environ.setdefault("LIVE_CDP_PORT", "9333")
     os.environ["ORDO_WORKER"] = "1"
     
     blocked_platforms = set()
@@ -116,12 +116,17 @@ def execute_tasks_loop(db_path: Path, job_id: str, tasks_to_run, job_dir: Path, 
             art_name = Path(article_path).name
             if art_name in cover_mappings and platform in cover_mappings[art_name]:
                 cover_path = cover_mappings[art_name][platform]
+            theme_name = None
+            if theme_mappings and art_name in theme_mappings and platform in theme_mappings[art_name]:
+                theme_name = theme_mappings[art_name][platform]
                 
             result = run_platform_task(
                 base_dir=BASE_DIR,
                 platform=platform,
                 markdown_file=str(article_path),
                 mode=mode,
+                theme_name=theme_name,
+                template_mode="custom" if theme_name else None,
                 cover_path=cover_path,
                 article_id=article_id,
             )
@@ -151,6 +156,8 @@ def execute_tasks_loop(db_path: Path, job_id: str, tasks_to_run, job_dir: Path, 
                     platform=platform,
                     markdown_file=str(article_path),
                     mode=mode,
+                    theme_name=theme_name,
+                    template_mode="custom" if theme_name else None,
                     cover_path=cover_path,
                     article_id=article_id,
                 )
@@ -468,6 +475,7 @@ def run_job(bundle_zip_path: str):
 
     # Prepare cover mappings
     cover_mappings = {}
+    theme_mappings = {}
     for art in manifest.get("articles", []):
         art_rel_path = art["markdown_path"]
         art_abs_path = job_dir / art_rel_path
@@ -476,6 +484,7 @@ def run_job(bundle_zip_path: str):
         for platform, cov_rel in art.get("covers", {}).items():
             if cov_rel:
                 cover_mappings[art_name][platform] = job_dir / cov_rel
+        theme_mappings[art_name] = dict(art.get("themes", {}))
 
     # Retrieve tasks that are not yet successful for this job
     all_job_tasks = db_helper.get_job_tasks(db_path, job_id)
@@ -483,7 +492,7 @@ def run_job(bundle_zip_path: str):
 
     print(f"[INFO] Starting execution for Job: {job_id} ({len(tasks_to_run)} tasks to run)")
     try:
-        execute_tasks_loop(db_path, job_id, tasks_to_run, job_dir, mode, cover_mappings)
+        execute_tasks_loop(db_path, job_id, tasks_to_run, job_dir, mode, cover_mappings, theme_mappings)
     finally:
         # Update job status
         update_overall_job_status(db_path, job_id)
@@ -534,17 +543,19 @@ def resume_jobs(job_id_filter: str = None):
         mode = manifest.get("mode", "publish")
         
         cover_mappings = {}
+        theme_mappings = {}
         for art in manifest.get("articles", []):
             art_name = Path(art["markdown_path"]).name
             cover_mappings[art_name] = {}
             for platform, cov_rel in art.get("covers", {}).items():
                 if cov_rel:
                     cover_mappings[art_name][platform] = job_dir / cov_rel
+            theme_mappings[art_name] = dict(art.get("themes", {}))
                     
         db_helper.update_job_status(db_path, job_id, "running", started_at=get_now_str())
         
         try:
-            execute_tasks_loop(db_path, job_id, tasks, job_dir, mode, cover_mappings)
+            execute_tasks_loop(db_path, job_id, tasks, job_dir, mode, cover_mappings, theme_mappings)
         finally:
             update_overall_job_status(db_path, job_id)
  
@@ -657,9 +668,9 @@ def job_status(job_id: str):
 def check_login_status():
     print("=== Platform Login Status ===")
     
-    # 1. Check if Chrome port 9333 is active
+    # 1. Check configured managed Chrome port.
     import socket
-    port = 9333
+    port = int(os.environ.get("LIVE_CDP_PORT", "9333"))
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(2)
     chrome_running = False

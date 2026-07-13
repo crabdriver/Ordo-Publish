@@ -75,7 +75,8 @@ class TestVpsFirstSkeleton(unittest.TestCase):
             platforms=["zhihu", "toutiao"],
             mode="draft",
             output_zip_path=zip_output,
-            job_id="test_job_123"
+            job_id="test_job_123",
+            theme_mapping={"article_one": {"zhihu": "sspai"}},
         )
 
         self.assertTrue(zip_output.exists())
@@ -101,6 +102,7 @@ class TestVpsFirstSkeleton(unittest.TestCase):
             self.assertEqual(art1_meta["title"], "Article One")
             self.assertEqual(art1_meta["markdown_path"], "articles/art_000_article_one.md")
             self.assertEqual(art1_meta["covers"]["zhihu"], "covers/cover_000_zhihu_cover1.png")
+            self.assertEqual(art1_meta["themes"]["zhihu"], "sspai")
 
             art2_meta = manifest["articles"][1]
             self.assertEqual(art2_meta["title"], "article_two")
@@ -224,7 +226,7 @@ class TestVpsFirstSkeleton(unittest.TestCase):
     @patch("ordo_engine.runner.executor.RemoteSubprocessExecutor")
     @patch("publish.collect_markdown_files")
     @patch("publish.filter_already_published_articles")
-    @patch("publish.build_cover_assignments_for_articles")
+    @patch("publish.build_publication_cover_assignments")
     @patch("publish.time.time", return_value=1000)
     def test_publish_py_remote_delegation(
         self,
@@ -279,4 +281,4 @@ class TestVpsFirstSkeleton(unittest.TestCase):
             remote_cwd="/my/remote/repo",
             proxy_tunnel="7890:127.0.0.1:7890"
         )
-        self.assertEqual(mock_executor.execute.call_count, 2)
+        self.assertEqual(mock_executor.execute.call_count, 3)

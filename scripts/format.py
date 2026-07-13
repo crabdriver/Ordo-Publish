@@ -53,6 +53,9 @@ GALLERY_THEMES = [
     "terracotta", "mint-fresh", "sunset-amber", "lavender-dream",
     # 活力动态（4）
     "sports", "bauhaus", "chinese", "wechat-native",
+    # gzh-design-skill 移植主题
+    "gzh-moyu-green", "gzh-red-white", "gzh-graphite-minimal",
+    "gzh-zen-whitespace", "gzh-moyu-ticket", "gzh-olive-journal",
     # 模板布局（4，每种布局1个代表）
     "minimal-gold", "focus-blue", "elegant-green", "bold-blue",
 ]

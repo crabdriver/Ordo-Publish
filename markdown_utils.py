@@ -8,8 +8,23 @@ from bs4.element import NavigableString, Tag
 MARKDOWN_EXTENSIONS = ["extra", "sane_lists", "nl2br"]
 
 
+def strip_frontmatter(markdown_text):
+    content = markdown_text.lstrip("\ufeff")
+    if not content.startswith("---\n"):
+        return markdown_text
+    end = content.find("\n---", 4)
+    if end == -1:
+        return markdown_text
+    rest = content[end + len("\n---") :]
+    if rest.startswith("\r\n"):
+        rest = rest[2:]
+    elif rest.startswith("\n"):
+        rest = rest[1:]
+    return rest
+
+
 def normalize_markdown_source(markdown_text):
-    content = markdown_text.strip()
+    content = strip_frontmatter(markdown_text).strip()
     if not content:
         return ""
 

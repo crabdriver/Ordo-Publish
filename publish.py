@@ -23,6 +23,11 @@ from publish_console_state import (
 )
 from scripts.format import build_gallery_bundle, render_publish_console_page
 from ordo_engine.assignment.covers import COVER_PLATFORMS, CoverPoolError, assign_covers, list_cover_files
+from ordo_engine.assignment.cover_contract import (
+    CoverContractError,
+    resolve_publication_cover,
+    validate_cover,
+)
 from ordo_engine.assignment.templates import assign_templates
 from ordo_engine.config import load_engine_config
 from ordo_engine.platforms.base import classify_process_result
@@ -33,6 +38,7 @@ from ordo_engine.results.publish_records import (
     PUBLISH_RECORD_FIELDNAMES,
     append_publish_record_at_path,
 )
+from ordo_engine.models.workbench import CoverAssignment
 from ordo_engine.runner.pipeline import run_platform_task, run_publish_pipeline
 
 
@@ -463,6 +469,33 @@ def build_cover_assignments_for_articles(base_dir: Path, article_ids: tuple[str,
     )
 
 
+def build_publication_cover_assignments(
+    article_paths: list[Path],
+    platforms: list[str],
+    *,
+    cover_override: Optional[Path] = None,
+):
+    manual_cover = validate_cover(cover_override) if cover_override is not None else None
+    assignments = []
+    for index, article_path in enumerate(article_paths):
+        article = Path(article_path).expanduser().resolve()
+        cover_path = manual_cover or resolve_publication_cover(article)
+        article_id = article_id_for_path(article, index)
+        source = "manual" if manual_cover is not None else "publication_package"
+        for platform in platforms:
+            assignments.append(
+                CoverAssignment(
+                    article_id=article_id,
+                    platform=platform,
+                    cover_path=cover_path,
+                    cover_source=source,
+                    is_random=False,
+                    is_manual_override=manual_cover is not None,
+                )
+            )
+    return tuple(assignments)
+
+
 def normalize_publish_option_mode(value, *, field_name: str):
     mode = str(value or "auto")
     if mode not in PUBLISH_OPTION_MODES:
@@ -676,12 +709,23 @@ def run_preflight_checks(
     cdp_connection=None,
     cover_mode="auto",
     article_paths=None,
+    cover_override=None,
 ):
     blockers = []
     warnings = []
     root = Path(base_dir).resolve() if base_dir is not None else BASE_DIR
     override = Path(cover_dir_override).resolve() if cover_dir_override is not None else None
     normalized_cover_mode = normalize_publish_option_mode(cover_mode, field_name="cover_mode")
+
+    if normalized_cover_mode != "force_off" and article_paths:
+        try:
+            if cover_override is not None:
+                validate_cover(cover_override)
+            else:
+                for article_path in article_paths:
+                    resolve_publication_cover(article_path)
+        except CoverContractError as exc:
+            blockers.append(f"统一封面预检失败: {exc}")
 
     if "wechat" in platforms:
         wechat = get_wechat_config_status(root)
@@ -739,10 +783,11 @@ def run_preflight_checks(
                 else:
                     blockers.append(f"微信公众号 API 预检失败：{exc}")
 
-        if not wechat["covers_ready"] and not wechat["ai_cover_ready"]:
-            blockers.append("微信公众号缺少可用封面：请配置 AI 封面所需的 `config.json`，或准备 `covers/cover_*.png`")
-        elif not wechat["covers_ready"] and wechat["ai_cover_ready"]:
-            warnings.append("未检测到本地默认封面，当前将默认优先使用 AI 封面生成能力")
+        if not article_paths:
+            if not wechat["covers_ready"] and not wechat["ai_cover_ready"]:
+                blockers.append("微信公众号缺少可用封面：请提供合格的发布包 `cover.png` 或配置 AI 封面")
+            elif not wechat["covers_ready"] and wechat["ai_cover_ready"]:
+                warnings.append("未检测到发布包封面，当前将尝试 AI 封面生成能力")
         if wechat.get("config_warning"):
             warnings.append(str(wechat["config_warning"]))
     else:
@@ -808,7 +853,7 @@ def run_preflight_checks(
             warnings.append(detail)
 
     non_wechat_cover_platforms = [p for p in platforms if p in COVER_PLATFORMS_SET]
-    if non_wechat_cover_platforms:
+    if non_wechat_cover_platforms and not article_paths:
         if normalized_cover_mode == "force_off":
             return blockers, warnings
         pool_info = discover_cover_pool_status(root, cover_dir_override=override)
@@ -893,6 +938,102 @@ def print_result(result):
         "smoke_step": result.get("smoke_step"),
     }
     print(f"[META] {json.dumps(meta, ensure_ascii=False)}")
+
+
+# ── 失败通知回路 ──────────────────────────────────────────────
+# 无人值守系统第一定律：失败必须能找到人。默认用 macOS 系统通知，
+# 并支持可选 webhook（环境变量 ORDO_NOTIFY_WEBHOOK，或 config.notify.webhook）。
+
+_ERROR_GUIDANCE = {
+    "login_required": "有平台登录态失效，请手动登录后重跑",
+    "platform_changed": "平台可能已改版，选择器失效，需更新适配器",
+    "rate_limited": "触发平台限流，请稍后重试",
+    "content_rejected": "内容被平台拒绝，请检查正文/封面合规性",
+    "config_error": "配置错误，请检查 config.json",
+    "environment_error": "运行环境异常（浏览器/依赖）",
+}
+
+
+def _mac_notify(title: str, message: str):
+    """macOS 系统通知（无人值守下至少能在登录时看到）"""
+    try:
+        safe_title = title.replace('"', "'")
+        safe_msg = message.replace('"', "'")
+        script = f'display notification "{safe_msg}" with title "{safe_title}"'
+        subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=15,
+        )
+    except Exception:
+        pass
+
+
+def _post_webhook(webhook: str, title: str, body: str, ok: bool):
+    """可选：把结果推送到企业微信/飞书/自定义 webhook"""
+    try:
+        import urllib.request
+        payload = json.dumps(
+            {"title": title, "body": body, "ok": ok},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            webhook, data=payload, headers={"Content-Type": "application/json"}
+        )
+        urllib.request.urlopen(req, timeout=15)
+    except Exception:
+        pass
+
+
+def _load_notify_webhook(base_dir) -> Optional[str]:
+    # 环境变量优先，其次 config.json
+    env = os.environ.get("ORDO_NOTIFY_WEBHOOK")
+    if env:
+        return env
+    try:
+        cfg, _ = load_engine_config(base_dir)
+        return (cfg.get("notify") or {}).get("webhook")
+    except Exception:
+        return None
+
+
+def notify_run_result(results, exit_code, base_dir=BASE_DIR):
+    """发布结束后通知用户（系统通知 + 可选 webhook）"""
+    failed = [r for r in results if r.get("returncode") != 0]
+    ok = exit_code == 0 and not failed
+    lines = []
+    for r in results:
+        status = r.get("status") or ("OK" if r.get("returncode") == 0 else "FAIL")
+        line = f"- {r['platform']}: {status}"
+        if not ok and r.get("returncode") != 0:
+            et = r.get("error_type")
+            guide = _ERROR_GUIDANCE.get(et, "请查看日志")
+            line += f"  ⚠️ {guide}"
+        lines.append(line)
+    body = "\n".join(lines)
+
+    if ok:
+        title = "✅ 自动发布完成"
+    else:
+        title = f"⚠️ 自动发布失败（{len(failed)} 个平台）"
+
+    _mac_notify(title, body)
+    webhook = _load_notify_webhook(base_dir)
+    if webhook:
+        _post_webhook(webhook, title, body, ok)
+    print(f"[NOTIFY] {title}")
+
+
+def run_probe(args):
+    """发布前选择器存活探针（子命令）"""
+    from ordo_engine.platforms.playwright.probe import probe_platforms
+    platforms = parse_platforms(args.platform)
+    out = probe_platforms(platforms, headless=not getattr(args, "headed", False))
+    broken = [k for k, v in out.items() if v["status"] in ("broken", "error")]
+    if broken:
+        print(f"\n⚠️ 以下平台选择器异常：{broken}")
+        return 1
+    print("\n✅ 所有平台选择器存活正常")
+    return 0
 
 
 def run_cdp(*args, timeout=120, base_dir=None):
@@ -996,6 +1137,12 @@ def ensure_chrome_ready(platforms, base_dir=None):
     cdp_connection = get_cdp_connection_metadata(base_dir=base_dir) if managed_required else None
     if tabs is not None and (not managed_required or is_managed_browser_connection(cdp_connection)):
         return tabs, None
+
+    if managed_required:
+        raise RuntimeError(
+            "未检测到 Ordo 托管浏览器 CDP，已阻止自动启动/回退到系统 Chrome。"
+            f"请先启动专用浏览器端口 {browser_session.get('debug_port')}。"
+        )
 
     urls = [PLATFORM_URLS[platform] for platform in platforms]
     app_name = launch_chrome(urls, base_dir=base_dir)
@@ -1284,25 +1431,13 @@ def run_console_queue(args, platforms, article_paths, available_themes):
     save_session(PUBLISH_CONSOLE_SESSION, session)
 
     path_to_id = {p.resolve(): article_id_for_path(p, i) for i, p in enumerate(article_paths)}
-    article_ids = tuple(path_to_id.values())
     cover_assignments = ()
     if args_cover_mode != "force_off":
-        if args_cover:
-            from ordo_engine.models.workbench import CoverAssignment
-            cov_p = Path(args_cover).expanduser().resolve()
-            cover_assignments = tuple(
-                CoverAssignment(
-                    article_id=aid,
-                    platform=platform,
-                    cover_path=cov_p,
-                    cover_source="manual",
-                    is_random=False,
-                    is_manual_override=True,
-                )
-                for aid in article_ids for platform in platforms
-            )
-        else:
-            cover_assignments = build_cover_assignments_for_articles(BASE_DIR, article_ids, platforms)
+        cover_assignments = build_publication_cover_assignments(
+            article_paths,
+            platforms,
+            cover_override=Path(args_cover).expanduser().resolve() if args_cover else None,
+        )
 
     cover_by_pair = {}
     for ca in cover_assignments or ():
@@ -1431,7 +1566,14 @@ def run_console_queue(args, platforms, article_paths, available_themes):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Publish one or many Markdown articles to multiple platforms.")
-    parser.add_argument("markdown_path", help="Markdown 文件或目录路径")
+    parser.add_argument("markdown_path", nargs="?", default=None,
+                        help="Markdown 文件或目录路径（使用 --probe 时可省略）")
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        default=False,
+        help="仅跑「选择器存活探针」：检查各平台关键选择器是否还在，不真正发布",
+    )
     parser.add_argument(
         "--platform",
         default="all",
@@ -1485,6 +1627,11 @@ def parse_args(argv=None):
         help="微信默认主题名，非交互模式下直接使用；默认从 config.json 获取，或回退到 chinese",
     )
     parser.add_argument(
+        "--template-theme",
+        default=None,
+        help="非微信平台固定使用的主题名，例如 sspai",
+    )
+    parser.add_argument(
         "--wechat-theme-mode",
         choices=["auto", "random", "fixed", "console"],
         default=None,
@@ -1510,13 +1657,13 @@ def parse_args(argv=None):
     parser.add_argument(
         "--remote",
         choices=["local", "vps"],
-        default="local",
+        default=None,
         help="运行模式：local 本地直接执行；vps 上传到 VPS 异步托管执行",
     )
     parser.add_argument(
         "--vps-host",
-        default="127.0.0.1",
-        help="VPS 的 IP 地址或域名，默认 127.0.0.1",
+        default=None,
+        help="VPS 的 IP 地址或域名，默认读取 secrets.env 的 VPS_IP/VPS_HOST",
     )
     parser.add_argument(
         "--vps-user",
@@ -1525,19 +1672,76 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--vps-path",
-        default="/root/ordo-publish-runtime/repo",
-        help="VPS 上的代码库绝对路径，默认 /root/ordo-publish-runtime/repo",
+        default="/root/ordo-publish",
+        help="VPS 上的代码库绝对路径，默认 /root/ordo-publish",
     )
     parser.add_argument(
         "--skip-published",
         action="store_true",
         help="读取 Ordo_Scribe_AI创作看板.md，跳过看板中已发表的文章",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--assume-yes",
+        action="store_true",
+        help="远端版本校验不一致时继续执行，适合非交互发布",
+    )
+    parser.add_argument(
+        "--engine",
+        choices=["playwright", "standalone"],
+        default="standalone",
+        help="自动化引擎：standalone (独立无头浏览器,默认) / playwright (CDP 连接模式)",
+    )
+    parser.add_argument(
+        "--headed",
+        action="store_true",
+        default=False,
+        help="standalone 模式下使用有头浏览器（首次登录扫码时需要）",
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        default=False,
+        help="standalone 模式下使用无头浏览器（默认行为，后台静默）",
+    )
+    args = parser.parse_args(argv)
+    if args.remote is None:
+        args.remote = "vps" if args.mode == "publish" else "local"
+    return args
+
+
+def apply_vps_config_defaults(args, base_dir=BASE_DIR):
+    if getattr(args, "remote", None) != "vps":
+        return args
+    env = load_simple_env_file(Path(base_dir) / "secrets.env")
+    if not args.vps_host:
+        args.vps_host = env.get("VPS_IP") or env.get("VPS_HOST")
+    if not args.vps_user:
+        args.vps_user = env.get("VPS_USER") or "root"
+    if not args.vps_path:
+        args.vps_path = env.get("VPS_PATH") or "/root/ordo-publish"
+    return args
+
+
+def run_remote_cdp_preflight(remote_executor):
+    cmd = [
+        "bash",
+        "-c",
+        "export LIVE_CDP_PORT=${LIVE_CDP_PORT:-9334}; node live_cdp.mjs list >/dev/null",
+    ]
+    res = remote_executor.execute(cmd, timeout=30)
+    if res.get("returncode") != 0:
+        stderr = (res.get("stderr") or res.get("stdout") or "").strip()
+        raise RuntimeError(f"VPS 浏览器/CDP 预检失败（端口 9334）。请先修复 VPS 登录态或浏览器。{stderr}")
+    return res
 
 
 def main():
     args = parse_args()
+    args = apply_vps_config_defaults(args)
+
+    # 选择器存活探针模式：只检查不发布
+    if getattr(args, "probe", False):
+        raise SystemExit(run_probe(args))
 
     # Load defaults from config.json if not specified
     config_defaults = {}
@@ -1553,6 +1757,8 @@ def main():
         args.wechat_theme_mode = config_defaults.get("wechat_theme_mode") or "auto"
 
     platforms = parse_platforms(args.platform)
+    if not args.markdown_path:
+        raise SystemExit("[BLOCK] 缺少 Markdown 路径参数（或使用 --probe 仅跑探针）")
     article_paths = collect_markdown_files(args.markdown_path, offset=args.offset, limit=args.limit)
     article_paths = maybe_filter_already_published_articles(
         article_paths,
@@ -1564,6 +1770,8 @@ def main():
         return
 
     if args.remote == "vps":
+        if not args.vps_host:
+            raise SystemExit("[BLOCK] VPS 发布缺少主机：请在 secrets.env 配置 VPS_IP，或传入 --vps-host")
         print(f"[INFO] 启用了远端托管模式 (VPS-First Pipeline)")
         print(f"[INFO] 远端主机: {args.vps_user}@{args.vps_host}")
         print(f"[INFO] 远端路径: {args.vps_path}")
@@ -1580,41 +1788,49 @@ def main():
             print(f"  本地 Commit: {local_commit}")
             print(f"  远端 Commit: {remote_commit}")
             print(f"  建议在 VPS 上执行 git pull 同步最新发布适配器代码。")
-            ans = input("是否忽略版本差异继续发布？[y/N]: ").strip().lower()
-            if ans != 'y':
+            if not args.assume_yes and not sys.stdin.isatty():
+                raise SystemExit("[BLOCK] 本地与 VPS 代码版本不一致，自动发布已阻断。请先同步 VPS 代码。")
+            ans = "y" if args.assume_yes else input("是否忽略版本差异继续发布？[y/N]: ").strip().lower()
+            if ans != "y":
                 print("[INFO] 任务已取消。")
                 return
         else:
             print("[INFO] 代码版本校验通过，本地与远端完全一致。")
 
-        # 2. 本地封面池预分配
-        article_ids = tuple(article_id_for_path(p, i) for i, p in enumerate(article_paths))
+        from ordo_engine.runner.executor import RemoteSubprocessExecutor
+        remote_executor = RemoteSubprocessExecutor(
+            ssh_host=args.vps_host,
+            ssh_user=args.vps_user,
+            remote_cwd=args.vps_path,
+            proxy_tunnel="7890:127.0.0.1:7890"
+        )
+        print("[INFO] 正在预检 VPS 浏览器/CDP 端口 9334...")
+        run_remote_cdp_preflight(remote_executor)
+        print("[INFO] VPS 浏览器/CDP 预检通过。")
+
+        # 2. 本地统一封面预分配
         cover_assignments = ()
         if args.cover_mode != "force_off":
-            if args.cover:
-                from ordo_engine.models.workbench import CoverAssignment
-                cover_path = Path(args.cover).expanduser().resolve()
-                if not cover_path.is_file():
-                    raise FileNotFoundError(f"封面文件不存在: {cover_path}")
-                cover_assignments = tuple(
-                    CoverAssignment(
-                        article_id=aid,
-                        platform=platform,
-                        cover_path=cover_path,
-                        cover_source="manual",
-                        is_random=False,
-                        is_manual_override=True,
-                    )
-                    for aid in article_ids for platform in platforms
-                )
-            else:
-                cover_assignments = build_cover_assignments_for_articles(BASE_DIR, article_ids, platforms)
+            cover_assignments = build_publication_cover_assignments(
+                article_paths,
+                platforms,
+                cover_override=Path(args.cover).expanduser().resolve() if args.cover else None,
+            )
 
         cover_mapping = {}
         for ca in cover_assignments:
             for idx, p in enumerate(article_paths):
                 if article_id_for_path(p, idx) == ca.article_id:
                     cover_mapping.setdefault(p.stem, {})[ca.platform] = ca.cover_path
+
+        theme_mapping = {}
+        if args.template_theme:
+            for p in article_paths:
+                theme_mapping[p.stem] = {
+                    platform: args.template_theme
+                    for platform in platforms
+                    if platform != "wechat"
+                }
 
         # 3. 本地打包 Bundle
         from ordo_engine.runner.bundle import create_publish_bundle, upload_bundle_to_vps
@@ -1628,6 +1844,7 @@ def main():
             platforms=platforms,
             mode=args.mode,
             output_zip_path=local_bundle_path,
+            theme_mapping=theme_mapping,
         )
 
         # 4. 上传任务包至 VPS
@@ -1650,19 +1867,11 @@ def main():
                 local_bundle_path.unlink()
 
         # 5. 在远端执行发布任务
-        from ordo_engine.runner.executor import RemoteSubprocessExecutor
-        remote_executor = RemoteSubprocessExecutor(
-            ssh_host=args.vps_host,
-            ssh_user=args.vps_user,
-            remote_cwd=args.vps_path,
-            proxy_tunnel="7890:127.0.0.1:7890"
-        )
-
         import shlex
         remote_cmd = [
             "bash",
             "-c",
-            f"if [ -f .venv/bin/python ]; then .venv/bin/python ordo_worker.py run-job {shlex.quote(remote_inbox_path)}; else python3 ordo_worker.py run-job {shlex.quote(remote_inbox_path)}; fi"
+            f"export LIVE_CDP_PORT=${{LIVE_CDP_PORT:-9334}}; if [ -f .venv/bin/python ]; then .venv/bin/python ordo_worker.py run-job {shlex.quote(remote_inbox_path)}; else python3 ordo_worker.py run-job {shlex.quote(remote_inbox_path)}; fi"
         ]
 
         print(f"\n[INFO] 正在远端启动发布任务，开启本地 Clash 代理反向隧道...")
@@ -1710,7 +1919,16 @@ def main():
     browser_platforms = [platform for platform in platforms if platform in BROWSER_PLATFORMS]
     tabs = []
     cdp_connection = None
-    if browser_platforms:
+
+    # 解析引擎类型：优先 CLI 参数，其次 config.json
+    from ordo_engine.platforms.registry import _resolve_engine_type
+    engine_type = _resolve_engine_type(BASE_DIR)
+    is_standalone = engine_type == "standalone"
+
+    if is_standalone:
+        # standalone 模式：启动独立无头浏览器，不需要 CDP 前置检查
+        print("[INFO] 使用 standalone 引擎：独立无头浏览器模式，跳过 CDP 前置检查")
+    elif browser_platforms:
         if args.no_auto_launch:
             tabs = list_tabs_or_none()
         else:
@@ -1722,40 +1940,44 @@ def main():
         if not tabs:
             raise RuntimeError("没有检测到可用的 Chrome 标签页，请先打开 Chrome 并启用远程调试")
 
-    if not args.no_auto_open:
-        opened = open_missing_platform_tabs(platforms, auto_launch=not args.no_auto_launch)
-        if opened:
-            print(f"[INFO] 已自动打开平台标签页: {', '.join(opened)}")
-        if browser_platforms:
-            tabs = list_tabs()
+    if not is_standalone:
+        if not args.no_auto_open:
+            opened = open_missing_platform_tabs(platforms, auto_launch=not args.no_auto_launch)
+            if opened:
+                print(f"[INFO] 已自动打开平台标签页: {', '.join(opened)}")
+            if browser_platforms:
+                tabs = list_tabs()
 
-    if args.rebind_workbench and WORKBENCH_FILE.exists():
-        WORKBENCH_FILE.unlink()
+        if args.rebind_workbench and WORKBENCH_FILE.exists():
+            WORKBENCH_FILE.unlink()
 
-    workbench = bind_workbench(platforms, tabs)
-    bound_platforms = [platform for platform in platforms if workbench.get(platform)]
-    if bound_platforms:
-        print(f"[INFO] 已绑定固定工作台标签页: {', '.join(bound_platforms)}")
+        workbench = bind_workbench(platforms, tabs)
+        bound_platforms = [platform for platform in platforms if workbench.get(platform)]
+        if bound_platforms:
+            print(f"[INFO] 已绑定固定工作台标签页: {', '.join(bound_platforms)}")
 
-    if not args.no_warmup:
-        warmed = warm_platforms(platforms)
-        if warmed:
-            print(f"[INFO] 已自动预热平台标签页: {', '.join(warmed)}")
+        if not args.no_warmup:
+            warmed = warm_platforms(platforms)
+            if warmed:
+                print(f"[INFO] 已自动预热平台标签页: {', '.join(warmed)}")
 
-    blockers, warnings = run_preflight_checks(
-        platforms,
-        args.mode,
-        workbench,
-        cdp_connection=cdp_connection,
-        cover_mode=args.cover_mode,
-        article_paths=article_paths,
-    )
-    for warning in warnings:
-        print(f"[WARN] {warning}")
-    for blocker in blockers:
-        print(f"[BLOCK] {blocker}")
-    if blockers:
-        raise SystemExit(1)
+        blockers, warnings = run_preflight_checks(
+            platforms,
+            args.mode,
+            workbench,
+            cdp_connection=cdp_connection,
+            cover_mode=args.cover_mode,
+            article_paths=article_paths,
+            cover_override=Path(args.cover).expanduser().resolve() if args.cover else None,
+        )
+        for warning in warnings:
+            print(f"[WARN] {warning}")
+        for blocker in blockers:
+            print(f"[BLOCK] {blocker}")
+        if blockers:
+            raise SystemExit(1)
+    else:
+        workbench = {}
 
     theme_mode = "fixed"
     available_themes = []
@@ -1791,24 +2013,11 @@ def main():
     template_assignments = build_template_assignments_for_articles(BASE_DIR, article_ids)
     cover_assignments = ()
     if args.cover_mode != "force_off":
-        if args.cover:
-            from ordo_engine.models.workbench import CoverAssignment
-            cover_path = Path(args.cover).expanduser().resolve()
-            if not cover_path.is_file():
-                raise FileNotFoundError(f"封面文件不存在: {cover_path}")
-            cover_assignments = tuple(
-                CoverAssignment(
-                    article_id=aid,
-                    platform=platform,
-                    cover_path=cover_path,
-                    cover_source="manual",
-                    is_random=False,
-                    is_manual_override=True,
-                )
-                for aid in article_ids for platform in platforms
-            )
-        else:
-            cover_assignments = build_cover_assignments_for_articles(BASE_DIR, article_ids, platforms)
+        cover_assignments = build_publication_cover_assignments(
+            article_paths,
+            platforms,
+            cover_override=Path(args.cover).expanduser().resolve() if args.cover else None,
+        )
     context_resolver = build_publish_context_resolver(
         article_paths,
         platforms,
@@ -1836,6 +2045,9 @@ def main():
     print("===== summary =====")
     print(f"成功: {len(succeeded)}")
     print(f"失败: {len(failed)}")
+
+    # 失败通知回路：无人值守下必须能触达人（系统通知 + 可选 webhook）
+    notify_run_result(results, exit_code)
 
     if failed or exit_code:
         raise SystemExit(1)

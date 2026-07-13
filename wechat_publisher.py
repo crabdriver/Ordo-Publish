@@ -16,6 +16,12 @@ from markdown_utils import render_markdown_plain_text, render_markdown_soup
 from scripts.format import convert_image_captions, convert_lists_to_sections
 from ordo_engine.config import load_engine_config
 from ordo_engine.importers.normalize import strip_title_marker
+from ordo_engine.assignment.cover_contract import (
+    CoverContractError,
+    normalize_cover_source,
+    resolve_publication_cover,
+    validate_cover,
+)
 
 BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 
@@ -33,14 +39,6 @@ if wechat_proxy and os.environ.get("ORDO_WORKER") != "1":
 
 WECHAT_MARKDOWN_EXTENSIONS = ["extra", "sane_lists"]
 
-
-def resolve_cover_dir():
-    return load_engine_config(BASE_DIR, environ=os.environ).resolve_cover_dir()
-
-
-def list_cover_images():
-    cover_dir = resolve_cover_dir()
-    return [str(path) for path in sorted(cover_dir.glob("cover_*.png"))]
 
 # --- AI Content Enhancement Config ---
 _FN_PREFIX = f"__FN_{uuid.uuid4().hex[:8]}_"
@@ -702,102 +700,71 @@ def create_ai_cover(title, markdown_file_path):
         ):
             return None
 
-        # Call generate.py
+        article_path = Path(markdown_file_path).expanduser().resolve()
+        article_id = article_path.stem
+        raw_text = article_path.read_text(encoding="utf-8")
+        if raw_text.startswith("---\n"):
+            end = raw_text.find("\n---", 4)
+            if end != -1:
+                for line in raw_text[4:end].splitlines():
+                    if line.startswith("article_id:"):
+                        article_id = line.split(":", 1)[1].strip().strip("\"'") or article_id
+                        break
+
         import subprocess
-        cover_dir = resolve_cover_dir()
+        cover_dir = article_path.parent / "assets" / article_id
         cover_dir.mkdir(parents=True, exist_ok=True)
-        out_path = os.path.join(cover_dir, f"ai_cover_{int(time.time())}.jpg")
-        prompt = f"为名为《{title}》的文章创作一张公众号首屏封面配图。风格优雅简约，无文字。注意微信平台要求宽幅封面（约2.35:1），因此请将视觉主体严格居中，上下边缘留白以便最终裁剪。"
+        source_path = cover_dir / f".cover-source-{int(time.time())}.png"
+        out_path = cover_dir / "cover.png"
+        prompt = (
+            f"根据文章《{title}》的主题创作一张干净、克制、有明确主体的横版封面。"
+            "画面禁止标题、副标题、Logo、水印、字母、数字和任何可见文字。"
+            "完整画布按2538x1080、2.35:1构图；中央1920x1080为16:9安全区，"
+            "中央约1600x800为核心安全区，人物和核心主体必须位于核心安全区，"
+            "距左右边缘至少350px；左右各309px只放可裁剪背景。"
+            "输出高分辨率纯视觉源图，不要海报排版，不要文字堆叠。"
+        )
         cmd = [
             sys.executable,
             str(BASE_DIR / "scripts" / "generate.py"),
             "--prompt", prompt,
-            "--out", out_path,
-            "--aspect-ratio", "16:9"
+            "--out", str(source_path),
+            "--aspect-ratio", "21:9",
+            "--image-size", "4K",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(BASE_DIR), timeout=120)
-        if result.returncode == 0 and os.path.exists(out_path):
-            print(f"  [AI封面] 成功为《{title}》生成AI封面图: {os.path.basename(out_path)}")
-            return out_path
+        if result.returncode == 0 and source_path.exists():
+            try:
+                normalized = normalize_cover_source(source_path, out_path)
+            finally:
+                source_path.unlink(missing_ok=True)
+            print(f"  [AI封面] 成功为《{title}》生成统一封面图: {normalized.name}")
+            return str(normalized)
         else:
-            print(f"  [AI封面失败] 回退到默认图库. 详情: {result.stderr[:200]}")
+            print(f"  [AI封面失败] 未生成合格统一封面. 详情: {result.stderr[:200]}")
     except Exception as e:
         print(f"  [AI封面异常] {e}")
     return None
 
 
-def load_recent_cover_paths(limit: int) -> list[str]:
-    records_file = BASE_DIR / "publish_records.csv"
-    if not records_file.exists():
-        return []
-    try:
-        import csv
-        with open(records_file, "r", encoding="utf-8", newline="") as f:
-            reader = csv.DictReader(f)
-            paths = []
-            for row in reader:
-                path = row.get("cover_path")
-                if path:
-                    paths.append(path)
-            return paths[-limit:] if limit > 0 else []
-    except Exception as exc:
-        print(f"  [WARN] 读取历史封面记录失败: {exc}")
-        return []
-
-
 def select_cover_for_path(markdown_file_path, title=None, cover_override=None, cover_mode="auto"):
     if cover_override:
-        path = Path(cover_override).expanduser().resolve()
-        if not path.is_file():
-            raise RuntimeError(f"封面文件不存在: {path}")
-        return str(path)
+        return str(validate_cover(cover_override))
 
-    cfg = load_engine_config(BASE_DIR, environ=os.environ)
-    repeat_window = cfg.get_cover_repeat_window()
-    recent_covers = load_recent_cover_paths(repeat_window)
-    recent_resolved = set()
-    for rc in recent_covers:
-        if rc:
-            try:
-                recent_resolved.add(str(Path(rc).resolve()))
-            except OSError:
-                recent_resolved.add(str(rc))
+    article_path = Path(markdown_file_path).expanduser().resolve()
+    try:
+        return str(resolve_publication_cover(article_path))
+    except CoverContractError as exc:
+        raw_text = article_path.read_text(encoding="utf-8")
+        frontmatter = raw_text[4:raw_text.find("\n---", 4)] if raw_text.startswith("---\n") else ""
+        if any(line.startswith("cover:") for line in frontmatter.splitlines()):
+            raise RuntimeError(f"统一封面不合格: {exc}") from exc
 
-    cover_images = list_cover_images()
-    if not cover_images:
-        raise RuntimeError("未找到任何本地默认封面图片")
-
-    if cover_mode == "random":
-        candidates = [img for img in cover_images if str(Path(img).resolve()) not in recent_resolved]
-        if not candidates:
-            candidates = cover_images
-        import random
-        return random.choice(candidates)
-
-    numbered = resolve_numbered_cover(markdown_file_path)
-    if numbered:
-        return numbered
     if title:
         ai_cover = create_ai_cover(title, markdown_file_path)
         if ai_cover:
             return ai_cover
-
-    candidates = [img for img in cover_images if str(Path(img).resolve()) not in recent_resolved]
-    if not candidates:
-        candidates = cover_images
-    import random
-    return random.choice(candidates)
-
-
-def resolve_numbered_cover(markdown_file_path):
-    name = Path(markdown_file_path).name
-    match = re.search(r"(?:^|[-_.]|\D)(\d{2})_", name)
-    if not match:
-        return None
-    candidate = resolve_cover_dir() / f"cover_{match.group(1)}.png"
-    if candidate.is_file():
-        return str(candidate.resolve())
-    return None
+    raise RuntimeError("未找到合格的 assets/<article_id>/cover.png，且 AI 封面生成失败")
 
 
 def publish_one_article(

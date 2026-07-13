@@ -1,14 +1,19 @@
 import sys
 import tempfile
 import unittest
+import json
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+from PIL import Image
 
 import jianshu_publisher
 import toutiao_publisher
 import wechat_publisher
 import yidian_publisher
 import zhihu_publisher
+from ordo_engine.assignment.cover_contract import validate_cover
 
 
 class ZhihuApplyCoverTests(unittest.TestCase):
@@ -335,19 +340,70 @@ class YidianStrictSettingTests(unittest.TestCase):
 
 
 class WechatCoverResolutionTests(unittest.TestCase):
-    def test_select_cover_for_path_uses_ordo_cover_dir_override(self):
+    def test_create_ai_cover_generates_text_free_4k_source_and_canonical_png(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            cover_dir = Path(tmpdir)
-            cover_path = cover_dir / "cover_01.png"
-            cover_path.write_bytes(b"x")
-            with patch.dict("os.environ", {"ORDO_COVER_DIR": str(cover_dir)}, clear=False), patch.object(
-                wechat_publisher,
-                "create_ai_cover",
-                return_value=None,
-            ):
-                selected = wechat_publisher.select_cover_for_path("/tmp/article.md", title="Title")
+            root = Path(tmpdir)
+            (root / "scripts").mkdir()
+            (root / "config.json").write_text(
+                json.dumps(
+                    {
+                        "cover": {"prefer_ai_first": True},
+                        "settings": {"base_url": "https://api.test.invalid", "model": "image-model"},
+                        "secrets": {"api_key": "secret-key"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            article = root / "article.md"
+            article.write_text("---\narticle_id: article-1\n---\n# Title\n", encoding="utf-8")
+            captured = {}
 
-        self.assertEqual(Path(selected), cover_path.resolve())
+            def fake_run(cmd, **kwargs):
+                captured["cmd"] = cmd
+                source = Path(cmd[cmd.index("--out") + 1])
+                source.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("RGB", (3200, 1600), color=(23, 45, 67)).save(source)
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+            with patch.object(wechat_publisher, "BASE_DIR", root), patch(
+                "subprocess.run",
+                side_effect=fake_run,
+            ):
+                selected = wechat_publisher.create_ai_cover("Title", article)
+            cmd = captured["cmd"]
+            self.assertEqual(cmd[cmd.index("--aspect-ratio") + 1], "21:9")
+            self.assertEqual(cmd[cmd.index("--image-size") + 1], "4K")
+            prompt = cmd[cmd.index("--prompt") + 1]
+            self.assertIn("任何可见文字", prompt)
+            self.assertIn("1920x1080", prompt)
+            self.assertIn("1600x800", prompt)
+            self.assertEqual(Path(selected).name, "cover.png")
+            self.assertEqual(validate_cover(selected), Path(selected).resolve())
+
+    def test_select_cover_for_path_uses_publication_package_cover(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.png"
+            cover = root / "assets" / "article-1" / "cover.png"
+            source.parent.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (3200, 1600), color=(23, 45, 67)).save(source)
+            from ordo_engine.assignment.cover_contract import normalize_cover_source
+
+            normalize_cover_source(source, cover)
+            relative = "assets/article-1/cover.png"
+            platform_lines = "".join(
+                f"  {platform}: {relative}\n"
+                for platform in ("wechat", "zhihu", "toutiao", "yidian", "bilibili", "jianshu")
+            )
+            article = root / "article.md"
+            article.write_text(
+                f"---\ncover: {relative}\nplatform_covers:\n{platform_lines}---\n# Title\n",
+                encoding="utf-8",
+            )
+
+            selected = wechat_publisher.select_cover_for_path(article, title="Title")
+
+        self.assertEqual(Path(selected), cover.resolve())
 
 
 if __name__ == "__main__":

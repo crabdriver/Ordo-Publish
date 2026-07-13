@@ -57,3 +57,9 @@ docs/superpowers/
 scripts/run_real_publish_*.sh
 scripts/run_real_publish_*.py
 scripts/setup_ssh_key.py
+
+# Local runtime data (browser login profiles, run state) — never commit
+data/
+
+# Local launchd config (machine-specific absolute paths) — never commit
+launchd/

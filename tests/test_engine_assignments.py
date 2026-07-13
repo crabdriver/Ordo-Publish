@@ -42,6 +42,21 @@ class ThemePoolScanTests(unittest.TestCase):
             pool = scan_theme_pool(root)
             self.assertEqual([e.theme_id for e in pool], ["sspai"])
 
+    def test_gzh_design_themes_are_registered(self):
+        root = Path(__file__).resolve().parents[1] / "themes"
+        pool = scan_theme_pool(root)
+        ids = {e.theme_id for e in pool}
+        self.assertTrue(
+            {
+                "gzh-moyu-green",
+                "gzh-red-white",
+                "gzh-graphite-minimal",
+                "gzh-zen-whitespace",
+                "gzh-moyu-ticket",
+                "gzh-olive-journal",
+            }.issubset(ids)
+        )
+
 
 class TemplateAssignmentTests(unittest.TestCase):
     def test_default_mode_assigns_theme_per_article(self):
@@ -131,7 +146,7 @@ class CoverAssignmentTests(unittest.TestCase):
             )
             self.assertEqual(COVER_PLATFORMS, tuple(sorted(COVER_PLATFORMS)))
 
-    def test_same_article_different_platforms_uses_same_cover(self):
+    def test_same_article_reuses_one_cover_for_every_platform(self):
         with tempfile.TemporaryDirectory() as tmp:
             cdir = Path(tmp) / "covers"
             cdir.mkdir()

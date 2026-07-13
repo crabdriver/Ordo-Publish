@@ -93,7 +93,6 @@ def assign_covers(
         pick_pool = prefer if prefer else candidates
         choice = pick_pool[rng.randrange(len(pick_pool))]
         used_globally.add(choice)
-
         for platform in platforms_cover:
             out.append(
                 CoverAssignment(

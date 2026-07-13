@@ -109,27 +109,21 @@ cp config.example.json config.json
 }
 ```
 
-## 随机主题与封面
+## 随机主题与统一封面
 
 默认发布行为：
 
 - 微信主题：默认随机；如需固定，使用 `--wechat-theme-mode fixed --wechat-theme chinese`
-- 封面：默认从 `covers/` 封面池随机分配，并尽量避开最近使用记录
+- 封面：只使用 `ordo-scribe` 发布包里的 `assets/<article_id>/cover.png`，六个平台共用同一张图
+- 文件必须是 PNG、sRGB、精确 `2538x1080`、`2.35:1`，不超过 `5 MB`
+- 中央 `1920x1080` 是 16:9 安全区，中央约 `1600x800` 是核心安全区；左右各 `309 px` 只放可裁剪背景，核心主体距左右边缘至少 `350 px`
+- 禁止标题、Logo、水印及任何可见文字；禁止放大低分辨率旧图，只允许从更大源图裁切和降采样
 - 支持封面的目标平台：微信、知乎、头条号、一点号、B站专栏
 - `--cover-mode force_off` 会跳过封面设置
-- `--cover-mode force_on` 会在缺少可用封面时尽早失败
-- `--cover PATH` 会对本轮任务使用指定封面
+- `--cover-mode force_on` 会在缺少合格统一封面时尽早失败
+- `--cover PATH` 只接受符合上述契约且文件名为 `cover.png` 的手动封面
 
-封面池目录可在 `config.json` 里设置：
-
-```json
-{
-  "assignment": {
-    "cover_dir": "covers",
-    "cover_repeat_window": 8
-  }
-}
-```
+旧 `covers/` 封面池不再作为当前发布主流程的默认来源。发布前会严格校验格式、尺寸、色彩和文件大小，不合格时直接阻止，不会自动拉伸或换图。
 
 ## 快速开始
 
@@ -224,7 +218,7 @@ python3 reply_comments.py --dry-run
 - 自动补开缺失平台标签页
 - 复用固定页面目标
 - 在正式执行前做预检
-- 从本地封面池为支持平台随机分配封面
+- 使用发布包封面，缺省时再从本地封面池为支持平台分配封面
 - 优先连接 Ordo 托管浏览器实例，再回退到现有系统 Chrome / `DevToolsActivePort`
 
 真实 smoke 与功能冻结记录：

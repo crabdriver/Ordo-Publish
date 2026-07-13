@@ -17,7 +17,7 @@ YIDIAN_MATCH = "mp.yidianzixun.com"
 YIDIAN_EDITOR_URL = "https://mp.yidianzixun.com/#/Writing/articleEditor"
 YIDIAN_COVER_FILE_INPUT = "input.upload-input"
 YIDIAN_SINGLE_COVER_TEXT = "单图"
-YIDIAN_NO_DECLARATION = "无需声明"
+YIDIAN_PERSONAL_OPINION = "个人观点，仅供参考"
 YIDIAN_AI_DECLARATION = "内容由AI生成"
 AI_KEYWORDS = ["AI创作", "AI辅助", "AIGC", "人工智能生成", "AI生成", "AI工具", "使用AI"]
 SMOKE_STATE_PREFIX = "[SMOKE_STATE] "
@@ -197,7 +197,10 @@ def take_screenshot(target_id, step):
 
 
 def verify_in_management_list(target_id, expected_title, is_draft=False):
-    management_url = "https://mp.yidianzixun.com/#/ArticleManual/original/publish"
+    if is_draft:
+        management_url = "https://mp.yidianzixun.com/#/ArticleManual/original/draft"
+    else:
+        management_url = "https://mp.yidianzixun.com/#/ArticleManual/original/review"
     print(f"[INFO] 正在跳转至一点号内容管理页面进行校验: {management_url}")
     run_cdp("nav", target_id, management_url)
     time.sleep(2)
@@ -366,9 +369,32 @@ def click_action(target_id, button_text):
   if (button.disabled) {{
     return "button-disabled";
   }}
-  button.click();
+  button.scrollIntoView({{ block: "center", inline: "center" }});
+  for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {{
+    button.dispatchEvent(new MouseEvent(type, {{ bubbles: true, cancelable: true, view: window }}));
+  }}
   return "clicked";
 }})()
+"""
+    return run_cdp("eval", target_id, expression)
+
+
+def set_latest_cover(target_id):
+    expression = """
+(() => {
+  const button = document.querySelector('.pre-img-item .setting-btn');
+  if (button) {
+    button.click();
+    return 'clicked';
+  }
+  const el = document.querySelector('.cover-crop-container');
+  if (!el || !el.__vue__) return 'missing';
+  const vue = el.__vue__;
+  const latestImg = vue.images[vue.images.length - 1];
+  if (!latestImg) return 'no_img';
+  vue.setCurrentCover(latestImg);
+  return 'called';
+})()
 """
     return run_cdp("eval", target_id, expression)
 
@@ -431,21 +457,8 @@ def apply_cover(target_id, cover_path):
         raise RuntimeError("一点号封面上传超时，未能成功上传封面图")
 
     # 5. 一点号上传后只把图片放入 images，必须显式设置为当前封面。
-    set_current_cover_expr = """
-(() => {
-  const el = document.querySelector('.cover-crop-container');
-  if (!el || !el.__vue__) return 'missing';
-  const vue = el.__vue__;
-  const latestImg = vue.images[vue.images.length - 1];
-  if (latestImg) {
-    vue.setCurrentCover(latestImg);
-    return 'called';
-  }
-  return 'no_img';
-})()
-"""
-    set_res = run_cdp("eval", target_id, set_current_cover_expr)
-    if set_res != "called":
+    set_res = set_latest_cover(target_id)
+    if set_res not in {"clicked", "called"}:
         raise RuntimeError(f"无法调用一点号 Vue 封面设置函数: {set_res}")
 
     print("[INFO] 等待一点号封面设置同步...")
@@ -569,7 +582,9 @@ def ensure_content_statement(target_id, option_text):
         "  const normalize = (text) => (text || '').replace(/\\s+/g, '');"
         "  const selectors = '.content-statement-container .item, .content-statement-container .text, .content-claim label, .content-claim .item, label, .item, [role=radio], [role=checkbox], span, div';"
         "  const nodes = Array.from(document.querySelectorAll(selectors));"
-        "  const target = nodes.find(node => normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || '') === normalize(targetText));"
+        "  const target = nodes.map(node => ({node, text: normalize(node.innerText || node.textContent || node.getAttribute('aria-label') || '')}))"
+        "    .filter(({text}) => text === normalize(targetText) || text.includes(normalize(targetText)))"
+        "    .sort((a, b) => a.text.length - b.text.length)[0]?.node;"
         "  if (!target) return JSON.stringify({found: false});"
         "  const control = target.closest('.item, label, [role=radio], [role=checkbox]') || target;"
         "  const readChecked = () => !!("
@@ -723,8 +738,8 @@ def main():
             page_state = "ai_declared"
         else:
             smoke_step = "clear_ai_declaration"
-            clear_result = ensure_content_statement(target_id, YIDIAN_NO_DECLARATION)
-            print(f"[INFO] 已切换一点号内容声明为无需声明: {clear_result}")
+            clear_result = ensure_content_statement(target_id, YIDIAN_PERSONAL_OPINION)
+            print(f"[INFO] 已切换一点号内容声明为个人观点，仅供参考: {clear_result}")
         take_screenshot(target_id, "ai_declaration")
 
         smoke_step = "apply_cover"

@@ -14,6 +14,8 @@ class PublishConsoleQueueTests(unittest.TestCase):
             mode="publish",
             wechat_theme="chinese",
             no_auto_launch=True,
+            cover_mode="force_off",
+            cover=None,
         )
 
     def _make_bundle(self, path):

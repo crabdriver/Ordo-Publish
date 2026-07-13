@@ -216,6 +216,10 @@ def ensure_editor_ready(target_id):
         target_id,
         """
 (() => {
+  const isVisible = (el) => {
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0 && window.getComputedStyle(el).display !== 'none';
+  };
   const titleEl = Array.from(document.querySelectorAll('textarea[placeholder*="标题"], input[placeholder*="标题"]'))
     .find(el => isVisible(el));
   const editor = document.querySelector('.public-DraftEditor-content, .ProseMirror, [data-lexical-editor="true"], [contenteditable="true"]');

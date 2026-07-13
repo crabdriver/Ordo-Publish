@@ -921,6 +921,15 @@ async function main() {
     return;
   }
 
+  if (command === "closebrowser") {
+    const browserWsUrl = await resolveBrowserWsUrl();
+    const cdp = new CDP();
+    await cdp.connect(browserWsUrl);
+    await cdp.send("Browser.close");
+    cdp.close();
+    return;
+  }
+
   if (command === "warmall") {
     const result = await sendBrokerCommand({ cmd: "warmall" });
     if (result) {
@@ -972,7 +981,7 @@ async function main() {
   if (
     !["nav", "eval", "click", "clickxy", "type", "pastehtml", "setfile", "setfile_intercept", "html", "shot", "screenshot", "snap", "snapshot"].includes(command)
   ) {
-    throw new Error("Usage: live_cdp.mjs <list|warm|warmall|nav|eval|click|clickxy|type|pastehtml|setfile|setfile_intercept|html|shot|snap|stop> ...");
+    throw new Error("Usage: live_cdp.mjs <list|warm|warmall|nav|eval|click|clickxy|type|pastehtml|setfile|setfile_intercept|html|shot|snap|stop|closebrowser> ...");
   }
 
   const targetId = await resolveFullTargetId(args[0]);

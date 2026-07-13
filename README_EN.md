@@ -105,22 +105,16 @@ Override in `config.json`:
 Default publishing behavior:
 
 - WeChat theme: random by default; use `--wechat-theme-mode fixed --wechat-theme chinese` to pin it
-- Cover: random from `covers/`, with recent-history avoidance where possible
+- Cover: use only `assets/<article_id>/cover.png` from the `ordo-scribe` publication package; all six platforms use the same file
+- The file must be PNG, embedded sRGB, exactly `2538x1080` at `2.35:1`, and no larger than `5 MB`
+- The centered `1920x1080` region is the 16:9 safe area; the centered `1600x800` region is the core safe area; each `309 px` side margin is crop-safe, and the main subject stays at least `350 px` from either edge
+- No title, logo, watermark, numbers, letters, or any visible text; never upscale a low-resolution image, and only crop/downsample a larger source
 - Cover-capable platforms: WeChat, Zhihu, Toutiao, Yidian, Bilibili
 - `--cover-mode force_off` skips cover setup
-- `--cover-mode force_on` fails early when no usable cover exists
-- `--cover PATH` uses a manual cover for the current run
+- `--cover-mode force_on` fails early when the canonical cover is missing or invalid
+- `--cover PATH` accepts only a compliant file named `cover.png`
 
-Cover pool config:
-
-```json
-{
-  "assignment": {
-    "cover_dir": "covers",
-    "cover_repeat_window": 8
-  }
-}
-```
+The legacy `covers/` pool is no longer the default publication path. Preflight rejects noncompliant covers and never stretches or swaps them automatically.
 
 ## Quick Start
 
@@ -198,7 +192,7 @@ Recommended flow:
 4. Start with `--mode draft`
 5. Switch to `--mode publish`
 
-The main entry tries to connect to Chrome, open missing tabs, reuse bound targets, run preflight checks, assign random covers for supported platforms, and then run each platform adapter.
+The main entry tries to connect to Chrome, open missing tabs, reuse bound targets, run preflight checks, use the publication-package cover first, fall back to random covers for supported platforms, and then run each platform adapter.
 
 Smoke records:
 

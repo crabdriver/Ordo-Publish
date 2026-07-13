@@ -1,6 +1,36 @@
 from pathlib import Path
 
-from ordo_engine.platforms.registry import build_platform_registry
+from ordo_engine.platforms.registry import build_platform_registry, _resolve_engine_type
+from ordo_engine.run_state import article_key, is_done, mark_done
+from ordo_engine.platforms.playwright.engine import PlaywrightEngine
+
+
+def _synthetic_skip(platform, article_path, mode):
+    """幂等跳过时构造一条与正常结果结构兼容的记录"""
+    return {
+        "platform": platform,
+        "article": str(article_path),
+        "returncode": 0,
+        "status": "skipped",
+        "page_state": "skipped",
+        "mode": mode,
+        "summary": "已完成，按幂等策略跳过",
+        "stage": "publish",
+        "current_url": "",
+        "smoke_step": "skipped",
+        "retryable": False,
+        "error_type": "duplicate_or_skipped",
+        "stdout": "",
+        "stderr": "",
+        "script": "",
+        "article_id": None,
+        "theme_name": None,
+        "template_mode": None,
+        "cover_path": None,
+        "cover_mode": None,
+        "ai_declaration_mode": None,
+        "scheduled_publish_at": None,
+    }
 
 _CONTEXT_PAYLOAD_KEYS = (
     "theme_name",
@@ -78,55 +108,103 @@ def run_publish_pipeline(
     results = []
     exit_code = 0
 
-    for article_path in article_paths:
-        for platform in platforms:
-            theme_name = None
-            cover_path = None
-            template_mode = None
-            article_id = None
-            cover_mode = None
-            ai_declaration_mode = None
-            scheduled_publish_at = None
-
-            if context_resolver:
-                blob = context_resolver(article_path, platform)
-                if blob:
-                    theme_name = blob.get("theme_name")
-                    cover_path = blob.get("cover_path")
-                    template_mode = blob.get("template_mode")
-                    article_id = blob.get("article_id")
-                    cover_mode = blob.get("cover_mode")
-                    ai_declaration_mode = blob.get("ai_declaration_mode")
-                    scheduled_publish_at = blob.get("scheduled_publish_at")
-
-            if platform == "wechat" and theme_resolver and theme_name is None:
-                theme_name = theme_resolver(article_path)
-
-            result = run_platform_task(
-                base_dir=base_dir,
-                platform=platform,
-                markdown_file=str(article_path),
-                mode=args.mode,
-                theme_name=theme_name,
-                cover_path=cover_path,
-                template_mode=template_mode,
-                article_id=article_id,
-                cover_mode=cover_mode,
-                ai_declaration_mode=ai_declaration_mode,
-                scheduled_publish_at=scheduled_publish_at,
-                registry=registry,
+    # ── 共享引擎（单 context 多 tab）：仅 standalone 浏览器模式启用 ──
+    # 一次启动一个独立 Chrome context，所有浏览器平台复用，
+    # 既省去每个平台冷启动开销，也消除多平台共用 profile 时的 SingletonLock 碰撞。
+    shared_engine = None
+    engine_type = _resolve_engine_type(Path(base_dir))
+    use_shared = engine_type in ("standalone", "playwright")
+    if use_shared:
+        try:
+            shared_engine = PlaywrightEngine(
+                mode="standalone",
+                headless=not getattr(args, "headed", False),
             )
-            result["article"] = str(article_path)
-            results.append(result)
+            shared_engine.connect()
+            for adapter in registry.values():
+                if hasattr(adapter, "set_shared_engine"):
+                    adapter.set_shared_engine(shared_engine)
+            print("[pipeline] 已启用共享引擎（单 context 多 tab）")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[WARN] 共享引擎启动失败，回退为每平台独立启动: {exc}")
+            if shared_engine is not None:
+                try:
+                    shared_engine.close()
+                except Exception:
+                    pass
+            shared_engine = None
+            for adapter in registry.values():
+                if hasattr(adapter, "set_shared_engine"):
+                    adapter.set_shared_engine(None)
 
-            if append_record:
-                append_record(result)
-            if printer:
-                printer(result)
+    try:
+        for article_path in article_paths:
+            akey = article_key(article_path)
+            for platform in platforms:
+                theme_name = None
+                cover_path = None
+                template_mode = None
+                article_id = None
+                cover_mode = None
+                ai_declaration_mode = None
+                scheduled_publish_at = None
 
-            if result["returncode"] != 0:
-                exit_code = 1
-                if not getattr(args, "continue_on_error", False):
-                    return results, exit_code
+                if context_resolver:
+                    blob = context_resolver(article_path, platform)
+                    if blob:
+                        theme_name = blob.get("theme_name")
+                        cover_path = blob.get("cover_path")
+                        template_mode = blob.get("template_mode")
+                        article_id = blob.get("article_id")
+                        cover_mode = blob.get("cover_mode")
+                        ai_declaration_mode = blob.get("ai_declaration_mode")
+                        scheduled_publish_at = blob.get("scheduled_publish_at")
+
+                if platform == "wechat" and theme_resolver and theme_name is None:
+                    theme_name = theme_resolver(article_path)
+
+                # ── 幂等：已完成则跳过，避免重跑堆积重复草稿 ──
+                if is_done(akey, platform, args.mode):
+                    print(f"[SKIP] {platform} 《{Path(article_path).name}》已完成，跳过（幂等）")
+                    results.append(_synthetic_skip(platform, article_path, args.mode))
+                    continue
+
+                result = run_platform_task(
+                    base_dir=base_dir,
+                    platform=platform,
+                    markdown_file=str(article_path),
+                    mode=args.mode,
+                    theme_name=theme_name,
+                    cover_path=cover_path,
+                    template_mode=template_mode,
+                    article_id=article_id,
+                    cover_mode=cover_mode,
+                    ai_declaration_mode=ai_declaration_mode,
+                    scheduled_publish_at=scheduled_publish_at,
+                    registry=registry,
+                )
+                result["article"] = str(article_path)
+                results.append(result)
+
+                # ── 成功后记录幂等状态，重跑不再重复 ──
+                if result["returncode"] == 0:
+                    final_status = result.get("page_state") or result.get("status") or "draft_only"
+                    mark_done(akey, platform, final_status, args.mode, result.get("current_url", ""))
+
+                if append_record:
+                    append_record(result)
+                if printer:
+                    printer(result)
+
+                if result["returncode"] != 0:
+                    exit_code = 1
+                    if not getattr(args, "continue_on_error", False):
+                        return results, exit_code
+    finally:
+        if shared_engine is not None:
+            try:
+                shared_engine.close()
+            except Exception:
+                pass
 
     return results, exit_code

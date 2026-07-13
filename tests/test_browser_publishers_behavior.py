@@ -9,6 +9,13 @@ import zhihu_publisher
 
 
 class BrowserPublisherBehaviorTests(unittest.TestCase):
+    def test_yidian_sets_uploaded_cover_via_visible_button(self):
+        with patch.object(yidian_publisher, "run_cdp", return_value="clicked") as run:
+            self.assertEqual(yidian_publisher.set_latest_cover("target-1"), "clicked")
+
+        expression = run.call_args.args[2]
+        self.assertIn(".pre-img-item .setting-btn", expression)
+
     def test_zhihu_ai_declaration_matches_live_copy(self):
         self.assertEqual(
             zhihu_publisher.normalize_ui_text(zhihu_publisher.ZHIHU_AI_DECLARATION),
@@ -81,6 +88,34 @@ class BrowserPublisherBehaviorTests(unittest.TestCase):
 
         self.assertEqual(result, "clicked")
         mocked_xy.assert_called_once_with("target-1", "确认发布")
+
+    def test_yidian_publish_verification_checks_review_list(self):
+        with patch.object(yidian_publisher, "run_cdp", return_value="ok") as mocked_cdp, patch.object(
+            yidian_publisher,
+            "wait_until",
+            return_value=True,
+        ), patch.object(yidian_publisher, "take_screenshot"), patch.object(yidian_publisher.time, "sleep"):
+            yidian_publisher.verify_in_management_list("target-1", "标题", is_draft=False)
+
+        mocked_cdp.assert_any_call(
+            "nav",
+            "target-1",
+            "https://mp.yidianzixun.com/#/ArticleManual/original/review",
+        )
+
+    def test_yidian_draft_verification_checks_draft_list(self):
+        with patch.object(yidian_publisher, "run_cdp", return_value="clicked") as mocked_cdp, patch.object(
+            yidian_publisher,
+            "wait_until",
+            return_value=True,
+        ), patch.object(yidian_publisher, "take_screenshot"), patch.object(yidian_publisher.time, "sleep"):
+            yidian_publisher.verify_in_management_list("target-1", "标题", is_draft=True)
+
+        mocked_cdp.assert_any_call(
+            "nav",
+            "target-1",
+            "https://mp.yidianzixun.com/#/ArticleManual/original/draft",
+        )
 
     def test_toutiao_detect_publish_limit_matches_daily_cap_copy(self):
         with patch.object(
@@ -206,7 +241,7 @@ class BrowserPublisherBehaviorTests(unittest.TestCase):
         self.assertEqual(args[0], "target-1")
         self.assertIn("cover-item", args[1])
 
-    def test_yidian_ensure_content_statement_supports_no_statement(self):
+    def test_yidian_ensure_content_statement_supports_personal_opinion(self):
         outputs = iter(
             [
                 json.dumps(
@@ -214,7 +249,7 @@ class BrowserPublisherBehaviorTests(unittest.TestCase):
                         "found": True,
                         "checked": False,
                         "already": False,
-                        "text": "无需声明",
+                        "text": "个人观点，仅供参考",
                     },
                     ensure_ascii=False,
                 ),
@@ -223,7 +258,7 @@ class BrowserPublisherBehaviorTests(unittest.TestCase):
                         "found": True,
                         "checked": True,
                         "already": False,
-                        "text": "无需声明",
+                        "text": "个人观点，仅供参考",
                     },
                     ensure_ascii=False,
                 ),
@@ -233,7 +268,7 @@ class BrowserPublisherBehaviorTests(unittest.TestCase):
         with patch.object(yidian_publisher, "run_cdp", side_effect=lambda *_args: next(outputs)), patch.object(
             yidian_publisher.time, "sleep", return_value=None
         ):
-            result = yidian_publisher.ensure_content_statement("target-1", "无需声明")
+            result = yidian_publisher.ensure_content_statement("target-1", "个人观点，仅供参考")
 
         self.assertTrue(result["checked"])
 
@@ -277,7 +312,7 @@ class BrowserPublisherBehaviorTests(unittest.TestCase):
         ):
             yidian_publisher.main()
 
-        mocked_statement.assert_called_once_with("target-1", "无需声明")
+        mocked_statement.assert_called_once_with("target-1", "个人观点，仅供参考")
         mocked_cover.assert_called_once_with("target-1")
         mocked_wait_cover.assert_called_once_with("target-1")
 

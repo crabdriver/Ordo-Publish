@@ -1,0 +1,329 @@
+{
+  "name": "公众号·留白禅意",
+  "description": "墨绿、低饱和、宽松留白，适合禅意冥想、极简生活、深度随笔（移植自 isjiamu/gzh-design-skill 的主题色板与排版气质，适配 Ordo 现有 JSON 主题引擎）",
+  "colors": {
+    "primary": "#2F3A34",
+    "accent": "#4A5D52",
+    "background": "#ffffff",
+    "blockquote_bg": "#F4F7F4",
+    "code_bg": "#F6F4EF",
+    "hr_color": "#4A5D52",
+    "footnote_bg": "#ffffff"
+  },
+  "styles": {
+    "wrapper": {
+      "background_color": "#ffffff",
+      "padding": "16px"
+    },
+    "h1": {
+      "font_size": "29px",
+      "font_weight": "700",
+      "color": "#4A5D52",
+      "line_height": "1.3",
+      "letter_spacing": "-0.02em",
+      "padding": "0 0 10px",
+      "border_bottom": "2px solid #000000",
+      "margin_top": "36px",
+      "margin_bottom": "18px"
+    },
+    "h2": {
+      "font_size": "22px",
+      "font_weight": "700",
+      "color": "#4A5D52",
+      "line_height": "1.45",
+      "padding_left": "12px",
+      "border_left": "3px solid #000000",
+      "margin_top": "44px",
+      "margin_bottom": "24px"
+    },
+    "h3": {
+      "font_size": "20px",
+      "font_weight": "600",
+      "color": "#4A5D52",
+      "line_height": "1.45",
+      "padding_bottom": "6px",
+      "margin_top": "44px",
+      "margin_bottom": "24px"
+    },
+    "p": {
+      "font_size": "15px",
+      "color": "#2F3A34",
+      "line_height": "1.85",
+      "margin_top": "0",
+      "margin_bottom": "20px",
+      "letter_spacing": "0.5px",
+      "text_align": "left"
+    },
+    "blockquote": {
+      "border_left": "4px solid #4A5D52",
+      "background": "#F4F7F4",
+      "padding": "16px 18px",
+      "margin_top": "24px",
+      "margin_bottom": "24px",
+      "border_radius": "0",
+      "font_size": "16px",
+      "color": "#2F3A34",
+      "line_height": "1.8"
+    },
+    "blockquote_p": {
+      "font_size": "16px",
+      "color": "#2F3A34",
+      "line_height": "1.8",
+      "margin_bottom": "0",
+      "background": "transparent"
+    },
+    "strong": {
+      "font_weight": "700",
+      "color": "#4A5D52"
+    },
+    "em": {
+      "font_style": "italic",
+      "color": "#555555"
+    },
+    "a": {
+      "color": "#4A5D52",
+      "text_decoration": "underline"
+    },
+    "img": {
+      "max_width": "100%",
+      "border_radius": "2px",
+      "display": "block",
+      "box_shadow": "0 2px 8px rgba(0,0,0,0.1)"
+    },
+    "img_wrapper": {
+      "background": "#ffffff",
+      "border_radius": "2px",
+      "padding": "4px",
+      "margin_top": "10px",
+      "margin_bottom": "10px"
+    },
+    "hr": {
+      "margin_top": "38px",
+      "margin_bottom": "38px",
+      "height": "1px",
+      "background": "linear-gradient(to right, transparent, #4A5D52, transparent)",
+      "border": "none",
+      "width": "34%",
+      "margin_left": "auto",
+      "margin_right": "auto"
+    },
+    "code": {
+      "background": "rgba(74,93,82,0.08)",
+      "padding": "3px 6px",
+      "border_radius": "2px",
+      "font_size": "13px",
+      "color": "#4A5D52",
+      "font_family": "'SF Mono', Consolas, monospace"
+    },
+    "code_block": {
+      "background": "#f5f5f5",
+      "border_radius": "2px",
+      "margin_top": "24px",
+      "margin_bottom": "24px",
+      "overflow": "hidden",
+      "border": "1px solid #e0e0e0"
+    },
+    "code_header": {
+      "display": "flex",
+      "align_items": "center",
+      "height": "36px",
+      "padding": "0 12px",
+      "background": "#e8e8e8"
+    },
+    "pre": {
+      "background": "#f5f5f5",
+      "color": "#000000",
+      "padding": "20px",
+      "border_radius": "0",
+      "overflow_x": "auto",
+      "margin_top": "0",
+      "margin_bottom": "0",
+      "font_size": "13px",
+      "line_height": "1.5",
+      "white_space": "pre-wrap",
+      "word_wrap": "break-word",
+      "word_break": "break-all"
+    },
+    "pre_code": {
+      "background": "none",
+      "padding": "0",
+      "color": "#000000",
+      "font_size": "13px",
+      "font_family": "'SF Mono', Consolas, monospace"
+    },
+    "table": {
+      "width": "100%",
+      "border_collapse": "separate",
+      "margin_top": "24px",
+      "margin_bottom": "24px",
+      "font_size": "15px",
+      "border_spacing": "0",
+      "border_radius": "0",
+      "overflow": "hidden"
+    },
+    "th": {
+      "background": "#f5f5f5",
+      "padding": "12px 16px",
+      "border": "1px solid #cccccc",
+      "text_align": "left",
+      "font_weight": "700",
+      "color": "#000000"
+    },
+    "td": {
+      "padding": "12px 16px",
+      "border": "1px solid #cccccc",
+      "color": "#111111"
+    },
+    "list_item_bullet": {
+      "color": "#000000",
+      "margin_right": "8px",
+      "font_weight": "bold"
+    },
+    "ol_item_bullet": {
+      "display": "inline-flex",
+      "align_items": "center",
+      "justify_content": "center",
+      "width": "22px",
+      "height": "22px",
+      "min_width": "22px",
+      "background": "#f0f0f0",
+      "color": "#000000",
+      "border_radius": "50%",
+      "font_size": "13px",
+      "font_weight": "bold",
+      "margin_right": "10px",
+      "margin_top": "4px",
+      "border": "1px solid #cccccc"
+    },
+    "list_item_text": {
+      "font_size": "15px",
+      "color": "#111111",
+      "line_height": "1.8",
+      "letter_spacing": "0.5px"
+    },
+    "list_wrapper": {
+      "margin_top": "16px",
+      "margin_bottom": "16px"
+    },
+    "list_item_row": {
+      "display": "flex",
+      "margin_bottom": "8px",
+      "align_items": "flex-start"
+    },
+    "footnote_section": {
+      "margin_top": "32px",
+      "padding_top": "16px",
+      "border_top": "1px solid #cccccc"
+    },
+    "footnote_title": {
+      "font_size": "14px",
+      "font_weight": "bold",
+      "color": "#999999",
+      "margin_bottom": "12px"
+    },
+    "footnote_item": {
+      "font_size": "12px",
+      "color": "#999999",
+      "margin_bottom": "6px",
+      "line_height": "1.6",
+      "word_break": "break-all"
+    },
+    "footnote_sup": {
+      "font_size": "12px",
+      "color": "#000000",
+      "vertical_align": "super",
+      "margin_left": "2px"
+    },
+    "callout": {
+      "background": "#fafafa",
+      "border_left": "3px solid #000000",
+      "padding": "16px",
+      "margin_top": "16px",
+      "margin_bottom": "16px",
+      "border_radius": "0"
+    },
+    "callout_title": {
+      "font_weight": "700",
+      "color": "#000000",
+      "margin_bottom": "8px",
+      "font_size": "15px"
+    },
+    "callout_content": {
+      "font_size": "14px",
+      "color": "#111111",
+      "line_height": "1.8",
+      "letter_spacing": "0.3px"
+    },
+    "h4": {
+      "font_size": "19px",
+      "font_weight": "bold",
+      "color": "#222222",
+      "border_left": "2px solid #000000",
+      "padding": "0 0 0 8px",
+      "margin_top": "24px",
+      "margin_bottom": "8px",
+      "line_height": "1.3"
+    },
+    "h5": {
+      "font_size": "18px",
+      "font_weight": "bold",
+      "color": "#555555",
+      "padding": "0",
+      "margin_top": "20px",
+      "margin_bottom": "6px",
+      "line_height": "1.3"
+    },
+    "h6": {
+      "font_size": "15px",
+      "font_weight": "bold",
+      "color": "#888888",
+      "padding": "0",
+      "margin_top": "16px",
+      "margin_bottom": "6px",
+      "line_height": "1.3"
+    }
+  },
+  "dark_mode": {
+    "wrapper": {
+      "bgcolor": "#111111"
+    },
+    "h1": {
+      "color": "#e0e0e0"
+    },
+    "h2": {
+      "color": "#e0e0e0"
+    },
+    "code_block": {
+      "bgcolor": "#1a1a1a"
+    },
+    "code_header": {
+      "bgcolor": "#0a0a0a"
+    },
+    "pre": {
+      "bgcolor": "#1a1a1a",
+      "color": "#d4d4d4"
+    },
+    "pre_code": {
+      "color": "#d4d4d4"
+    },
+    "code": {
+      "bgcolor": "#2a2a2a",
+      "color": "#d4d4d4"
+    },
+    "blockquote": {
+      "bgcolor": "#1a1a1a"
+    },
+    "img_wrapper": {
+      "bgcolor": "#1a1a1a"
+    },
+    "th": {
+      "bgcolor": "#1a1a1a"
+    },
+    "callout": {
+      "bgcolor": "#1a1a1a"
+    },
+    "ol_item_bullet": {
+      "bgcolor": "#2a2a2a"
+    }
+  }
+}
