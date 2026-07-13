@@ -151,6 +151,14 @@ class EnginePipelineTests(unittest.TestCase):
             engine = MagicMock(base_dir=base_dir)
             engine_factory = MagicMock(return_value=engine)
 
+            def release(platform):
+                index = ("zhihu", "jianshu").index(platform)
+                page = ResultPublisher.pages[index]
+                page.close()
+                return page
+
+            engine.release_page_for_platform.side_effect = release
+
             results, exit_code = run_publish_pipeline(
                 base_dir=base_dir,
                 args=Namespace(mode="publish", continue_on_error=False, headed=False),
@@ -169,6 +177,74 @@ class EnginePipelineTests(unittest.TestCase):
         engine.close.assert_called_once_with()
         self.assertEqual(len(ResultPublisher.pages), 2)
         for page in ResultPublisher.pages:
+            page.close.assert_called_once_with()
+
+    def test_continue_on_error_releases_each_failed_platform_page(self):
+        class LeaseEngine:
+            def __init__(self):
+                self.base_dir = None
+                self.leases = {}
+                self.pages = []
+                self.closed = False
+
+            def connect(self):
+                pass
+
+            def get_page_for_platform(self, platform):
+                page = MagicMock(url=f"https://example.test/{platform}")
+                self.pages.append(page)
+                self.leases[platform] = page
+                return page
+
+            def release_page_for_platform(self, platform):
+                page = self.leases.pop(platform, None)
+                if page is not None:
+                    page.close()
+                return page
+
+            def close(self):
+                self.closed = True
+
+        def failing_publisher(platform):
+            class Publisher:
+                page = None
+
+                def __init__(self, engine):
+                    self.engine = engine
+
+                def publish(self, _article, _mode):
+                    self.engine.get_page_for_platform(platform)
+                    raise RuntimeError(f"{platform} selector failed")
+
+            return Publisher
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            engine = LeaseEngine()
+            engine.base_dir = base_dir
+            adapters = {
+                platform: PlaywrightPlatformAdapter(
+                    base_dir, platform, failing_publisher(platform)
+                )
+                for platform in ("zhihu", "jianshu")
+            }
+
+            results, exit_code = run_publish_pipeline(
+                base_dir=base_dir,
+                args=Namespace(mode="publish", continue_on_error=True, headed=False),
+                article_paths=[article],
+                platforms=["zhihu", "jianshu"],
+                registry=adapters,
+                engine_factory=MagicMock(return_value=engine),
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(engine.leases, {})
+        self.assertTrue(engine.closed)
+        for page in engine.pages:
             page.close.assert_called_once_with()
 
     def test_shared_engine_start_failure_aborts_browser_pipeline_without_fallback(self):

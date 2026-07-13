@@ -101,6 +101,7 @@ class PlaywrightEngine:
         self._playwright: Optional[Playwright] = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None  # standalone 模式的 context
+        self._platform_pages: Dict[str, Page] = {}
 
         # Standalone 模式参数
         if headless is None:
@@ -276,6 +277,7 @@ class PlaywrightEngine:
             for page in ctx.pages:
                 page_url = page.url or ""
                 if any(pattern in page_url for pattern in patterns):
+                    self._platform_pages[platform] = page
                     return page
 
         # No existing tab found — open new one
@@ -288,7 +290,19 @@ class PlaywrightEngine:
             ctx = contexts[0] if contexts else self.browser.new_context()
             page = ctx.new_page()
 
+        # goto/登录/选择器可抛错；必须先登记，确保 adapter finally 能释放。
+        self._platform_pages[platform] = page
         page.goto(editor_url, wait_until="domcontentloaded", timeout=30000)
+        return page
+
+    def release_page_for_platform(self, platform: str) -> Optional[Page]:
+        """释放平台 page lease。清理失败不覆盖原发布结果。"""
+        page = self._platform_pages.pop(platform, None)
+        if page is not None:
+            try:
+                page.close()
+            except Exception:
+                pass
         return page
 
     def screenshot(self, page: Page, platform: str, step: str) -> Optional[Path]:
@@ -310,6 +324,8 @@ class PlaywrightEngine:
         cdp 模式：仅断开连接（不关闭用户的浏览器）
         """
         if self._is_standalone:
+            for platform in list(self._platform_pages):
+                self.release_page_for_platform(platform)
             # 关闭所有页面
             if self._context:
                 try:

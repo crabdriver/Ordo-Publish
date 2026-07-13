@@ -109,8 +109,13 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
                 publisher = self.publisher_class(engine)
                 result = publisher.publish(article, prepared_context["mode"])
             finally:
+                leased_page = None
+                try:
+                    leased_page = engine.release_page_for_platform(self.platform)
+                except Exception:
+                    pass
                 page = getattr(publisher, "page", None)
-                if page is not None:
+                if page is not None and page is not leased_page:
                     try:
                         page.close()
                     except Exception:

@@ -48,6 +48,32 @@ class StubPublisher(PlaywrightBasePublisher):
 
 
 class TestPlaywrightEngine(unittest.TestCase):
+    def test_new_platform_page_is_leased_before_initial_navigation(self):
+        engine = PlaywrightEngine(base_dir=Path("/tmp/repo"), headless=False)
+        page = MagicMock(url="about:blank")
+        page.goto.side_effect = RuntimeError("goto failed")
+        context = MagicMock(pages=[])
+        context.new_page.return_value = page
+        engine._context = context
+
+        with self.assertRaisesRegex(RuntimeError, "goto failed"):
+            engine.get_page_for_platform("zhihu")
+
+        released = engine.release_page_for_platform("zhihu")
+        self.assertIs(released, page)
+        page.close.assert_called_once_with()
+
+    def test_reused_platform_page_is_released_after_later_failure(self):
+        engine = PlaywrightEngine(base_dir=Path("/tmp/repo"), headless=False)
+        page = MagicMock(url="https://zhuanlan.zhihu.com/write")
+        engine._context = MagicMock(pages=[page])
+
+        self.assertIs(engine.get_page_for_platform("zhihu"), page)
+        released = engine.release_page_for_platform("zhihu")
+
+        self.assertIs(released, page)
+        page.close.assert_called_once_with()
+
     def test_headless_missing_initialized_profile_fails_before_browser_start(self):
         with tempfile.TemporaryDirectory() as tmpdir, patch(
             "ordo_engine.platforms.playwright.engine.sync_playwright"
