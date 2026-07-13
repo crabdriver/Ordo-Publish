@@ -11,6 +11,7 @@ import markdown_utils
 from PIL import Image, ImageCms
 
 from ordo_engine.assignment.cover_contract import CoverContractError
+from ordo_engine.run_lock import run_lock
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "scripts" / "monitor_publish.py"
@@ -340,6 +341,67 @@ class MonitorPublishTests(unittest.TestCase):
                 todo = monitor_publish.scan_once(root)
 
             self.assertEqual(todo, [])
+
+    def test_scan_overlap_skips_before_queue_or_state_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / ".ordo" / "publish.lock"
+
+            with run_lock(lock_path), patch.object(
+                monitor_publish, "PUBLISH_LOCK_FILE", lock_path
+            ), patch.object(monitor_publish, "load_state") as load_state, patch.object(
+                monitor_publish, "list_articles"
+            ) as list_articles, patch.object(
+                monitor_publish, "require_vps_ready"
+            ) as preflight, patch.object(
+                monitor_publish, "publish_article"
+            ) as publish:
+                result = monitor_publish.scan_once(root)
+
+            self.assertEqual(result, "skipped_overlap")
+            load_state.assert_not_called()
+            list_articles.assert_not_called()
+            preflight.assert_not_called()
+            publish.assert_not_called()
+
+    def test_direct_article_overlap_skips_without_publishing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "第一课.md"
+            article.write_text("# 第一课", encoding="utf-8")
+            lock_path = root / ".ordo" / "publish.lock"
+
+            with run_lock(lock_path), patch.object(
+                monitor_publish, "PUBLISH_LOCK_FILE", lock_path
+            ), patch.object(monitor_publish, "publish_article") as publish:
+                result = monitor_publish.publish_article_once(article)
+
+            self.assertEqual(result, "skipped_overlap")
+            publish.assert_not_called()
+
+    def test_daemon_releases_lock_before_sleep(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / ".ordo" / "publish.lock"
+            sleep_checked = False
+
+            def stop_after_check(_interval):
+                nonlocal sleep_checked
+                with run_lock(lock_path):
+                    sleep_checked = True
+                raise StopIteration
+
+            with patch.object(
+                monitor_publish, "PUBLISH_LOCK_FILE", lock_path
+            ), patch.object(
+                monitor_publish, "load_state", return_value={"articles": {}}
+            ), patch.object(
+                monitor_publish, "list_articles", return_value=[]
+            ), patch.object(monitor_publish.time, "sleep", side_effect=stop_after_check):
+                with self.assertRaises(StopIteration):
+                    monitor_publish.run_daemon(root, interval=1)
+
+            self.assertTrue(sleep_checked)
 
 
 if __name__ == "__main__":

@@ -18,10 +18,12 @@ if str(BASE_DIR) not in sys.path:
 
 from ordo_engine.runner.version import verify_codebase_version
 from ordo_engine.assignment.cover_contract import resolve_publication_cover
+from ordo_engine.run_lock import RunAlreadyActive, run_lock
 
 DEFAULT_WATCH_DIR = Path("/Users/wizard/tiandidadao/润色")
 STATE_FILE = BASE_DIR / ".ordo" / "auto_publish_state.json"
 PUBLISH_RECORDS_FILE = BASE_DIR / "publish_records.csv"
+PUBLISH_LOCK_FILE = BASE_DIR / ".ordo" / "publish.lock"
 DEFAULT_VPS_HOST = "209.54.106.236"
 DEFAULT_VPS_USER = "root"
 DEFAULT_VPS_PATH = "/root/ordo-publish"
@@ -428,27 +430,47 @@ def publish_article(
     return "success" if success else "attempted"
 
 
+def publish_article_once(article: Path, **kwargs):
+    try:
+        with run_lock(PUBLISH_LOCK_FILE):
+            return publish_article(article, **kwargs)
+    except RunAlreadyActive:
+        print("[SKIP] 已有发表任务运行中，本轮跳过")
+        return "skipped_overlap"
+
+
 def scan_once(watch_dir: Path, *, force=False, dry_run=False, default_template_theme=None, default_wechat_theme=None):
-    state = load_state()
-    todo = []
-    for article in list_articles(watch_dir):
-        existing = merge_record_successes(state["articles"].get(article_key(article)), article)
-        if force or not existing or existing.get("status") != "success":
-            todo.append(article)
-    if not todo:
-        print("[INFO] 没有未处理文章")
-        return []
-    require_vps_ready()
-    for article in todo:
-        publish_article(
-            article,
-            force=force,
-            dry_run=dry_run,
-            state=state,
-            default_template_theme=default_template_theme,
-            default_wechat_theme=default_wechat_theme,
-        )
-    return todo
+    try:
+        with run_lock(PUBLISH_LOCK_FILE):
+            state = load_state()
+            todo = []
+            for article in list_articles(watch_dir):
+                existing = merge_record_successes(state["articles"].get(article_key(article)), article)
+                if force or not existing or existing.get("status") != "success":
+                    todo.append(article)
+            if not todo:
+                print("[INFO] 没有未处理文章")
+                return []
+            require_vps_ready()
+            for article in todo:
+                publish_article(
+                    article,
+                    force=force,
+                    dry_run=dry_run,
+                    state=state,
+                    default_template_theme=default_template_theme,
+                    default_wechat_theme=default_wechat_theme,
+                )
+            return todo
+    except RunAlreadyActive:
+        print("[SKIP] 已有发表任务运行中，本轮跳过")
+        return "skipped_overlap"
+
+
+def run_daemon(watch_dir: Path, *, interval=300, **kwargs):
+    while True:
+        scan_once(watch_dir, **kwargs)
+        time.sleep(interval)
 
 
 def main(argv=None):
@@ -465,26 +487,24 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.article:
-        publish_article(
+        return publish_article_once(
             args.article,
             force=args.force,
             dry_run=args.dry_run,
             default_template_theme=args.template_theme,
             default_wechat_theme=args.wechat_theme,
         )
-        return
     if args.daemon:
-        while True:
-            scan_once(
-                args.watch_dir,
-                force=args.force,
-                dry_run=args.dry_run,
-                default_template_theme=args.template_theme,
-                default_wechat_theme=args.wechat_theme,
-            )
-            time.sleep(args.interval)
+        return run_daemon(
+            args.watch_dir,
+            interval=args.interval,
+            force=args.force,
+            dry_run=args.dry_run,
+            default_template_theme=args.template_theme,
+            default_wechat_theme=args.wechat_theme,
+        )
     else:
-        scan_once(
+        return scan_once(
             args.watch_dir,
             force=args.force,
             dry_run=args.dry_run,
