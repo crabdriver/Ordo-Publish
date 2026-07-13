@@ -215,6 +215,40 @@ def test_explicit_alert_limit_is_retryable_nonzero(tmp_path):
     assert collected.retryable
 
 
+@pytest.mark.parametrize("limit_marker", ["达到发布上限", "发布上限", "请明天再来"])
+def test_explicit_limit_feedback_phrase_is_retryable_nonzero(tmp_path, limit_marker):
+    result = verify_result_common(
+        FakePage(feedback=["今日达到发布上限，请明天再来"]),
+        "测试平台",
+        "publish",
+        r"/article/\d+$",
+        ["发布成功"],
+        ["草稿已保存"],
+        [limit_marker],
+    )
+
+    assert result.status == "limit_reached"
+
+    article = tmp_path / "article.md"
+    article.write_text("# 标题\n正文", encoding="utf-8")
+
+    class ResultPublisher:
+        def __init__(self, _engine):
+            pass
+
+        def publish(self, _article, _mode):
+            return result
+
+    adapter = PlaywrightPlatformAdapter(tmp_path, "stub", ResultPublisher)
+    adapter.set_shared_engine(MagicMock())
+    process_result = adapter.publish(adapter.prepare(article, "publish"))
+    collected = adapter.collect_result(process_result, "publish")
+
+    assert process_result["returncode"] != 0
+    assert collected.status == "limit_reached"
+    assert collected.retryable
+
+
 def test_zhihu_management_navigation_without_title_is_unverified():
     page = FakePage(management_text="没有目标文章")
     publisher = ZhihuPlaywrightPublisher(MagicMock())

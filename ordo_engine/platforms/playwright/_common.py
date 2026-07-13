@@ -194,6 +194,12 @@ def _has_feedback_marker(feedback_text: str, markers: list) -> bool:
     return any(_normalize_title(marker) in lines for marker in markers)
 
 
+def _has_feedback_phrase(feedback_text: str, markers: list) -> bool:
+    lines = [_normalize_title(line) for line in feedback_text.splitlines() if _normalize_title(line)]
+    phrases = [_normalize_title(marker) for marker in markers if _normalize_title(marker)]
+    return any(phrase in line for phrase in phrases for line in lines)
+
+
 def verify_result_common(page: Page, platform: str, mode: str, published_url_pattern: str,
                           success_markers: list, draft_markers: list, limit_markers: list,
                           management_url: str = None, draft_management_url: str = None,
@@ -211,7 +217,7 @@ def verify_result_common(page: Page, platform: str, mode: str, published_url_pat
             )
 
     feedback_text = _feedback_text(page)
-    if _has_feedback_marker(feedback_text, limit_markers):
+    if _has_feedback_phrase(feedback_text, limit_markers):
         return PublishResult(
             platform=platform, status="limit_reached",
             current_url=current_url, page_state="limit_reached",
