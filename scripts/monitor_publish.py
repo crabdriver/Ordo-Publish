@@ -6,10 +6,12 @@ import argparse
 import csv
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +21,7 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 from ordo_engine.assignment.cover_contract import resolve_publication_cover
+from ordo_engine.results.publish_records import load_publish_records_at_path
 from ordo_engine.run_lock import RunAlreadyActive, run_lock
 
 DEFAULT_WATCH_DIR = Path("/Users/wizard/tiandidadao/润色")
@@ -37,7 +40,7 @@ TERMINAL_BY_MODE = {
 RATE_LIMIT_STATUSES = {"limit_reached", "rate_limited"}
 UNVERIFIED_STATUSES = {"submitted_unverified"}
 REQUIRED_RECORD_FIELDS = {
-    "article", "article_id", "platform", "mode", "status", "error_type", "returncode",
+    "run_id", "article", "article_id", "platform", "mode", "status", "error_type", "returncode",
 }
 
 # 兼容旧调用者；新命令会合并全部浏览器平台。
@@ -47,6 +50,10 @@ LOCAL_PUBLISH_PLATFORMS = "jianshu"
 
 
 class AutoPublishStateError(RuntimeError):
+    pass
+
+
+class AutoPublishRunError(RuntimeError):
     pass
 
 
@@ -163,16 +170,13 @@ def read_record_rows(records_path=None):
     path = Path(records_path or PUBLISH_RECORDS_FILE)
     if not path.exists():
         return []
-    if path.stat().st_size == 0:
-        raise RuntimeError(f"发布记录 CSV 为空: {path}")
     try:
-        with path.open("r", encoding="utf-8", newline="") as fp:
-            reader = csv.DictReader(fp)
-            fields = set(reader.fieldnames or ())
-            missing = REQUIRED_RECORD_FIELDS - fields
+        rows = load_publish_records_at_path(path, fail_on_empty=True)
+        for row in rows:
+            missing = REQUIRED_RECORD_FIELDS - set(row)
             if missing:
                 raise RuntimeError(f"发布记录 CSV 缺少字段 {sorted(missing)}: {path}")
-            return list(reader)
+        return rows
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
         raise RuntimeError(f"发布记录 CSV 不可读: {path}") from exc
 
@@ -242,6 +246,7 @@ def build_publish_cmd(
     article: Path, *, platforms: str, mode: str, remote: str = "local",
     cover=None, template_theme=None, wechat_theme=None, no_auto_launch=False,
     force_republish=False,
+    run_id=None,
 ):
     cmd = [
         sys.executable, str(BASE_DIR / "publish.py"), str(article),
@@ -258,6 +263,8 @@ def build_publish_cmd(
         cmd.append("--no-auto-launch")
     if force_republish:
         cmd.append("--force-republish")
+    if run_id:
+        cmd.extend(["--run-id", str(run_id)])
     return cmd
 
 
@@ -265,16 +272,47 @@ def run_cmd(cmd, *, dry_run=False, env=None, timeout=PUBLISH_TIMEOUT_SECONDS):
     print("[CMD] " + " ".join(cmd))
     if dry_run:
         return 0
-    return subprocess.run(cmd, cwd=str(BASE_DIR), env=env, timeout=timeout).returncode
+    process = subprocess.Popen(
+        cmd, cwd=str(BASE_DIR), env=env, start_new_session=True,
+    )
+    try:
+        return process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(process)
+        return 124
 
 
-def _new_command_outcomes(article, platforms, mode, row_offset, command_returncode):
-    rows = read_record_rows()[row_offset:]
+def _signal_process_group(process, sig):
+    try:
+        os.killpg(process.pid, sig)
+    except (AttributeError, OSError):
+        if sig == signal.SIGTERM:
+            process.terminate()
+        else:
+            process.kill()
+
+
+def _terminate_process_group(process, *, grace_seconds=5):
+    _signal_process_group(process, signal.SIGTERM)
+    try:
+        process.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        _signal_process_group(process, signal.SIGKILL)
+        try:
+            process.wait(timeout=grace_seconds)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def _new_command_outcomes(article, platforms, mode, run_id, command_returncode):
+    rows = read_record_rows()
     article_id = parse_frontmatter(article).get("article_id")
     latest = {}
     for row in rows:
         platform = (row.get("platform") or "").strip()
         if platform not in platforms or (row.get("mode") or "").strip() != mode:
+            continue
+        if (row.get("run_id") or "").strip() != run_id:
             continue
         if record_matches_article(row, article, article_id=article_id):
             latest[platform] = dict(row)
@@ -284,7 +322,8 @@ def _new_command_outcomes(article, platforms, mode, row_offset, command_returnco
         if row is None:
             outcomes[platform] = {
                 "mode": mode, "status": "unknown",
-                "error_type": "missing_publish_record", "returncode": command_returncode,
+                "error_type": "timeout" if command_returncode == 124 else "missing_publish_record",
+                "returncode": command_returncode,
             }
         else:
             outcomes[platform] = {
@@ -344,18 +383,20 @@ def publish_article(
 
     groups = []
     if WECHAT_PLATFORM in pending:
-        groups.append(([WECHAT_PLATFORM], "draft", build_publish_cmd(
+        run_id = str(uuid.uuid4())
+        groups.append(([WECHAT_PLATFORM], "draft", run_id, build_publish_cmd(
             article, platforms=WECHAT_PLATFORM, mode="draft", cover=cover,
-            wechat_theme=wechat_theme, force_republish=force,
+            wechat_theme=wechat_theme, force_republish=force, run_id=run_id,
         )))
     browser_pending = [p for p in BROWSER_PLATFORMS if p in pending]
     if browser_pending:
-        groups.append((browser_pending, "publish", build_publish_cmd(
+        run_id = str(uuid.uuid4())
+        groups.append((browser_pending, "publish", run_id, build_publish_cmd(
             article, platforms=",".join(browser_pending), mode="publish",
-            cover=cover, template_theme=template_theme, force_republish=force,
+            cover=cover, template_theme=template_theme, force_republish=force, run_id=run_id,
         )))
     if dry_run:
-        for _platforms, _mode, cmd in groups:
+        for _platforms, _mode, _run_id, cmd in groups:
             run_cmd(cmd, dry_run=True)
         print("[DRY-RUN] 未执行发布，未写状态")
         return "dry_run"
@@ -366,10 +407,9 @@ def publish_article(
     for platform in ALL_PLATFORMS:
         if platform not in pending:
             summary.skipped.append(platform)
-    for platforms, mode, cmd in groups:
-        row_offset = len(read_record_rows())
+    for platforms, mode, run_id, cmd in groups:
         returncode = run_cmd(cmd)
-        outcomes = _new_command_outcomes(article, platforms, mode, row_offset, returncode)
+        outcomes = _new_command_outcomes(article, platforms, mode, run_id, returncode)
         for platform, outcome in outcomes.items():
             platform_state[platform] = {**outcome, "updated_at": datetime.now().isoformat(timespec="seconds")}
             summary.add(
@@ -404,12 +444,18 @@ def scan_once(watch_dir: Path, *, force=False, dry_run=False, default_template_t
             if not todo:
                 print("[INFO] 没有未处理文章")
                 return []
+            failed_articles = []
             for article in todo:
-                publish_article(
+                result = publish_article(
                     article, force=force, dry_run=dry_run, state=state,
                     default_template_theme=default_template_theme,
                     default_wechat_theme=default_wechat_theme,
                 )
+                if result == "attempted":
+                    failed_articles.append(article)
+            if failed_articles:
+                names = ", ".join(item.name for item in failed_articles)
+                raise AutoPublishRunError(f"自动发表存在非终态结果: {names}")
             return todo
     except RunAlreadyActive:
         print("[SKIP] 已有发表任务运行中，本轮跳过")
@@ -443,11 +489,17 @@ def main(argv=None):
         "default_wechat_theme": args.wechat_theme,
     }
     if args.article:
-        return publish_article_once(args.article, **kwargs)
+        result = publish_article_once(args.article, **kwargs)
+        return 1 if result == "attempted" else 0
     if args.daemon:
         return run_daemon(args.watch_dir, interval=args.interval, **kwargs)
-    return scan_once(args.watch_dir, **kwargs)
+    try:
+        scan_once(args.watch_dir, **kwargs)
+    except AutoPublishRunError as exc:
+        print(f"[ERROR] {exc}")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -362,7 +362,9 @@ class EnginePipelineTests(unittest.TestCase):
             printed = []
             results, exit_code = run_publish_pipeline(
                 base_dir=base_dir,
-                args=Namespace(mode="publish", continue_on_error=False, headed=False),
+                args=Namespace(
+                    mode="publish", continue_on_error=False, headed=False, run_id="skip-run"
+                ),
                 article_paths=[article],
                 platforms=["zhihu"],
                 registry={"zhihu": adapter},
@@ -375,6 +377,7 @@ class EnginePipelineTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(results[0]["status"], "skipped_existing")
+        self.assertEqual(results[0]["run_id"], "skip-run")
         self.assertEqual(appended, results)
         self.assertEqual(printed, results)
 
@@ -403,6 +406,63 @@ class EnginePipelineTests(unittest.TestCase):
             self.assertEqual(results[0]["status"], "draft_only")
             self.assertTrue(is_done(identity, "wechat", "draft", state_file=state_file))
             self.assertTrue(is_done(identity, "wechat", "publish", state_file=state_file))
+
+    def test_force_preserves_terminal_when_context_resolution_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            identity = article_key(article)
+            state_file = state_file_for(base_dir)
+            mark_done(identity, "wechat", "draft_only", "draft", state_file=state_file)
+            with self.assertRaisesRegex(RuntimeError, "context failed"):
+                run_publish_pipeline(
+                    base_dir=base_dir,
+                    args=Namespace(mode="draft", continue_on_error=False, force_republish=True),
+                    article_paths=[article], platforms=["wechat"],
+                    registry={"wechat": DummyAdapter(base_dir, "wechat")},
+                    context_resolver=lambda *_args: (_ for _ in ()).throw(RuntimeError("context failed")),
+                )
+            self.assertTrue(is_done(identity, "wechat", "draft", state_file=state_file))
+
+    def test_force_preserves_terminal_when_prepare_fails(self):
+        class PrepareFails(DummyAdapter):
+            def prepare(self, *args, **kwargs):
+                raise RuntimeError("prepare failed")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            identity = article_key(article)
+            state_file = state_file_for(base_dir)
+            mark_done(identity, "wechat", "draft_only", "draft", state_file=state_file)
+            with self.assertRaisesRegex(RuntimeError, "prepare failed"):
+                run_publish_pipeline(
+                    base_dir=base_dir,
+                    args=Namespace(mode="draft", continue_on_error=False, force_republish=True),
+                    article_paths=[article], platforms=["wechat"],
+                    registry={"wechat": PrepareFails(base_dir, "wechat")},
+                )
+            self.assertTrue(is_done(identity, "wechat", "draft", state_file=state_file))
+
+    def test_force_preserves_terminal_when_browser_engine_connect_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            identity = article_key(article)
+            state_file = state_file_for(base_dir)
+            mark_done(identity, "zhihu", "published", "publish", state_file=state_file)
+            adapter = PlaywrightPlatformAdapter(base_dir, "zhihu", MagicMock)
+            with self.assertRaisesRegex(RuntimeError, "独立浏览器启动失败"):
+                run_publish_pipeline(
+                    base_dir=base_dir,
+                    args=Namespace(mode="publish", continue_on_error=False, force_republish=True, headed=False),
+                    article_paths=[article], platforms=["zhihu"], registry={"zhihu": adapter},
+                    engine_factory=lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("connect failed")),
+                )
+            self.assertTrue(is_done(identity, "zhihu", "publish", state_file=state_file))
 
     def test_run_publish_pipeline_stops_on_first_error_when_continue_disabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:

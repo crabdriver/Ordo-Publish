@@ -19,7 +19,7 @@ sys.modules[SPEC.name] = monitor_publish
 SPEC.loader.exec_module(monitor_publish)
 
 
-def append_record(path, *, article, platform, mode, status, returncode=0, error_type=""):
+def append_record(path, *, article, platform, mode, status, returncode=0, error_type="", run_id=""):
     exists = path.exists()
     with path.open("a", encoding="utf-8", newline="") as fp:
         writer = csv.DictWriter(fp, fieldnames=PUBLISH_RECORD_FIELDNAMES)
@@ -34,6 +34,7 @@ def append_record(path, *, article, platform, mode, status, returncode=0, error_
                 "status": status,
                 "error_type": error_type,
                 "returncode": returncode,
+                "run_id": run_id,
             }
         )
 
@@ -65,10 +66,11 @@ class MonitorPublishTests(unittest.TestCase):
             def fake_run(cmd, **_kwargs):
                 platforms = cmd[cmd.index("--platform") + 1].split(",")
                 mode = cmd[cmd.index("--mode") + 1]
+                run_id = cmd[cmd.index("--run-id") + 1]
                 self.assertEqual(cmd[cmd.index("--remote") + 1], "local")
                 for platform in platforms:
                     status = "draft_only" if mode == "draft" else "published"
-                    append_record(records, article=article, platform=platform, mode=mode, status=status)
+                    append_record(records, article=article, platform=platform, mode=mode, status=status, run_id=run_id)
                 return 0
 
             with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records), patch.object(
@@ -100,9 +102,10 @@ class MonitorPublishTests(unittest.TestCase):
                 append_record(records, article=article, platform=platform, mode=mode, status=status)
 
             def fake_run(cmd, **_kwargs):
+                run_id = cmd[cmd.index("--run-id") + 1]
                 for platform in cmd[cmd.index("--platform") + 1].split(","):
                     append_record(
-                        records, article=article, platform=platform, mode="publish", status="published"
+                        records, article=article, platform=platform, mode="publish", status="published", run_id=run_id
                     )
                 return 0
 
@@ -134,6 +137,7 @@ class MonitorPublishTests(unittest.TestCase):
                 calls.append(cmd)
                 platforms = cmd[cmd.index("--platform") + 1].split(",")
                 mode = cmd[cmd.index("--mode") + 1]
+                run_id = cmd[cmd.index("--run-id") + 1]
                 for platform in platforms:
                     row_status = status if platform == "zhihu" else (
                         "draft_only" if mode == "draft" else "published"
@@ -146,6 +150,7 @@ class MonitorPublishTests(unittest.TestCase):
                         status=row_status,
                         returncode=1 if platform == "zhihu" else 0,
                         error_type=error_type if platform == "zhihu" else "",
+                        run_id=run_id,
                     )
                 return 1
 
@@ -241,7 +246,8 @@ class MonitorPublishTests(unittest.TestCase):
                 nonlocal calls
                 calls += 1
                 if calls == 1:
-                    append_record(records, article=article, platform="wechat", mode="draft", status="draft_only")
+                    run_id = cmd[cmd.index("--run-id") + 1]
+                    append_record(records, article=article, platform="wechat", mode="draft", status="draft_only", run_id=run_id)
                     return 0
                 raise RuntimeError("browser crashed")
 
@@ -256,10 +262,102 @@ class MonitorPublishTests(unittest.TestCase):
             self.assertEqual(wechat["status"], "draft_only")
 
     def test_run_cmd_has_finite_timeout(self):
-        with patch.object(monitor_publish.subprocess, "run") as run:
-            run.return_value.returncode = 0
+        process = unittest.mock.MagicMock()
+        process.wait.return_value = 0
+        with patch.object(monitor_publish.subprocess, "Popen", return_value=process) as run:
             monitor_publish.run_cmd(["publish"])
-        self.assertEqual(run.call_args.kwargs["timeout"], monitor_publish.PUBLISH_TIMEOUT_SECONDS)
+        self.assertTrue(run.call_args.kwargs["start_new_session"])
+        process.wait.assert_called_once_with(timeout=monitor_publish.PUBLISH_TIMEOUT_SECONDS)
+
+    def test_timeout_terminates_process_group_and_returns_124(self):
+        process = unittest.mock.MagicMock(pid=4321)
+        process.wait.side_effect = [subprocess.TimeoutExpired("publish", 900), 0]
+        with patch.object(monitor_publish.subprocess, "Popen", return_value=process), patch.object(
+            monitor_publish.os, "killpg"
+        ) as killpg:
+            result = monitor_publish.run_cmd(["publish"])
+        self.assertEqual(result, 124)
+        killpg.assert_called_once_with(4321, monitor_publish.signal.SIGTERM)
+
+    def test_timeout_escalates_to_sigkill_when_group_does_not_exit(self):
+        process = unittest.mock.MagicMock(pid=4321)
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired("publish", 900),
+            subprocess.TimeoutExpired("publish", 5),
+            0,
+        ]
+        with patch.object(monitor_publish.subprocess, "Popen", return_value=process), patch.object(
+            monitor_publish.os, "killpg"
+        ) as killpg:
+            self.assertEqual(monitor_publish.run_cmd(["publish"]), 124)
+        self.assertEqual(
+            [call.args[1] for call in killpg.call_args_list],
+            [monitor_publish.signal.SIGTERM, monitor_publish.signal.SIGKILL],
+        )
+
+    def test_timeout_falls_back_to_process_terminate_when_killpg_unavailable(self):
+        process = unittest.mock.MagicMock(pid=4321)
+        process.wait.side_effect = [subprocess.TimeoutExpired("publish", 900), 0]
+        with patch.object(monitor_publish.subprocess, "Popen", return_value=process), patch.object(
+            monitor_publish.os, "killpg", side_effect=OSError("unsupported")
+        ):
+            self.assertEqual(monitor_publish.run_cmd(["publish"]), 124)
+        process.terminate.assert_called_once_with()
+
+    def test_timeout_missing_records_is_persisted_as_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            state_file = root / "state.json"
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", root / "records.csv"), patch.object(
+                monitor_publish, "STATE_FILE", state_file
+            ), patch.object(monitor_publish, "run_cmd", return_value=124):
+                self.assertEqual(monitor_publish.publish_article(article), "attempted")
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            platform_state = state["articles"][str(article.resolve())]["platforms"]
+            self.assertTrue(all(item["error_type"] == "timeout" for item in platform_state.values()))
+
+    def test_current_run_does_not_claim_other_run_published_row(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            records = root / "records.csv"
+            append_record(
+                records, article=article, platform="zhihu", mode="publish",
+                status="published", run_id="other-run",
+            )
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records):
+                outcomes = monitor_publish._new_command_outcomes(
+                    article, ["zhihu"], "publish", "current-run", 1
+                )
+            self.assertEqual(outcomes["zhihu"]["status"], "unknown")
+
+    def test_main_maps_attempted_to_nonzero_and_safe_results_to_zero(self):
+        with patch.object(monitor_publish, "publish_article_once", return_value="attempted"):
+            self.assertEqual(monitor_publish.main(["--article", "/tmp/a.md"]), 1)
+        for status in ("success", "skipped", "skipped_overlap", "dry_run"):
+            with self.subTest(status=status), patch.object(
+                monitor_publish, "publish_article_once", return_value=status
+            ):
+                self.assertEqual(monitor_publish.main(["--article", "/tmp/a.md"]), 0)
+        with patch.object(
+            monitor_publish, "scan_once", side_effect=monitor_publish.AutoPublishRunError("failed")
+        ):
+            self.assertEqual(monitor_publish.main(["--watch-dir", "/tmp"]), 1)
+
+    def test_scan_processes_all_articles_then_reports_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("a.md", "b.md"):
+                (root / name).write_text(f"# {name}", encoding="utf-8")
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", root / "records.csv"), patch.object(
+                monitor_publish, "STATE_FILE", root / "state.json"
+            ), patch.object(monitor_publish, "publish_article", side_effect=["attempted", "success"]) as publish:
+                with self.assertRaises(monitor_publish.AutoPublishRunError):
+                    monitor_publish.scan_once(root)
+            self.assertEqual(publish.call_count, 2)
 
     def test_rows_before_command_do_not_count_as_command_result(self):
         with tempfile.TemporaryDirectory() as tmp:

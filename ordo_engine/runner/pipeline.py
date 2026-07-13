@@ -58,6 +58,7 @@ def run_platform_task(
     ai_declaration_mode=None,
     scheduled_publish_at=None,
     registry=None,
+    force_republish=False,
 ):
     registry = registry or build_platform_registry(Path(base_dir))
     adapter = registry[platform]
@@ -73,6 +74,11 @@ def run_platform_task(
         ai_declaration_mode=ai_declaration_mode,
         scheduled_publish_at=scheduled_publish_at,
     )
+    if force_republish:
+        reset(
+            article_key(markdown_file), platform, mode,
+            state_file=state_file_for(base_dir),
+        )
     process_result = adapter.publish(prepared)
     structured_result = adapter.collect_result(process_result, mode=mode)
     payload = {
@@ -112,12 +118,6 @@ def run_publish_pipeline(
     results = []
     exit_code = 0
 
-    if getattr(args, "force_republish", False):
-        for article_path in article_paths:
-            identity = article_key(article_path)
-            for platform in platforms:
-                reset(identity, platform, args.mode, state_file=state_file)
-
     # 仅浏览器适配器需要引擎。一个 pipeline 只允许一个独立 context。
     shared_engine = None
     browser_platforms = [
@@ -126,7 +126,7 @@ def run_publish_pipeline(
         if isinstance(registry[platform], PlaywrightPlatformAdapter)
     ]
     has_browser_work = any(
-        not is_done(
+        getattr(args, "force_republish", False) or not is_done(
             article_key(article_path),
             platform,
             args.mode,
@@ -190,9 +190,12 @@ def run_publish_pipeline(
                     theme_name = theme_resolver(article_path)
 
                 # ── 幂等：已完成则跳过，避免重跑堆积重复草稿 ──
-                if is_done(akey, platform, args.mode, state_file=state_file):
+                if not getattr(args, "force_republish", False) and is_done(
+                    akey, platform, args.mode, state_file=state_file
+                ):
                     print(f"[SKIP] {platform} 《{Path(article_path).name}》已完成，跳过（幂等）")
                     result = _synthetic_skip(platform, article_path, args.mode)
+                    result["run_id"] = getattr(args, "run_id", None)
                     results.append(result)
                     if append_record:
                         append_record(result)
@@ -213,8 +216,10 @@ def run_publish_pipeline(
                     ai_declaration_mode=ai_declaration_mode,
                     scheduled_publish_at=scheduled_publish_at,
                     registry=registry,
+                    force_republish=getattr(args, "force_republish", False),
                 )
                 result["article"] = str(article_path)
+                result["run_id"] = getattr(args, "run_id", None)
                 results.append(result)
 
                 # ── 成功后记录幂等状态，重跑不再重复 ──
