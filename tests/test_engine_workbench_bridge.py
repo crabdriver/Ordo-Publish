@@ -3,11 +3,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from PIL import Image
 
 from ordo_engine.platforms.base import BasePlatformAdapter
+from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
+from ordo_engine.platforms.playwright.base_publisher import PublishResult
 
 
 class DummyAdapter(BasePlatformAdapter):
@@ -89,6 +91,150 @@ class WorkbenchBridgeTests(unittest.TestCase):
 
     def _write_cover(self, path: Path, size=(1280, 720)):
         Image.new("RGB", size, color=(23, 45, 67)).save(path)
+
+    def _minimal_plan(self, base: Path, platforms):
+        article = base / "article.md"
+        article.write_text("# 标题\n\n正文", encoding="utf-8")
+        return {
+            "publish_job": {
+                "job_id": "shared-browser-job",
+                "article_ids": ["article"],
+                "platforms": list(platforms),
+                "status": "pending",
+                "current_step": "",
+                "success_count": 0,
+                "failure_count": 0,
+                "skip_count": 0,
+                "recoverable": True,
+                "error_summary": "",
+            },
+            "mode": "draft",
+            "continue_on_error": True,
+            "drafts": [{"article_id": "article", "title": "标题"}],
+            "staged_articles": [
+                {"article_id": "article", "markdown_path": str(article)}
+            ],
+            "context_map": [
+                {
+                    "article_id": "article",
+                    "platform": platform,
+                    "markdown_path": str(article),
+                    "cover_mode": "force_off",
+                }
+                for platform in platforms
+            ],
+        }
+
+    def test_run_publish_job_shares_one_engine_across_five_browser_adapters(self):
+        from ordo_engine.workbench.bridge import run_publish_job
+
+        class Publisher:
+            engines = []
+            page = None
+
+            def __init__(self, engine):
+                self.__class__.engines.append(engine)
+
+            def publish(self, _article, _mode):
+                return PublishResult(
+                    platform="stub", status="draft_saved", page_state="draft_saved"
+                )
+
+        platforms = ("zhihu", "toutiao", "jianshu", "yidian", "bilibili")
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            registry = {
+                platform: PlaywrightPlatformAdapter(base, platform, Publisher)
+                for platform in platforms
+            }
+            engine = MagicMock(base_dir=base)
+            factory = MagicMock(return_value=engine)
+
+            result = run_publish_job(
+                base,
+                self._minimal_plan(base, platforms),
+                registry=registry,
+                engine_factory=factory,
+            )
+
+        self.assertEqual(len(result["results"]), 5)
+        factory.assert_called_once_with(
+            mode="standalone", headless=True, base_dir=base.resolve()
+        )
+        engine.connect.assert_called_once_with()
+        engine.close.assert_called_once_with()
+        self.assertEqual(Publisher.engines, [engine] * 5)
+        for adapter in registry.values():
+            self.assertIsNone(adapter._shared_engine)
+
+    def test_run_publish_job_wechat_only_never_builds_engine(self):
+        from ordo_engine.workbench.bridge import run_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            factory = MagicMock()
+            result = run_publish_job(
+                base,
+                self._minimal_plan(base, ("wechat",)),
+                registry={"wechat": DummyAdapter(base, "wechat", stdout="ok")},
+                engine_factory=factory,
+            )
+
+        self.assertEqual(result["publish_job"]["success_count"], 1)
+        factory.assert_not_called()
+
+    def test_run_publish_job_engine_connect_failure_aborts_without_adapter_fallback(self):
+        from ordo_engine.workbench.bridge import run_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            publisher = MagicMock()
+            adapter = PlaywrightPlatformAdapter(base, "zhihu", publisher)
+            engine = MagicMock()
+            engine.connect.side_effect = RuntimeError("connect failed")
+
+            with self.assertRaisesRegex(RuntimeError, "connect failed"):
+                run_publish_job(
+                    base,
+                    self._minimal_plan(base, ("zhihu",)),
+                    registry={"zhihu": adapter},
+                    engine_factory=MagicMock(return_value=engine),
+                )
+
+        self.assertIsNone(adapter._shared_engine)
+        publisher.assert_not_called()
+        engine.close.assert_called_once_with()
+
+    def test_run_publish_job_engine_close_failure_overrides_success(self):
+        from ordo_engine.workbench.bridge import run_publish_job
+
+        class Publisher:
+            page = None
+
+            def __init__(self, _engine):
+                pass
+
+            def publish(self, _article, _mode):
+                return PublishResult(
+                    platform="stub", status="draft_saved", page_state="draft_saved"
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            adapter = PlaywrightPlatformAdapter(base, "zhihu", Publisher)
+            engine = MagicMock(base_dir=base)
+            engine.close.side_effect = RuntimeError("close failed")
+
+            with self.assertRaisesRegex(RuntimeError, "close failed"):
+                run_publish_job(
+                    base,
+                    self._minimal_plan(base, ("zhihu",)),
+                    registry={"zhihu": adapter},
+                    engine_factory=MagicMock(return_value=engine),
+                )
+
+        self.assertIsNone(adapter._shared_engine)
+        engine.close.assert_called_once_with()
 
     def test_import_sources_supports_file_folder_and_paste(self):
         from ordo_engine.workbench.bridge import import_sources

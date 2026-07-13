@@ -632,7 +632,15 @@ def _status_counts(results):
     return success, failure, skipped, recoverable
 
 
-def run_publish_job(base_dir, plan_payload, *, registry=None, append_record=None, event_sink=None):
+def run_publish_job(
+    base_dir,
+    plan_payload,
+    *,
+    registry=None,
+    append_record=None,
+    event_sink=None,
+    engine_factory=None,
+):
     root = _ensure_base_dir(base_dir)
     staged_by_article = {item["article_id"]: item["markdown_path"] for item in plan_payload.get("staged_articles", [])}
     draft_by_article = {item["article_id"]: item for item in plan_payload.get("drafts", [])}
@@ -642,12 +650,40 @@ def run_publish_job(base_dir, plan_payload, *, registry=None, append_record=None
     context_entries = list(plan_payload.get("context_map", []))
     events = []
     lock_path = _acquire_publish_lock(root, str(publish_job.get("job_id") or "publish"))
+    selected_browser_adapters = []
+    shared_engine = None
 
     def emit(event):
         events.append(event)
         if event_sink:
             event_sink(event)
     try:
+        from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
+        from ordo_engine.platforms.playwright.engine import PlaywrightEngine
+        from ordo_engine.platforms.registry import build_platform_registry
+
+        registry = registry or build_platform_registry(root)
+        seen_adapters = set()
+        for context in context_entries:
+            adapter = registry[context["platform"]]
+            if (
+                isinstance(adapter, PlaywrightPlatformAdapter)
+                and id(adapter) not in seen_adapters
+            ):
+                seen_adapters.add(id(adapter))
+                selected_browser_adapters.append(adapter)
+
+        if selected_browser_adapters:
+            factory = engine_factory or PlaywrightEngine
+            shared_engine = factory(
+                mode="standalone",
+                headless=True,
+                base_dir=root,
+            )
+            shared_engine.connect()
+            for adapter in selected_browser_adapters:
+                adapter.set_shared_engine(shared_engine)
+
         emit(
             {
                 "type": "job_started",
@@ -740,10 +776,29 @@ def run_publish_job(base_dir, plan_payload, *, registry=None, append_record=None
         _write_json_snapshot(root / LAST_RESULT_PATH, payload)
         return payload
     finally:
+        active_error = sys.exc_info()[1]
+        cleanup_error = None
+        for adapter in selected_browser_adapters:
+            try:
+                adapter.set_shared_engine(None)
+            except Exception as exc:
+                cleanup_error = cleanup_error or exc
+        if shared_engine is not None:
+            try:
+                shared_engine.close()
+            except Exception as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+                else:
+                    cleanup_error.add_note(f"共享浏览器关闭失败: {exc}")
         try:
             Path(lock_path).unlink()
         except OSError:
             pass
+        if cleanup_error is not None:
+            if active_error is None:
+                raise cleanup_error
+            active_error.add_note(f"共享浏览器关闭失败: {cleanup_error}")
 
 
 def read_recent_history(base_dir, *, limit: int = 20):
