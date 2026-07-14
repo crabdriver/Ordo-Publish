@@ -10,7 +10,8 @@ class Ordo < Formula
   depends_on "node"
 
   def install
-    virtualenv_create(libexec, Formula["python@3.12"].opt_bin/"python3.12")
+    venv = virtualenv_create(libexec, Formula["python@3.12"].opt_bin/"python3.12")
+    venv.pip_install buildpath
     pkgshare.install(
       "config.example.json",
       "publish.py",
@@ -32,12 +33,6 @@ class Ordo < Formula
       "ordo_engine",
     )
 
-    (libexec/"bin").mkpath
-    (libexec/"bin/ordo").write <<~SH
-      #!/bin/bash
-      exec "#{libexec}/bin/python" -m ordo_engine.cli.app "$@"
-    SH
-    chmod 0755, libexec/"bin/ordo"
     bin.install libexec/"bin/ordo"
     bin.env_script_all_files(
       libexec/"bin",

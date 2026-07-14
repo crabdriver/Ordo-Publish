@@ -12,7 +12,7 @@ from markdown_utils import render_markdown_plain_text, should_declare_ai
 from ordo_engine.platforms.playwright.base_publisher import (
     ArticlePayload, PlaywrightBasePublisher, PublishResult,
 )
-from ordo_engine.platforms.playwright._common import verify_result_common
+from ordo_engine.platforms.playwright._common import verify_result_common, find_visible_button
 from ordo_engine.platforms.playwright_bilibili.locators import BilibiliLocators
 
 
@@ -175,18 +175,69 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
 
     def upload_cover(self, cover_path: Path):
         self._expand_settings_in_frame()
+        path = Path(cover_path).expanduser().resolve()
+        if not path.is_file():
+            raise RuntimeError(f"封面文件不存在: {path}")
+
         ef = self._ef()
-        file_input = ef.locator(BilibiliLocators.COVER_FILE_INPUT)
-        if file_input.count() > 0:
-            path = Path(cover_path).expanduser().resolve()
-            file_input.set_input_files(str(path))
-            print(f"[INFO] B站封面已上传: {path.name}")
-            time.sleep(2)
+        label = ef.locator(
+            '.form-item-label:has-text("自定义封面"), label:has-text("自定义封面")'
+        ).first
+        if label.count() == 0:
+            raise RuntimeError("未找到B站自定义封面设置")
+        switch = label.locator("xpath=..").locator(".vui_switch--switch").first
+        if switch.count() == 0:
+            raise RuntimeError("未找到B站自定义封面开关")
+        if "is-checked" not in (switch.get_attribute("class") or "").split():
+            switch.click()
+            time.sleep(1)
+
+        upload = ef.locator("div.upload-button").first
+        if upload.count() == 0:
+            raise RuntimeError("未找到B站添加封面入口")
+        upload.click()
+        preview = ef.locator(
+            "div.upload-button img, .cover-preview img, .upload-preview img"
+        )
+        before_sources = {
+            source for index in range(preview.count())
+            if (source := preview.nth(index).get_attribute("src"))
+        }
+        file_input = ef.locator('input[type="file"]').first
+        file_input.wait_for(state="attached", timeout=10000)
+        file_input.set_input_files(str(path))
+
+        confirm = ef.locator('button:visible:has-text("确定")').first
+        if confirm.count() == 0:
+            raise RuntimeError("未找到B站封面确认按钮")
+        confirm.click()
+        try:
+            preview.first.wait_for(state="visible", timeout=30000)
+        except Exception as exc:
+            raise RuntimeError("未找到B站封面上传完成证据") from exc
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            after_sources = {
+                source for index in range(preview.count())
+                if (source := preview.nth(index).get_attribute("src"))
+                and source.startswith(("http://", "https://"))
+            }
+            if after_sources and after_sources != before_sources:
+                break
+            time.sleep(0.25)
         else:
-            print("[WARN] 未找到B站封面上传 input，跳过封面")
+            raise RuntimeError("未找到B站本次封面上传完成证据")
+        print(f"[INFO] B站封面已上传: {path.name}")
 
     def configure_settings(self, article: ArticlePayload):
         self._expand_settings_in_frame()
+        publish_btn = self._ef().locator(
+            'button.vui_button--blue:visible:has-text("发布")'
+        ).first
+        if publish_btn.count() == 0:
+            raise RuntimeError("未找到B站发布按钮")
+        if not publish_btn.is_enabled():
+            raise RuntimeError("B站发布按钮仍不可用，请检查封面或必填发布设置")
 
     def _expand_settings_in_frame(self):
         """在 iframe 内展开发布设置面板"""
@@ -206,16 +257,30 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
 
     def click_publish(self):
         ef = self._ef()
-        # 优先用 class 精确匹配蓝色发布按钮
-        btn = ef.locator(f'button.{BilibiliLocators.PUBLISH_BUTTON_CLASS}:has-text("发布")')
-        if btn.count() == 0:
-            btn = ef.locator(f'button:has-text("发布")')
-        if btn.count() > 0:
-            btn.first.click()
-            print("[INFO] B站发布按钮已点击")
-            time.sleep(2)
-        else:
+        # 使用 find_visible_button 精确匹配发布按钮（避免匹配到"定时发布"等）
+        btn = find_visible_button(ef, BilibiliLocators.PUBLISH_BUTTON_TEXTS, BilibiliLocators.PUBLISH_BUTTON_CLASS)
+        if not btn:
             raise RuntimeError("未找到B站发布按钮")
+
+        pre_url = self.page.url
+        print("[INFO] B站发布按钮已点击")
+        btn.click()
+        time.sleep(2)
+
+        confirm_btn = find_visible_button(ef, BilibiliLocators.CONFIRM_PUBLISH_TEXTS)
+        if not confirm_btn:
+            confirm_btn = find_visible_button(self.page, BilibiliLocators.CONFIRM_PUBLISH_TEXTS)
+        if confirm_btn:
+            print("[INFO] 点击B站确认发布...")
+            confirm_btn.click()
+            time.sleep(2)
+
+        # 等待页面跳转或成功反馈（最多 20 秒）
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if (self.page.url or "") != pre_url:
+                break
+            time.sleep(1)
 
     def save_draft(self):
         ef = self._ef()

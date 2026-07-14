@@ -49,6 +49,47 @@ class StubPublisher(PlaywrightBasePublisher):
 
 
 class TestPlaywrightEngine(unittest.TestCase):
+    def test_cleanup_stale_profile_lock_keeps_live_pid(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = PlaywrightEngine(base_dir=Path(tmpdir), headless=True)
+            engine.profile_dir.mkdir(parents=True)
+            lock = engine.profile_dir / "SingletonLock"
+            lock.symlink_to("host-4242")
+
+            with patch("ordo_engine.platforms.playwright.engine.os.kill") as kill:
+                engine._cleanup_stale_lock()
+
+            kill.assert_called_once_with(4242, 0)
+            self.assertTrue(lock.is_symlink())
+
+    def test_cleanup_stale_profile_lock_removes_dead_pid(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = PlaywrightEngine(base_dir=Path(tmpdir), headless=True)
+            engine.profile_dir.mkdir(parents=True)
+            lock = engine.profile_dir / "SingletonLock"
+            lock.symlink_to("host-4242")
+            (engine.profile_dir / "SingletonCookie").write_text("x", encoding="utf-8")
+
+            with patch(
+                "ordo_engine.platforms.playwright.engine.os.kill",
+                side_effect=ProcessLookupError,
+            ):
+                engine._cleanup_stale_lock()
+
+            self.assertFalse(lock.is_symlink())
+            self.assertFalse((engine.profile_dir / "SingletonCookie").exists())
+
+    def test_cleanup_stale_profile_lock_fails_closed_when_owner_unknown(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = PlaywrightEngine(base_dir=Path(tmpdir), headless=True)
+            engine.profile_dir.mkdir(parents=True)
+            lock = engine.profile_dir / "SingletonLock"
+            lock.write_text("unknown", encoding="utf-8")
+
+            engine._cleanup_stale_lock()
+
+            self.assertTrue(lock.exists())
+
     def test_profile_rejects_ordo_symlink_escape(self):
         with tempfile.TemporaryDirectory() as tmpdir, tempfile.TemporaryDirectory() as outside:
             base_dir = Path(tmpdir)

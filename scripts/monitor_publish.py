@@ -23,6 +23,7 @@ if str(BASE_DIR) not in sys.path:
 from ordo_engine.assignment.cover_contract import resolve_publication_cover
 from ordo_engine.results.publish_records import load_publish_records_at_path
 from ordo_engine.run_lock import RunAlreadyActive, run_lock
+from ordo_engine.run_state import article_key as durable_article_key
 
 DEFAULT_WATCH_DIR = Path("/Users/wizard/tiandidadao/润色")
 STATE_FILE = BASE_DIR / ".ordo" / "auto_publish_state.json"
@@ -40,7 +41,7 @@ TERMINAL_BY_MODE = {
 RATE_LIMIT_STATUSES = {"limit_reached", "rate_limited"}
 UNVERIFIED_STATUSES = {"submitted_unverified"}
 REQUIRED_RECORD_FIELDS = {
-    "run_id", "article", "article_id", "platform", "mode", "status", "error_type", "returncode",
+    "run_id", "article", "article_id", "article_key", "platform", "mode", "status", "error_type", "returncode",
 }
 
 # 兼容旧调用者；新命令会合并全部浏览器平台。
@@ -123,7 +124,16 @@ def save_state(state, path=None):
 
 
 def article_key(path: Path) -> str:
+    return durable_article_key(path)
+
+
+def _legacy_article_key(path: Path) -> str:
     return str(path.expanduser().resolve())
+
+
+def _state_article(state, article: Path):
+    articles = state.get("articles", {})
+    return articles.get(article_key(article)) or articles.get(_legacy_article_key(article))
 
 
 def parse_frontmatter(article: Path):
@@ -154,7 +164,20 @@ def list_articles(watch_dir: Path):
     return sorted(item for item in root.glob("*.md") if item.is_file() and not item.name.startswith("."))
 
 
-def record_matches_article(row, article: Path, *, article_id=None):
+def record_matches_article(row, article: Path, *, article_id=None, identity=None):
+    identity = identity or durable_article_key(article)
+    row_article_id = (row.get("article_id") or "").strip()
+    row_identity = (row.get("article_key") or "").strip()
+    if article_id:
+        return bool(
+            (row_article_id and row_article_id == article_id)
+            or (row_identity and row_identity == identity)
+        )
+    if row_article_id:
+        return False
+    if row_identity:
+        return row_identity == identity
+    # 旧 CSV 没有 article_key；仅为迁移兼容保留路径匹配。
     raw = (row.get("article") or "").strip()
     if raw:
         try:
@@ -162,8 +185,7 @@ def record_matches_article(row, article: Path, *, article_id=None):
                 return True
         except OSError:
             pass
-    row_article_id = (row.get("article_id") or "").strip()
-    return bool(row_article_id and article_id and row_article_id == article_id)
+    return False
 
 
 def read_record_rows(records_path=None):
@@ -192,21 +214,42 @@ def _is_terminal(platform, record):
     )
 
 
+def _is_protected_from_resubmission(platform, record):
+    if _is_terminal(platform, record):
+        return True
+    if not isinstance(record, dict):
+        return False
+    return (
+        record.get("mode") == MODE_BY_PLATFORM[platform]
+        and record.get("status") in UNVERIFIED_STATUSES
+    )
+
+
 def _latest_records(article: Path, rows=None):
     rows = read_record_rows() if rows is None else rows
     article_id = parse_frontmatter(article).get("article_id")
+    identity = durable_article_key(article)
     latest = {}
     for row in rows:
         platform = (row.get("platform") or "").strip()
-        if platform not in ALL_PLATFORMS or not record_matches_article(row, article, article_id=article_id):
+        if platform not in ALL_PLATFORMS or not record_matches_article(
+            row, article, article_id=article_id, identity=identity
+        ):
             continue
         if (row.get("mode") or "").strip() != MODE_BY_PLATFORM[platform]:
             continue
         candidate = dict(row)
         current = latest.get(platform)
-        if current is None or (not _is_terminal(platform, current) and _is_terminal(platform, candidate)):
+        candidate_unverified = candidate.get("status") in UNVERIFIED_STATUSES
+        current_protected = bool(
+            current and (
+                _is_terminal(platform, current)
+                or current.get("status") in UNVERIFIED_STATUSES
+            )
+        )
+        if current is None or candidate_unverified or _is_terminal(platform, candidate):
             latest[platform] = candidate
-        elif not _is_terminal(platform, current):
+        elif not current_protected:
             latest[platform] = candidate
     return latest
 
@@ -229,7 +272,12 @@ def merge_record_successes(existing, article: Path):
         key: dict(value) for key, value in (data.get("platforms") or {}).items() if isinstance(value, dict)
     }
     for platform, row in _latest_records(article).items():
-        if _is_terminal(platform, platform_state.get(platform)):
+        current = platform_state.get(platform)
+        row_is_protected = _is_terminal(platform, row) or row.get("status") in UNVERIFIED_STATUSES
+        current_is_protected = _is_terminal(platform, current) or (
+            isinstance(current, dict) and current.get("status") in UNVERIFIED_STATUSES
+        )
+        if current_is_protected and not row_is_protected:
             continue
         platform_state[platform] = {
             "mode": row.get("mode") or MODE_BY_PLATFORM[platform],
@@ -268,13 +316,22 @@ def build_publish_cmd(
     return cmd
 
 
-def run_cmd(cmd, *, dry_run=False, env=None, timeout=PUBLISH_TIMEOUT_SECONDS):
+def run_cmd(
+    cmd, *, dry_run=False, env=None, timeout=PUBLISH_TIMEOUT_SECONDS, lock_fd=None
+):
     print("[CMD] " + " ".join(cmd))
     if dry_run:
         return 0
-    process = subprocess.Popen(
-        cmd, cwd=str(BASE_DIR), env=env, start_new_session=True,
-    )
+    popen_kwargs = {
+        "cwd": str(BASE_DIR),
+        "env": env,
+        "start_new_session": True,
+    }
+    if lock_fd is not None:
+        child_env = dict(os.environ if env is None else env)
+        child_env["ORDO_PUBLISH_LOCK_FD"] = str(lock_fd)
+        popen_kwargs.update(env=child_env, pass_fds=(lock_fd,))
+    process = subprocess.Popen(cmd, **popen_kwargs)
     try:
         return process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -336,7 +393,10 @@ def _new_command_outcomes(article, platforms, mode, run_id, command_returncode):
 
 def _pending_platforms(existing):
     platform_state = (existing or {}).get("platforms") or {}
-    return [platform for platform in ALL_PLATFORMS if not _is_terminal(platform, platform_state.get(platform))]
+    return [
+        platform for platform in ALL_PLATFORMS
+        if not _is_protected_from_resubmission(platform, platform_state.get(platform))
+    ]
 
 
 def _persist_article_progress(
@@ -345,7 +405,7 @@ def _persist_article_progress(
     success = all(_is_terminal(platform, platform_state.get(platform)) for platform in ALL_PLATFORMS)
     old = dict(state["articles"].get(key) or {})
     state["articles"][key] = {
-        **old, "path": key, "title": article.stem,
+        **old, "path": str(article), "title": article.stem,
         "status": "success" if success else "attempted",
         "started_at": old.get("started_at") or started_at,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -359,7 +419,7 @@ def _persist_article_progress(
 
 def publish_article(
     article: Path, *, force=False, dry_run=False, state=None,
-    default_template_theme=None, default_wechat_theme=None,
+    default_template_theme=None, default_wechat_theme=None, lock_fd=None,
 ):
     article = article.expanduser().resolve()
     if not article.is_file():
@@ -369,7 +429,7 @@ def publish_article(
     if state is None:
         state = load_state()
     key = article_key(article)
-    existing = {"platforms": {}} if force else merge_record_successes(state["articles"].get(key), article)
+    existing = {"platforms": {}} if force else merge_record_successes(_state_article(state, article), article)
     pending = _pending_platforms(existing)
     if not pending:
         print(f"[SKIP] 所有平台已有明确终态: {article}")
@@ -397,7 +457,7 @@ def publish_article(
         )))
     if dry_run:
         for _platforms, _mode, _run_id, cmd in groups:
-            run_cmd(cmd, dry_run=True)
+            run_cmd(cmd, dry_run=True, lock_fd=lock_fd)
         print("[DRY-RUN] 未执行发布，未写状态")
         return "dry_run"
 
@@ -408,7 +468,7 @@ def publish_article(
         if platform not in pending:
             summary.skipped.append(platform)
     for platforms, mode, run_id, cmd in groups:
-        returncode = run_cmd(cmd)
+        returncode = run_cmd(cmd, lock_fd=lock_fd)
         outcomes = _new_command_outcomes(article, platforms, mode, run_id, returncode)
         for platform, outcome in outcomes.items():
             platform_state[platform] = {**outcome, "updated_at": datetime.now().isoformat(timespec="seconds")}
@@ -425,8 +485,8 @@ def publish_article(
 
 def publish_article_once(article: Path, **kwargs):
     try:
-        with run_lock(PUBLISH_LOCK_FILE):
-            return publish_article(article, **kwargs)
+        with run_lock(PUBLISH_LOCK_FILE) as lock_fd:
+            return publish_article(article, lock_fd=lock_fd, **kwargs)
     except RunAlreadyActive:
         print("[SKIP] 已有发表任务运行中，本轮跳过")
         return "skipped_overlap"
@@ -434,11 +494,11 @@ def publish_article_once(article: Path, **kwargs):
 
 def scan_once(watch_dir: Path, *, force=False, dry_run=False, default_template_theme=None, default_wechat_theme=None):
     try:
-        with run_lock(PUBLISH_LOCK_FILE):
+        with run_lock(PUBLISH_LOCK_FILE) as lock_fd:
             state = load_state()
             todo = []
             for article in list_articles(watch_dir):
-                existing = merge_record_successes(state["articles"].get(article_key(article)), article)
+                existing = merge_record_successes(_state_article(state, article), article)
                 if force or _pending_platforms(existing):
                     todo.append(article)
             if not todo:
@@ -446,12 +506,17 @@ def scan_once(watch_dir: Path, *, force=False, dry_run=False, default_template_t
                 return []
             failed_articles = []
             for article in todo:
-                result = publish_article(
-                    article, force=force, dry_run=dry_run, state=state,
-                    default_template_theme=default_template_theme,
-                    default_wechat_theme=default_wechat_theme,
-                )
-                if result == "attempted":
+                try:
+                    result = publish_article(
+                        article, force=force, dry_run=dry_run, state=state,
+                        default_template_theme=default_template_theme,
+                        default_wechat_theme=default_wechat_theme,
+                        lock_fd=lock_fd,
+                    )
+                    if result == "attempted":
+                        failed_articles.append(article)
+                except Exception as exc:
+                    print(f"[ERROR] 文章 {article.name} 处理失败: {exc}")
                     failed_articles.append(article)
             if failed_articles:
                 names = ", ".join(item.name for item in failed_articles)
@@ -490,15 +555,15 @@ def main(argv=None):
     }
     if args.article:
         result = publish_article_once(args.article, **kwargs)
-        return 1 if result == "attempted" else 0
+        return 1 if result in {"attempted", "skipped_overlap"} else 0
     if args.daemon:
         return run_daemon(args.watch_dir, interval=args.interval, **kwargs)
     try:
-        scan_once(args.watch_dir, **kwargs)
+        result = scan_once(args.watch_dir, **kwargs)
     except AutoPublishRunError as exc:
         print(f"[ERROR] {exc}")
         return 1
-    return 0
+    return 1 if result == "skipped_overlap" else 0
 
 
 if __name__ == "__main__":

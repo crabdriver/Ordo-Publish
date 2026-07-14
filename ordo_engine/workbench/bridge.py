@@ -18,11 +18,13 @@ from ordo_engine.config import load_engine_config
 from ordo_engine.importers.sources import UnsupportedSourceError, import_file, import_pasted_text, list_import_candidates
 from ordo_engine.models.workbench import ArticleDraft, ImportFailure, ImportJob, PublishJob
 from ordo_engine.platforms.base import is_terminal_outcome
-from ordo_engine.runner.pipeline import run_platform_task
+from ordo_engine.run_lock import RunAlreadyActive, run_lock
+from ordo_engine.run_state import article_key, is_done, mark_done, state_file_for
+from ordo_engine.runner.pipeline import _synthetic_skip, run_platform_task
 
 WORKBENCH_ROOT = Path(".ordo") / "workbench"
 IMPORT_MANIFESTS_ROOT = WORKBENCH_ROOT / "imports"
-PUBLISH_LOCK_PATH = WORKBENCH_ROOT / "publish.lock"
+PUBLISH_LOCK_PATH = Path(".ordo") / "publish.lock"
 LAST_PLAN_PATH = WORKBENCH_ROOT / "last-plan.json"
 LAST_RESULT_PATH = WORKBENCH_ROOT / "last-result.json"
 SESSION_PATH = Path(".ordo") / "publish-console" / "publish-console-session.json"
@@ -240,18 +242,6 @@ def _write_staged_articles(base_dir: Path, drafts: Sequence[ArticleDraft], job_i
 def _write_import_manifest(base_dir: Path, job: ImportJob) -> Path:
     path = base_dir / IMPORT_MANIFESTS_ROOT / f"{job.job_id}.json"
     _write_json_snapshot(path, job.to_dict())
-    return path
-
-
-def _acquire_publish_lock(base_dir: Path, publish_job_id: str) -> Path:
-    path = base_dir / PUBLISH_LOCK_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
-        raise RuntimeError("已有发布任务正在执行，请等待当前任务结束后再试。") from exc
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps({"job_id": publish_job_id, "locked_at": _now_iso()}, ensure_ascii=False))
     return path
 
 
@@ -643,7 +633,7 @@ def _status_counts(results, mode):
     return success, failure, skipped, recoverable
 
 
-def run_publish_job(
+def _run_publish_job_locked(
     base_dir,
     plan_payload,
     *,
@@ -660,7 +650,6 @@ def run_publish_job(
     continue_on_error = bool(plan_payload.get("continue_on_error", False))
     context_entries = list(plan_payload.get("context_map", []))
     events = []
-    lock_path = _acquire_publish_lock(root, str(publish_job.get("job_id") or "publish"))
     selected_browser_adapters = []
     shared_engine = None
 
@@ -673,9 +662,28 @@ def run_publish_job(
         from ordo_engine.platforms.playwright.engine import PlaywrightEngine
         from ordo_engine.platforms.registry import build_platform_registry
 
-        registry = registry or build_platform_registry(root)
-        seen_adapters = set()
+        state_file = state_file_for(root)
+        work_items = []
         for context in context_entries:
+            identity = article_key(context["markdown_path"])
+            completed = is_done(
+                identity,
+                context["platform"],
+                mode,
+                state_file=state_file,
+            )
+            work_items.append((context, identity, completed))
+        if registry is None:
+            registry = (
+                build_platform_registry(root)
+                if any(not completed for _context, _identity, completed in work_items)
+                else {}
+            )
+
+        seen_adapters = set()
+        for context, _identity, completed in work_items:
+            if completed:
+                continue
             adapter = registry[context["platform"]]
             if (
                 isinstance(adapter, PlaywrightPlatformAdapter)
@@ -706,7 +714,7 @@ def run_publish_job(
         )
         results = []
         current_article_id = None
-        for context in context_entries:
+        for context, identity, completed in work_items:
             article_id = context["article_id"]
             platform = context["platform"]
             if article_id != current_article_id:
@@ -728,22 +736,41 @@ def run_publish_job(
                     "platform": platform,
                 }
             )
-            result = run_platform_task(
-                base_dir=root,
-                platform=platform,
-                markdown_file=context["markdown_path"],
-                mode=mode,
-                theme_name=context.get("theme_name"),
-                cover_path=context.get("cover_path"),
-                template_mode=context.get("template_mode"),
-                article_id=article_id,
-                cover_mode=context.get("cover_mode"),
-                ai_declaration_mode=context.get("ai_declaration_mode"),
-                scheduled_publish_at=context.get("scheduled_publish_at"),
-                registry=registry,
-            )
+            if completed:
+                result = _synthetic_skip(platform, context["markdown_path"], mode)
+                result["article_id"] = article_id
+                result["theme_name"] = context.get("theme_name")
+                result["template_mode"] = context.get("template_mode")
+                result["cover_path"] = context.get("cover_path")
+                result["cover_mode"] = context.get("cover_mode")
+                result["ai_declaration_mode"] = context.get("ai_declaration_mode")
+                result["scheduled_publish_at"] = context.get("scheduled_publish_at")
+            else:
+                result = run_platform_task(
+                    base_dir=root,
+                    platform=platform,
+                    markdown_file=context["markdown_path"],
+                    mode=mode,
+                    theme_name=context.get("theme_name"),
+                    cover_path=context.get("cover_path"),
+                    template_mode=context.get("template_mode"),
+                    article_id=article_id,
+                    cover_mode=context.get("cover_mode"),
+                    ai_declaration_mode=context.get("ai_declaration_mode"),
+                    scheduled_publish_at=context.get("scheduled_publish_at"),
+                    registry=registry,
+                )
             result["article"] = context["markdown_path"]
             results.append(result)
+            if not completed and _is_success_result(result, mode):
+                mark_done(
+                    identity,
+                    platform,
+                    result["status"],
+                    mode,
+                    result.get("current_url", ""),
+                    state_file=state_file,
+                )
             if append_record:
                 append_record(result)
             emit(
@@ -810,14 +837,34 @@ def run_publish_job(
                     cleanup_error = exc
                 else:
                     cleanup_error.add_note(f"共享浏览器关闭失败: {exc}")
-        try:
-            Path(lock_path).unlink()
-        except OSError:
-            pass
         if cleanup_error is not None:
             if active_error is None:
                 raise cleanup_error
             active_error.add_note(f"共享浏览器关闭失败: {cleanup_error}")
+
+
+def run_publish_job(
+    base_dir,
+    plan_payload,
+    *,
+    registry=None,
+    append_record=None,
+    event_sink=None,
+    engine_factory=None,
+):
+    root = _ensure_base_dir(base_dir)
+    try:
+        with run_lock(root / PUBLISH_LOCK_PATH):
+            return _run_publish_job_locked(
+                root,
+                plan_payload,
+                registry=registry,
+                append_record=append_record,
+                event_sink=event_sink,
+                engine_factory=engine_factory,
+            )
+    except RunAlreadyActive as exc:
+        raise RuntimeError("已有发布任务正在执行，请等待当前任务结束后再试。") from exc
 
 
 def read_recent_history(base_dir, *, limit: int = 20):

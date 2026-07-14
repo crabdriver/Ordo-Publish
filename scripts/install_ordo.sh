@@ -73,7 +73,8 @@ class Ordo < Formula
   depends_on "node"
 
   def install
-    virtualenv_create(libexec, Formula["python@3.12"].opt_bin/"python3.12")
+    venv = virtualenv_create(libexec, Formula["python@3.12"].opt_bin/"python3.12")
+    venv.pip_install buildpath
 
     pkgshare.install(
       "config.example.json",
@@ -96,12 +97,6 @@ class Ordo < Formula
       "ordo_engine",
     )
 
-    (libexec/"bin").mkpath
-    (libexec/"bin/ordo").write <<~SH
-      #!/bin/bash
-      exec "#{libexec}/bin/python" -m ordo_engine.cli.app "$@"
-    SH
-    chmod 0755, libexec/"bin/ordo"
     bin.install libexec/"bin/ordo"
     bin.env_script_all_files(
       libexec/"bin",
@@ -119,10 +114,5 @@ else
   echo "[INFO] 通过本地 tap 安装 ordo"
   brew install "$TAP_NAME/ordo"
 fi
-
-ORDO_PREFIX="$(brew --prefix ordo)"
-ORDO_PYTHON="$ORDO_PREFIX/libexec/bin/python"
-echo "[INFO] 为 ordo 运行时补齐 Python 依赖"
-"$ORDO_PYTHON" -m pip install "$ROOT_DIR"
 
 echo "[INFO] 安装完成。现在可以直接运行: ordo"

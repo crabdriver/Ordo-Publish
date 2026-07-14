@@ -97,6 +97,11 @@ def test_management_navigation_without_exact_title_is_unverified():
     assert result.page_state == "submitted_unverified"
 
 
+def test_bilibili_generic_opus_manager_is_not_publication_evidence():
+    assert BilibiliLocators.MANAGEMENT_URL is None
+    assert BilibiliLocators.DRAFT_MANAGEMENT_URL is None
+
+
 def test_management_exact_normalized_title_is_published():
     page = FakePage(management_text="其他文章\n  目标  标题  \n第三篇")
 
@@ -151,6 +156,17 @@ def test_navigation_label_containing_success_words_is_not_success_marker():
     result = verify_result_common(
         page, "测试平台", "publish", r"/article/\d+$",
         ["已发布"], ["草稿"], ["发布上限"],
+    )
+
+    assert result.status == "submitted_unverified"
+
+
+def test_page_body_containing_limit_words_is_not_limit_evidence():
+    page = FakePage(text="帮助：达到发布上限后如何处理")
+
+    result = verify_result_common(
+        page, "测试平台", "publish", r"/article/\d+$",
+        ["发布成功"], ["草稿"], ["发布上限"],
     )
 
     assert result.status == "submitted_unverified"
@@ -422,8 +438,11 @@ class CommonVerifierPublisher(StatefulPublisher):
         )
 
 
-def payload(path):
-    return ArticlePayload(title="目标标题", body="正文", markdown_path=path)
+def payload(path, *, force_republish=False):
+    return ArticlePayload(
+        title="目标标题", body="正文", markdown_path=path,
+        force_republish=force_republish,
+    )
 
 
 def test_submit_started_is_durable_before_click(tmp_path):
@@ -444,6 +463,24 @@ def test_submit_started_is_durable_before_click(tmp_path):
 
     assert result.status == "published"
     assert events.index("submit_started") < events.index("click") < events.index("submitted")
+
+
+def test_force_republish_bypasses_hazard_reconciliation(tmp_path):
+    article = tmp_path / "article.md"
+    article.write_text("# 标题", encoding="utf-8")
+    identity = article_key(article)
+    state_file = state_file_for(tmp_path)
+    record_step(identity, "stub", "publish", "submitted_unverified", state_file=state_file)
+    engine = MagicMock(base_dir=tmp_path)
+    engine.screenshot.return_value = None
+    publisher = StatefulPublisher(engine, verification="published")
+
+    result = publisher.publish(payload(article, force_republish=True), "publish")
+
+    assert result.status == "published"
+    assert publisher.submit_calls == 1
+    assert publisher.fill_calls == 2
+    assert publisher.events == ["click", "verify"]
 
 
 def test_submit_state_write_failure_blocks_click(tmp_path):

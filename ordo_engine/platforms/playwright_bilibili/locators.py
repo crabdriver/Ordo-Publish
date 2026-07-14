@@ -10,8 +10,9 @@ iframe src 含 'read-editor'。所有操作需通过 frame_locator 或 frame 对
 
 class BilibiliLocators:
     EDITOR_URL = "https://member.bilibili.com/platform/upload/text/new-edit"
-    MANAGEMENT_URL = "https://member.bilibili.com/platform/upload/text/manage"
-    DRAFT_MANAGEMENT_URL = "https://member.bilibili.com/platform/upload/text/manage?tab=draft"
+    # 该页面混合草稿与已发布内容，标题命中不能证明正式发布。
+    MANAGEMENT_URL = None
+    DRAFT_MANAGEMENT_URL = None
     PUBLISHED_URL_PATTERN = r"^https?://(?:www\.)?bilibili\.com/(?:read/cv\d+|opus/\d+)(?:[/?#]|$)"
 
     # 标题框在 iframe 内：<textarea class="title-input__inner" placeholder="请输入标题（建议30字以内）">

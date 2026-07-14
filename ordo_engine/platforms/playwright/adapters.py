@@ -216,16 +216,22 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
         markdown_path = Path(ctx["markdown_file"])
         raw_text = markdown_path.read_text(encoding="utf-8")
 
-        title = strip_title_marker(markdown_path.stem)
+        # 剥离 YAML frontmatter（--- 包裹的元数据块），避免泄漏到正文
         body = raw_text
+        if raw_text.startswith("---"):
+            parts = raw_text.split("---", 2)
+            if len(parts) >= 3:
+                body = parts[2].lstrip()
 
-        for line in raw_text.splitlines():
+        title = strip_title_marker(markdown_path.stem)
+
+        for line in body.splitlines():
             stripped = line.strip()
             if stripped.startswith("# ") or (
                 stripped.startswith("## ") and not stripped.startswith("###")
             ):
                 title = strip_title_marker(stripped.lstrip("#").strip())
-                body = raw_text.replace(line, "", 1).lstrip()
+                body = body.replace(line, "", 1).lstrip()
                 break
 
         title = title[:100]
@@ -245,6 +251,7 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
             cover_mode=ctx.get("cover_mode"),
             ai_declaration_mode=ctx.get("ai_declaration_mode"),
             scheduled_publish_at=ctx.get("scheduled_publish_at"),
+            force_republish=bool(ctx.get("force_republish", False)),
         )
 
 

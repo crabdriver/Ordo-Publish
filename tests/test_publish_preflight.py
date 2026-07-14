@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, patch
 from PIL import Image, ImageCms
 
 import publish
+from ordo_engine.run_lock import run_lock
 
 
 class PublishPreflightTests(unittest.TestCase):
@@ -313,6 +314,48 @@ class PublishPreflightTests(unittest.TestCase):
         args = publish.parse_args(["--bootstrap-browser", "--platform", "zhihu"])
         self.assertTrue(args.bootstrap_browser)
         self.assertIsNone(args.markdown_path)
+
+    def test_main_rejects_overlap_before_bootstrap_probe_or_publish(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / ".ordo" / "publish.lock"
+            with run_lock(lock_path), patch.object(
+                publish, "PUBLISH_LOCK_FILE", lock_path, create=True
+            ), patch.object(
+                publish.sys, "argv", ["publish.py", "--bootstrap-browser", "--platform", "zhihu"]
+            ), patch.object(publish, "bootstrap_browser_profile") as bootstrap:
+                with self.assertRaisesRegex(SystemExit, "已有发表任务"):
+                    publish.main()
+            bootstrap.assert_not_called()
+
+    def test_main_rejects_fake_inherited_lock_fd(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            lock_path = root / ".ordo" / "publish.lock"
+            other = root / "other.lock"
+            other.touch()
+            with other.open("r") as handle, patch.object(
+                publish, "PUBLISH_LOCK_FILE", lock_path, create=True
+            ), patch.dict(
+                "os.environ", {"ORDO_PUBLISH_LOCK_FD": str(handle.fileno())}, clear=False
+            ), patch.object(
+                publish.sys, "argv", ["publish.py", "--bootstrap-browser", "--platform", "zhihu"]
+            ), patch.object(publish, "bootstrap_browser_profile") as bootstrap:
+                with self.assertRaisesRegex(SystemExit, "继承发布锁无效"):
+                    publish.main()
+            bootstrap.assert_not_called()
+
+    def test_main_accepts_valid_inherited_lock_for_monitor_child(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / ".ordo" / "publish.lock"
+            with run_lock(lock_path) as lock_fd, patch.object(
+                publish, "PUBLISH_LOCK_FILE", lock_path, create=True
+            ), patch.dict(
+                "os.environ", {"ORDO_PUBLISH_LOCK_FD": str(lock_fd)}, clear=False
+            ), patch.object(
+                publish.sys, "argv", ["publish.py", "--bootstrap-browser", "--platform", "zhihu"]
+            ), patch.object(publish, "bootstrap_browser_profile") as bootstrap:
+                publish.main()
+            bootstrap.assert_called_once()
 
     def test_get_cdp_runtime_env_uses_managed_browser_session_port(self):
         with tempfile.TemporaryDirectory() as tmp:

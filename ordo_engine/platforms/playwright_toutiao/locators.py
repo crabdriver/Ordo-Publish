@@ -5,8 +5,8 @@ from __future__ import annotations
 
 class ToutiaoLocators:
     EDITOR_URL = "https://mp.toutiao.com/profile_v4/graphic/publish"
-    MANAGEMENT_URL = "https://mp.toutiao.com/profile_v4/graphic/manuscript"
-    DRAFT_MANAGEMENT_URL = "https://mp.toutiao.com/profile_v4/graphic/manuscript?status=draft"
+    MANAGEMENT_URL = "https://mp.toutiao.com/profile_v4/manage/content/all"
+    DRAFT_MANAGEMENT_URL = "https://mp.toutiao.com/profile_v4/manage/draft"
     PUBLISHED_URL_PATTERN = r"^https?://(?:www\.)?toutiao\.com/article/\d+(?:[/?#]|$)"
 
     TITLE_INPUT = (
@@ -26,8 +26,8 @@ class ToutiaoLocators:
 
     COVER_FILE_INPUT = ".btn-upload-handle input[type=file], #upload-drag-input"
 
-    PUBLISH_BUTTON_TEXTS = ["发布"]
-    CONFIRM_PUBLISH_TEXTS = ["确认发布", "确定", "立即发布"]
+    PUBLISH_BUTTON_TEXTS = ["预览并发布", "立即发布", "发表"]
+    CONFIRM_PUBLISH_TEXTS = ["确定并发布", "确认发布", "确定"]
     SAVE_DRAFT_TEXTS = ["存草稿", "保存草稿"]
 
     AI_CHECKBOX_LABEL = "引用AI"

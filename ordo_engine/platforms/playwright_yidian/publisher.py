@@ -53,7 +53,10 @@ class YidianPlaywrightPublisher(PlaywrightBasePublisher):
         except Exception:
             pass
 
-        upload_cover_common(self.page, cover_path, YidianLocators.COVER_FILE_INPUT, "一点号")
+        upload_cover_common(
+            self.page, cover_path, YidianLocators.COVER_FILE_INPUT, "一点号",
+            success_selector=YidianLocators.COVER_UPLOAD_SUCCESS,
+        )
         self.human.human_wait(0.5, 1.0)
 
     def configure_settings(self, article: ArticlePayload):

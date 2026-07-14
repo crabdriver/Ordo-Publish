@@ -5,7 +5,8 @@ from __future__ import annotations
 
 class JianshuLocators:
     EDITOR_URL = "https://www.jianshu.com/writer#/"
-    MANAGEMENT_URL = "https://www.jianshu.com/writer#/notebooks"
+    # 写作页同时展示草稿和已发布文章，不能作为正式发布证据。
+    MANAGEMENT_URL = None
     DRAFT_MANAGEMENT_URL = "https://www.jianshu.com/writer#/notebooks"
     PUBLISHED_URL_PATTERN = r"^https?://(?:www\.)?jianshu\.com/p/[A-Za-z0-9_-]+(?:[/?#]|$)"
 
@@ -27,8 +28,8 @@ class JianshuLocators:
 
     COVER_FILE_INPUT = 'input[type="file"][accept*="image"]'
 
-    PUBLISH_BUTTON_TEXTS = ["发布文章", "发布"]
-    CONFIRM_PUBLISH_TEXTS = ["确认发布", "确定", "发布"]
+    PUBLISH_BUTTON_TEXTS = ["提交", "发布文章", "发布"]
+    CONFIRM_PUBLISH_TEXTS = ["确认发布", "确定"]
     SAVE_DRAFT_TEXTS = ["保存", "存草稿"]
 
     PUBLISH_SUCCESS_MARKERS = ["发布成功，点击查看文章", "发布成功", "已发布"]

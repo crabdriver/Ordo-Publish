@@ -47,6 +47,7 @@ class ArticlePayload:
     cover_mode: Optional[str] = None
     ai_declaration_mode: Optional[str] = None
     scheduled_publish_at: Optional[str] = None
+    force_republish: bool = False
 
 
 @dataclass
@@ -213,7 +214,10 @@ class PlaywrightBasePublisher(ABC):
                 state_file=self._state_file,
             )
             prior_step = (prior or {}).get("last_step") or (prior or {}).get("status")
-            if prior_step in {"submit_started", "submitted", "submitted_unverified", "unknown"}:
+            if (
+                not article.force_republish
+                and prior_step in {"submit_started", "submitted", "submitted_unverified", "unknown"}
+            ):
                 return self._reconcile(mode)
 
             # Step 1: Navigate to editor
@@ -311,6 +315,7 @@ class PlaywrightBasePublisher(ABC):
     def _reconcile(self, mode: str) -> PublishResult:
         """危险提交状态只做核验；无法确认时绝不再次提交。"""
         self._submission_started = True
+        # 核验必须使用空白页，避免复用编辑页或无关文章页形成假阳性。
         self.page = self.engine.context.new_page()
         result = self.verify_result(mode)
         if not self._is_terminal(result.status, mode):

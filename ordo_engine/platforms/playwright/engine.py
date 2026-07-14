@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import random
-import subprocess
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -176,23 +175,21 @@ class PlaywrightEngine:
         self._launch_standalone()
 
     def _cleanup_stale_lock(self):
-        """清理孤儿 SingletonLock：若锁文件存在但没有任何 Chrome 进程持有它，
-        说明上次运行硬崩溃遗留，必须清理否则后续 launch 会全部失败（雪崩）。"""
+        """只在 SingletonLock 明确指向已退出 PID 时清理。"""
         lock = self.profile_dir / "SingletonLock"
-        if not lock.exists():
+        if not lock.is_symlink():
             return
         try:
-            # 检查是否有 Chrome 进程在使用这个 profile
-            out = subprocess.run(
-                ["pgrep", "-f", f"user-data-dir={self.profile_dir}"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if out.stdout.strip():
-                # 仍有进程持有，不清理（避免误杀正在运行的浏览器）
-                return
-        except Exception:
+            pid = int(os.readlink(lock).rsplit("-", 1)[1])
+        except (OSError, ValueError, IndexError):
             return
-        # 无进程持有 → 孤儿锁，清理
+        try:
+            os.kill(pid, 0)
+            return
+        except ProcessLookupError:
+            pass
+        except (PermissionError, OSError):
+            return
         for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
             try:
                 (self.profile_dir / name).unlink(missing_ok=True)

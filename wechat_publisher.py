@@ -775,6 +775,7 @@ def publish_one_article(
     theme_name="chinese",
     cover_path=None,
     cover_mode="auto",
+    force_republish=False,
 ):
     title, md_content, md_file_path = load_single_article(markdown_file)
 
@@ -792,7 +793,7 @@ def publish_one_article(
         return
 
     existing_titles = publisher.get_existing_titles()
-    if title in existing_titles:
+    if title in existing_titles and not force_republish:
         print(f"[SKIP] 微信草稿或已发布列表中已存在同标题文章: {title}")
         return
 
@@ -863,6 +864,11 @@ def main():
             default=None,
             help="任务级封面图策略：auto 自动；force_on 强制；force_off 禁用；random 随机（不匹配前缀和AI，直接从库中随机选择）"
         )
+        parser.add_argument(
+            "--force-republish",
+            action="store_true",
+            help="显式忽略同标题记录并重新创建草稿",
+        )
         args = parser.parse_args()
 
         print("=" * 50)
@@ -896,6 +902,7 @@ def main():
                 theme_name=args.theme,
                 cover_path=args.cover,
                 cover_mode=cover_mode,
+                force_republish=args.force_republish,
             )
             return
 

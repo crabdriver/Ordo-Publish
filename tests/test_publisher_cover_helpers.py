@@ -351,6 +351,27 @@ class YidianStrictSettingTests(unittest.TestCase):
 
 
 class WechatCoverResolutionTests(unittest.TestCase):
+    def test_force_republish_bypasses_duplicate_title_guard(self):
+        publisher = MagicMock()
+        publisher.get_existing_titles.return_value = {"Title"}
+        publisher.upload_permanent_material.return_value = ("thumb", "https://cover")
+        publisher.publish_draft.return_value = {"media_id": "draft-id"}
+
+        with patch.object(
+            wechat_publisher,
+            "load_single_article",
+            return_value=("Title", "Body", "/tmp/article.md"),
+        ), patch.object(
+            wechat_publisher,
+            "select_cover_for_path",
+            return_value="/tmp/cover.png",
+        ):
+            wechat_publisher.publish_one_article(
+                publisher, "/tmp/article.md", "draft", force_republish=True,
+            )
+
+        publisher.publish_draft.assert_called_once()
+
     def test_create_ai_cover_generates_text_free_4k_source_and_canonical_png(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

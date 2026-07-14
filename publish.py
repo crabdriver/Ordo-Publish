@@ -38,6 +38,7 @@ from ordo_engine.results.publish_records import (
     PUBLISH_RECORD_FIELDNAMES,
     append_publish_record_at_path,
 )
+from ordo_engine.run_lock import InvalidInheritedLock, RunAlreadyActive, run_lock
 from ordo_engine.models.workbench import CoverAssignment
 from ordo_engine.runner.pipeline import run_platform_task, run_publish_pipeline
 
@@ -49,6 +50,7 @@ WORKBENCH_FILE = BASE_DIR / ".publish-workbench.json"
 PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off", "random")
 COVERS_DIR = BASE_DIR / "covers"
 PUBLISH_RECORDS_FILE = BASE_DIR / "publish_records.csv"
+PUBLISH_LOCK_FILE = BASE_DIR / ".ordo" / "publish.lock"
 BROWSER_SESSION_DIR = BASE_DIR / ".ordo" / "browser-session"
 BROWSER_SESSION_STATE_FILE = BROWSER_SESSION_DIR / "state.json"
 PUBLISH_CONSOLE_DIR = BASE_DIR / ".ordo" / "publish-console"
@@ -1742,8 +1744,7 @@ def run_remote_cdp_preflight(remote_executor):
     return res
 
 
-def main():
-    args = parse_args()
+def _main(args):
     if args.bootstrap_browser:
         bootstrap_browser_profile(BASE_DIR, parse_platforms(args.platform))
         return
@@ -1872,7 +1873,7 @@ def main():
             print("[SUCCESS] 任务包上传成功！")
         except Exception as e:
             print(f"[ERROR] 上传任务包失败: {e}")
-            return
+            return 1
         finally:
             if local_bundle_path.exists():
                 local_bundle_path.unlink()
@@ -2006,5 +2007,29 @@ def main():
         raise SystemExit(1)
 
 
+def _inherited_publish_lock_fd():
+    raw = os.getenv("ORDO_PUBLISH_LOCK_FD")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise InvalidInheritedLock("继承发布锁无效") from exc
+
+
+def main():
+    args = parse_args()
+    try:
+        with run_lock(
+            PUBLISH_LOCK_FILE,
+            inherited_fd=_inherited_publish_lock_fd(),
+        ):
+            return _main(args)
+    except RunAlreadyActive as exc:
+        raise SystemExit("[BLOCK] 已有发表任务正在执行，本次发布已阻断。") from exc
+    except InvalidInheritedLock as exc:
+        raise SystemExit("[BLOCK] 继承发布锁无效，本次发布已阻断。") from exc
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

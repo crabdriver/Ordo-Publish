@@ -43,6 +43,7 @@ _CONTEXT_PAYLOAD_KEYS = (
     "cover_mode",
     "ai_declaration_mode",
     "scheduled_publish_at",
+    "force_republish",
 )
 
 
@@ -58,6 +59,7 @@ def run_platform_task(
     cover_mode=None,
     ai_declaration_mode=None,
     scheduled_publish_at=None,
+    force_republish=False,
     registry=None,
 ):
     registry = registry or build_platform_registry(Path(base_dir))
@@ -74,6 +76,9 @@ def run_platform_task(
         ai_declaration_mode=ai_declaration_mode,
         scheduled_publish_at=scheduled_publish_at,
     )
+    prepared["force_republish"] = bool(force_republish)
+    if force_republish and platform == "wechat" and "command" in prepared:
+        prepared["command"].append("--force-republish")
     process_result = adapter.publish(prepared)
     structured_result = adapter.collect_result(process_result, mode=mode)
     raw_returncode = process_result.get("returncode", 1)
@@ -197,6 +202,7 @@ def run_publish_pipeline(
                 ):
                     print(f"[SKIP] {platform} 《{Path(article_path).name}》已完成，跳过（幂等）")
                     result = _synthetic_skip(platform, article_path, args.mode)
+                    result["article_key"] = akey
                     result["run_id"] = getattr(args, "run_id", None)
                     results.append(result)
                     if append_record:
@@ -217,9 +223,11 @@ def run_publish_pipeline(
                     cover_mode=cover_mode,
                     ai_declaration_mode=ai_declaration_mode,
                     scheduled_publish_at=scheduled_publish_at,
+                    force_republish=getattr(args, "force_republish", False),
                     registry=registry,
                 )
                 result["article"] = str(article_path)
+                result["article_key"] = akey
                 result["run_id"] = getattr(args, "run_id", None)
                 results.append(result)
 

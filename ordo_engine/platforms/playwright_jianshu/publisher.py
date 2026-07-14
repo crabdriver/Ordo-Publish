@@ -71,7 +71,34 @@ class JianshuPlaywrightPublisher(PlaywrightBasePublisher):
         )
 
     def upload_cover(self, cover_path: Path):
-        upload_cover_common(self.page, cover_path, JianshuLocators.COVER_FILE_INPUT, "简书")
+        path = Path(cover_path).expanduser().resolve()
+        if not path.is_file():
+            raise RuntimeError(f"封面文件不存在: {path}")
+        image_tool = self.page.locator("a.fa.fa-picture-o").first
+        if image_tool.count() == 0:
+            raise RuntimeError("未找到简书图片上传按钮")
+        self.human.human_click(image_tool)
+        file_input = self.page.locator("input#kalamu-upload-image").first
+        file_input.wait_for(state="attached", timeout=5000)
+        file_input.set_input_files(str(path))
+        self.page.wait_for_function(
+            """() => /!\\[.*?\\]\\(https?:\\/\\/upload-images\\.jianshu\\.io\\/upload_images\\/[^)]+\\)/.test(
+                document.querySelector('textarea._3swFR.source, textarea#arthur-editor')?.value || ''
+            )""",
+            timeout=20000,
+        )
+        self.page.evaluate(
+            """() => {
+                const source = document.querySelector('textarea._3swFR.source, textarea#arthur-editor');
+                if (!source) throw new Error('简书正文源文本框不存在');
+                const match = source.value.match(/!\\[.*?\\]\\(https?:\\/\\/upload-images\\.jianshu\\.io\\/upload_images\\/[^)]+\\)/);
+                if (!match) throw new Error('简书封面 CDN 链接不存在');
+                source.value = match[0] + '\\n\\n' + source.value.replace(match[0], '').trim();
+                source.dispatchEvent(new Event('input', {bubbles: true}));
+                source.dispatchEvent(new Event('change', {bubbles: true}));
+            }"""
+        )
+        print(f"[INFO] 简书封面已插入正文首行: {path.name}")
         self.human.human_wait(0.5, 1.0)
 
     def configure_settings(self, article: ArticlePayload):

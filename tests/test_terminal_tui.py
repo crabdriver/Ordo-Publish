@@ -33,6 +33,13 @@ class FakeTerminalService:
         }
 
 
+class FailingTerminalService(FakeTerminalService):
+    def execute(self, settings, output):
+        self.executed.append(settings)
+        output("[ERROR] publish failed")
+        return {"status": "failed", "publish_result": {}}
+
+
 class TerminalTuiTests(unittest.IsolatedAsyncioTestCase):
     async def test_tui_loads_defaults_into_fullscreen_form(self):
         from textual.widgets import Input
@@ -107,6 +114,21 @@ class TerminalTuiTests(unittest.IsolatedAsyncioTestCase):
             log = app.query_one("#event-log", Log)
             self.assertTrue(service.executed)
             self.assertIn("success", str(log.lines))
+
+    async def test_tui_failed_publish_sets_nonzero_exit_code(self):
+        from ordo_engine.workbench.terminal_service import TerminalWizardSettings
+        from ordo_engine.workbench.terminal_tui import OrdoTuiApp
+
+        app = OrdoTuiApp(
+            base_dir=Path("/tmp"),
+            service=FailingTerminalService(TerminalWizardSettings(source_path="/tmp/articles")),
+        )
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await app.run_publish_now()
+
+        self.assertEqual(app.exit_code, 1)
 
 
 if __name__ == "__main__":

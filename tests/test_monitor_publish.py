@@ -1,6 +1,7 @@
 import csv
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -19,7 +20,10 @@ sys.modules[SPEC.name] = monitor_publish
 SPEC.loader.exec_module(monitor_publish)
 
 
-def append_record(path, *, article, platform, mode, status, returncode=0, error_type="", run_id=""):
+def append_record(
+    path, *, article, platform, mode, status, returncode=0, error_type="",
+    run_id="", article_id="", article_key="",
+):
     exists = path.exists()
     with path.open("a", encoding="utf-8", newline="") as fp:
         writer = csv.DictWriter(fp, fieldnames=PUBLISH_RECORD_FIELDNAMES)
@@ -29,6 +33,8 @@ def append_record(path, *, article, platform, mode, status, returncode=0, error_
             {
                 "timestamp": "2026-07-13 06:00:00",
                 "article": str(article),
+                "article_id": article_id,
+                "article_key": article_key,
                 "platform": platform,
                 "mode": mode,
                 "status": status,
@@ -40,6 +46,34 @@ def append_record(path, *, article, platform, mode, status, returncode=0, error_
 
 
 class MonitorPublishTests(unittest.TestCase):
+    def test_mismatched_article_id_never_matches_same_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            article = Path(tmp) / "article.md"
+            article.write_text("---\narticle_id: new-id\n---\n# 新稿", encoding="utf-8")
+            row = {"article": str(article), "article_id": "old-id", "article_key": "old-id"}
+
+            self.assertFalse(
+                monitor_publish.record_matches_article(
+                    row, article, article_id="new-id", identity="new-id"
+                )
+            )
+
+    def test_content_hash_distinguishes_replaced_article_at_same_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            article = Path(tmp) / "article.md"
+            article.write_text("# 旧稿", encoding="utf-8")
+            old_key = monitor_publish.durable_article_key(article)
+            row = {"article": str(article), "article_id": "", "article_key": old_key}
+            article.write_text("# 新稿", encoding="utf-8")
+            new_key = monitor_publish.durable_article_key(article)
+
+            self.assertNotEqual(old_key, new_key)
+            self.assertFalse(
+                monitor_publish.record_matches_article(
+                    row, article, article_id=None, identity=new_key
+                )
+            )
+
     def test_script_entrypoint_can_import_project_modules(self):
         result = subprocess.run(
             [sys.executable, str(MODULE_PATH), "--help"],
@@ -121,8 +155,30 @@ class MonitorPublishTests(unittest.TestCase):
     def test_typed_rate_limit_is_not_success_and_retries_next_run(self):
         self._assert_nonterminal_retries("limit_reached", "rate_limited")
 
-    def test_unverified_is_not_success_and_retries_for_safe_reconciliation(self):
-        self._assert_nonterminal_retries("submitted_unverified", "")
+    def test_unverified_is_not_success_but_is_protected_from_resubmission(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            records = root / "records.csv"
+            append_record(
+                records, article=article, platform="zhihu", mode="publish",
+                status="submitted_unverified", returncode=1,
+            )
+            for platform in ("toutiao", "jianshu", "yidian", "bilibili"):
+                append_record(
+                    records, article=article, platform=platform, mode="publish",
+                    status="published", returncode=0,
+                )
+            append_record(
+                records, article=article, platform="wechat", mode="draft",
+                status="draft_only", returncode=0,
+            )
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records), patch.object(
+                monitor_publish, "STATE_FILE", root / "state.json"
+            ), patch.object(monitor_publish, "run_cmd") as run:
+                self.assertEqual(monitor_publish.scan_once(root), [])
+            run.assert_not_called()
 
     def _assert_nonterminal_retries(self, status, error_type):
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,7 +220,10 @@ class MonitorPublishTests(unittest.TestCase):
             self.assertEqual(second, "attempted")
             self.assertIn("zhihu", calls[-1][calls[-1].index("--platform") + 1].split(","))
             state = json.loads(state_file.read_text(encoding="utf-8"))
-            self.assertNotEqual(state["articles"][str(article.resolve())].get("status"), "success")
+            self.assertNotEqual(
+                state["articles"][monitor_publish.article_key(article)].get("status"),
+                "success",
+            )
 
     def test_missing_new_csv_row_fails_closed_even_when_command_returns_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -179,7 +238,7 @@ class MonitorPublishTests(unittest.TestCase):
 
             self.assertEqual(result, "attempted")
             state = json.loads(state_file.read_text(encoding="utf-8"))
-            platforms = state["articles"][str(article.resolve())]["platforms"]
+            platforms = state["articles"][monitor_publish.article_key(article)]["platforms"]
             self.assertTrue(all(item["status"] == "unknown" for item in platforms.values()))
 
     def test_terminal_status_with_nonzero_returncode_is_not_success(self):
@@ -202,6 +261,52 @@ class MonitorPublishTests(unittest.TestCase):
             with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records):
                 merged = monitor_publish.merge_record_successes({}, article)
             self.assertTrue(monitor_publish._is_terminal("zhihu", merged["platforms"]["zhihu"]))
+
+    def test_newer_unverified_overrides_historical_terminal_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            records = root / "records.csv"
+            identity = monitor_publish.durable_article_key(article)
+            append_record(
+                records, article=article, article_key=identity,
+                platform="zhihu", mode="publish", status="published",
+            )
+            append_record(
+                records, article=article, article_key=identity,
+                platform="zhihu", mode="publish", status="submitted_unverified",
+                returncode=1,
+            )
+
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records):
+                merged = monitor_publish.merge_record_successes({}, article)
+
+            self.assertEqual(
+                merged["platforms"]["zhihu"]["status"], "submitted_unverified"
+            )
+
+    def test_newer_terminal_resolves_historical_unverified_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            records = root / "records.csv"
+            identity = monitor_publish.durable_article_key(article)
+            append_record(
+                records, article=article, article_key=identity,
+                platform="zhihu", mode="publish", status="submitted_unverified",
+                returncode=1,
+            )
+            append_record(
+                records, article=article, article_key=identity,
+                platform="zhihu", mode="publish", status="published",
+            )
+
+            with patch.object(monitor_publish, "PUBLISH_RECORDS_FILE", records):
+                merged = monitor_publish.merge_record_successes({}, article)
+
+            self.assertEqual(merged["platforms"]["zhihu"]["status"], "published")
 
     def test_existing_state_terminal_is_not_overwritten_by_csv_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,7 +363,7 @@ class MonitorPublishTests(unittest.TestCase):
                     monitor_publish.publish_article(article)
 
             saved = json.loads(state_file.read_text(encoding="utf-8"))
-            wechat = saved["articles"][str(article.resolve())]["platforms"]["wechat"]
+            wechat = saved["articles"][monitor_publish.article_key(article)]["platforms"]["wechat"]
             self.assertEqual(wechat["status"], "draft_only")
 
     def test_run_cmd_has_finite_timeout(self):
@@ -268,6 +373,45 @@ class MonitorPublishTests(unittest.TestCase):
             monitor_publish.run_cmd(["publish"])
         self.assertTrue(run.call_args.kwargs["start_new_session"])
         process.wait.assert_called_once_with(timeout=monitor_publish.PUBLISH_TIMEOUT_SECONDS)
+
+    def test_run_cmd_passes_valid_parent_lock_to_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = Path(tmp) / "publish.lock"
+            script = (
+                "import os, sys\n"
+                "from pathlib import Path\n"
+                "from ordo_engine.run_lock import run_lock\n"
+                "with run_lock(Path(sys.argv[1]), inherited_fd=int(os.environ['ORDO_PUBLISH_LOCK_FD'])):\n"
+                "    pass\n"
+            )
+            with run_lock(lock_path) as lock_fd:
+                returncode = monitor_publish.run_cmd(
+                    [sys.executable, "-c", script, str(lock_path)],
+                    lock_fd=lock_fd,
+                )
+            self.assertEqual(returncode, 0)
+
+    def test_scan_passes_held_lock_fd_to_publish_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            seen = []
+
+            def fake_run(_cmd, **kwargs):
+                fd = kwargs.get("lock_fd")
+                seen.append(fd)
+                self.assertEqual(os.fstat(fd).st_ino, monitor_publish.PUBLISH_LOCK_FILE.stat().st_ino)
+                return 1
+
+            with patch.object(
+                monitor_publish, "PUBLISH_LOCK_FILE", root / ".ordo" / "publish.lock"
+            ), patch.object(monitor_publish, "STATE_FILE", root / "state.json"), patch.object(
+                monitor_publish, "PUBLISH_RECORDS_FILE", root / "records.csv"
+            ), patch.object(monitor_publish, "run_cmd", side_effect=fake_run):
+                with self.assertRaises(monitor_publish.AutoPublishRunError):
+                    monitor_publish.scan_once(root)
+            self.assertTrue(seen)
 
     def test_timeout_terminates_process_group_and_returns_124(self):
         process = unittest.mock.MagicMock(pid=4321)
@@ -315,7 +459,7 @@ class MonitorPublishTests(unittest.TestCase):
             ), patch.object(monitor_publish, "run_cmd", return_value=124):
                 self.assertEqual(monitor_publish.publish_article(article), "attempted")
             state = json.loads(state_file.read_text(encoding="utf-8"))
-            platform_state = state["articles"][str(article.resolve())]["platforms"]
+            platform_state = state["articles"][monitor_publish.article_key(article)]["platforms"]
             self.assertTrue(all(item["error_type"] == "timeout" for item in platform_state.values()))
 
     def test_current_run_does_not_claim_other_run_published_row(self):
@@ -337,11 +481,13 @@ class MonitorPublishTests(unittest.TestCase):
     def test_main_maps_attempted_to_nonzero_and_safe_results_to_zero(self):
         with patch.object(monitor_publish, "publish_article_once", return_value="attempted"):
             self.assertEqual(monitor_publish.main(["--article", "/tmp/a.md"]), 1)
-        for status in ("success", "skipped", "skipped_overlap", "dry_run"):
+        for status in ("success", "skipped", "dry_run"):
             with self.subTest(status=status), patch.object(
                 monitor_publish, "publish_article_once", return_value=status
             ):
                 self.assertEqual(monitor_publish.main(["--article", "/tmp/a.md"]), 0)
+        with patch.object(monitor_publish, "publish_article_once", return_value="skipped_overlap"):
+            self.assertEqual(monitor_publish.main(["--article", "/tmp/a.md"]), 1)
         with patch.object(
             monitor_publish, "scan_once", side_effect=monitor_publish.AutoPublishRunError("failed")
         ):
@@ -433,6 +579,10 @@ class MonitorPublishTests(unittest.TestCase):
                 result = monitor_publish.scan_once(root)
             self.assertEqual(result, "skipped_overlap")
             load_state.assert_not_called()
+
+    def test_main_maps_scan_overlap_to_nonzero(self):
+        with patch.object(monitor_publish, "scan_once", return_value="skipped_overlap"):
+            self.assertEqual(monitor_publish.main(["--once", "--watch-dir", "/tmp"]), 1)
 
     def test_daemon_reports_scan_exception_then_continues_to_sleep(self):
         with patch.object(

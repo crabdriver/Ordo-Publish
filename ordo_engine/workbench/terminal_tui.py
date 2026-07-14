@@ -100,6 +100,7 @@ class OrdoTuiApp(App):
         self.base_dir = Path(base_dir).expanduser().resolve()
         self.service = service or TerminalServiceAdapter(self.base_dir)
         self.loaded_defaults = TerminalWizardSettings()
+        self.exit_code = 0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=False)
@@ -226,6 +227,7 @@ class OrdoTuiApp(App):
 
         result = await asyncio.to_thread(self.service.execute, settings, emit)
         self.write_log(f"[RESULT] 状态: {result['status']}")
+        self.exit_code = 0 if result.get("status") == "completed" else 1
 
     async def reload_defaults_now(self) -> None:
         self.loaded_defaults = self.service.load_defaults()
@@ -264,5 +266,4 @@ class OrdoTuiApp(App):
 def main(*, base_dir) -> int:
     app = OrdoTuiApp(base_dir=base_dir)
     app.run()
-    return 0
-
+    return app.exit_code

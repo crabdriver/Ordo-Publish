@@ -29,10 +29,11 @@ class ZhihuLocators:
 
     # ── 封面 ────────────────────────────────────────────────
     COVER_FILE_INPUT = "input.UploadPicture-input"
+    COVER_UPLOAD_SUCCESS = ".UploadPicture-wrapper img, .ArticleCover img"
 
     # ── 发布按钮 ────────────────────────────────────────────
-    PUBLISH_BUTTON_TEXTS = ["发布", "Publish"]
-    CONFIRM_PUBLISH_TEXTS = ["确认发布", "立即发布", "确定"]
+    PUBLISH_BUTTON_TEXTS = ["发布文章", "立即发布", "发布"]
+    CONFIRM_PUBLISH_TEXTS = ["确认发布", "确定"]
     SAVE_DRAFT_TEXTS = ["存草稿", "保存草稿", "Save Draft"]
 
     # ── AI 创作声明 ─────────────────────────────────────────

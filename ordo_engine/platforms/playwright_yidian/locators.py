@@ -22,10 +22,11 @@ class YidianLocators:
     EDITOR_AREA_MIN_HEIGHT = 100
 
     COVER_FILE_INPUT = "input.upload-input"
+    COVER_UPLOAD_SUCCESS = ".upload-img img, .cover-img img, .article-cover img"
     COVER_SINGLE_TEXT = "单图"
 
     PUBLISH_BUTTON_TEXTS = ["发文章", "发布"]
-    CONFIRM_PUBLISH_TEXTS = ["确认发布", "确定", "发布"]
+    CONFIRM_PUBLISH_TEXTS = ["确认发布", "确认", "确定"]
     SAVE_DRAFT_TEXTS = ["存草稿", "保存草稿", "保存"]
 
     AI_DECLARATION_TEXT = "内容由AI生成"

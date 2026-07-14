@@ -10,6 +10,8 @@ from PIL import Image
 from ordo_engine.platforms.base import BasePlatformAdapter
 from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
 from ordo_engine.platforms.playwright.base_publisher import PublishResult
+from ordo_engine.run_lock import run_lock
+from ordo_engine.run_state import article_key, is_done, state_file_for
 
 
 class DummyAdapter(BasePlatformAdapter):
@@ -287,8 +289,8 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(payload["job"]["failures"][0]["source_kind"], "bin")
         self.assertIn("unsupported", payload["job"]["failures"][0]["message"])
 
-    def test_run_publish_job_rejects_when_publish_lock_exists(self):
-        from ordo_engine.workbench.bridge import WORKBENCH_ROOT, run_publish_job
+    def test_run_publish_job_rejects_when_canonical_publish_lock_is_held(self):
+        from ordo_engine.workbench.bridge import run_publish_job
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -296,9 +298,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
             staged_dir.mkdir(parents=True, exist_ok=True)
             markdown_path = staged_dir / "a1.md"
             markdown_path.write_text("# 标题\n\n正文", encoding="utf-8")
-            lock_path = base / WORKBENCH_ROOT / "publish.lock"
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_path.write_text("busy", encoding="utf-8")
+            lock_path = base / ".ordo" / "publish.lock"
             plan = {
                 "publish_job": {
                     "job_id": "job-1",
@@ -344,8 +344,77 @@ class WorkbenchBridgeTests(unittest.TestCase):
                 ],
             }
 
-            with self.assertRaisesRegex(RuntimeError, "已有发布任务正在执行"):
-                run_publish_job(base, plan, registry={})
+            with run_lock(lock_path):
+                with self.assertRaisesRegex(RuntimeError, "已有发布任务正在执行"):
+                    run_publish_job(base, plan, registry={})
+
+    def test_run_publish_job_is_idempotent_and_does_not_start_browser_when_all_done(self):
+        from ordo_engine.workbench.bridge import run_publish_job
+
+        class Publisher:
+            publish_calls = 0
+            page = None
+
+            def __init__(self, _engine):
+                pass
+
+            def publish(self, _article, _mode):
+                self.__class__.publish_calls += 1
+                return PublishResult(
+                    platform="zhihu", status="draft_saved", page_state="draft_saved"
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            plan = self._minimal_plan(base, ("zhihu",))
+            adapter = PlaywrightPlatformAdapter(base, "zhihu", Publisher)
+            first_engine = MagicMock(base_dir=base)
+            factory = MagicMock(side_effect=AssertionError("browser must not start for all-skip run"))
+
+            first = run_publish_job(
+                base,
+                plan,
+                registry={"zhihu": adapter},
+                engine_factory=MagicMock(return_value=first_engine),
+            )
+            with patch(
+                "ordo_engine.platforms.registry.build_platform_registry",
+                side_effect=AssertionError("adapter registry must not load for all-skip run"),
+            ):
+                second = run_publish_job(
+                    base, plan, registry=None, engine_factory=factory
+                )
+
+            identity = article_key(plan["context_map"][0]["markdown_path"])
+            self.assertTrue(is_done(identity, "zhihu", "draft", state_file=state_file_for(base)))
+            self.assertEqual(first["results"][0]["status"], "draft_saved")
+            self.assertEqual(second["results"][0]["status"], "skipped_existing")
+            self.assertEqual(second["publish_job"]["skip_count"], 1)
+            self.assertEqual(Publisher.publish_calls, 1)
+            factory.assert_not_called()
+
+    def test_run_publish_job_idempotency_is_mode_scoped_and_failures_are_not_done(self):
+        from ordo_engine.workbench.bridge import run_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            draft_plan = self._minimal_plan(base, ("wechat",))
+            publish_plan = {**draft_plan, "mode": "publish"}
+            adapter = DummyAdapter(base, "wechat", stdout="ok")
+            adapter.publish = MagicMock(wraps=adapter.publish)
+
+            run_publish_job(base, draft_plan, registry={"wechat": adapter})
+            run_publish_job(base, publish_plan, registry={"wechat": adapter})
+            self.assertEqual(adapter.publish.call_count, 2)
+
+            failed_plan = self._minimal_plan(base, ("toutiao",))
+            failed_adapter = DummyAdapter(base, "toutiao", returncode=1, stderr="failed")
+            failed_adapter.publish = MagicMock(wraps=failed_adapter.publish)
+            run_publish_job(base, failed_plan, registry={"toutiao": failed_adapter})
+            run_publish_job(base, failed_plan, registry={"toutiao": failed_adapter})
+            identity = article_key(failed_plan["context_map"][0]["markdown_path"])
+            self.assertFalse(is_done(identity, "toutiao", "draft", state_file=state_file_for(base)))
+            self.assertEqual(failed_adapter.publish.call_count, 2)
 
     def test_discover_resources_returns_theme_and_cover_pool_details(self):
         from ordo_engine.workbench.bridge import discover_resources
