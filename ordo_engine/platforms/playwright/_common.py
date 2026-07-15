@@ -150,21 +150,28 @@ def fill_body_common(human: HumanBehavior, page: Page, body: str, editor_selecto
 
     time.sleep(0.5)
 
-    # 验证
+    def editor_text():
+        has_value = editor.evaluate("el => 'value' in el")
+        return editor.input_value() if has_value else editor.inner_text()
+
+    def normalized(value):
+        return " ".join(unicodedata.normalize("NFKC", value or "").split())
+
+    # 必须验证同一个编辑器，而不是 document.querySelector 找到的任意旧编辑器。
     try:
-        body_length = page.evaluate(
-            """() => {
-                const editor = document.querySelector(
-                    '.public-DraftEditor-content, .ProseMirror, .ql-editor, '
-                    + '[data-lexical-editor="true"], [contenteditable="true"], '
-                    + 'textarea#arthur-editor'
-                );
-                return (editor?.innerText || editor?.value || '').trim().length;
-            }"""
-        )
-        print(f"[INFO] {platform}正文已写入，编辑器字数: {body_length}")
-    except Exception:
-        pass
+        actual = editor_text()
+        if normalized(actual) != normalized(plain_body):
+            print(f"[WARN] {platform}正文未完整替换，使用 fill() 回退")
+            editor.fill(plain_body)
+            time.sleep(0.5)
+            actual = editor_text()
+        if normalized(actual) != normalized(plain_body):
+            raise RuntimeError(f"{platform}正文写入校验失败，阻止提交")
+        print(f"[INFO] {platform}正文已写入，编辑器字数: {len(actual.strip())}")
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"{platform}正文写入无法核验，阻止提交: {exc}") from exc
 
 
 def upload_cover_common(
