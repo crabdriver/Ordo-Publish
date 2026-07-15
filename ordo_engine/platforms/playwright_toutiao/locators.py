@@ -27,7 +27,10 @@ class ToutiaoLocators:
     COVER_FILE_INPUT = ".btn-upload-handle input[type=file], #upload-drag-input"
 
     PUBLISH_BUTTON_TEXTS = ["预览并发布", "立即发布", "发表"]
-    CONFIRM_PUBLISH_TEXTS = ["确定并发布", "确认发布", "确定"]
+    CONFIRM_PUBLISH_TEXTS = ["确定并发布", "确认发布"]
+    CONFIRM_DIALOG_SELECTOR = (
+        '[role="dialog"]:visible, .byte-modal-wrapper:visible'
+    )
     SAVE_DRAFT_TEXTS = ["存草稿", "保存草稿"]
 
     AI_CHECKBOX_LABEL = "引用AI"

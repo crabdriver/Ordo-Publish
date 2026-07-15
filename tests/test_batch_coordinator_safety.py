@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+from ordo_engine.runner import pipeline as pipeline_module
 from ordo_engine.run_state import (
     ArticleRecord,
     ArticleStage,
@@ -78,6 +79,16 @@ def test_retry_policy_never_resubmits_ambiguous_attempts(tmp_path, stage, expect
     }
 
     assert coordinator._needs_processing(article, "zhihu", "publish") is expected
+
+
+def test_publish_click_no_effect_requires_manual_review():
+    mapper = getattr(pipeline_module, "_map_payload_stage", None)
+    assert mapper is not None, "_map_payload_stage must exist"
+
+    assert mapper({
+        "status": "failed",
+        "error_type": "publish_click_no_effect",
+    }) == PlatformStage.manual_verify
 
 
 def test_browser_start_failure_does_not_overwrite_published_state(tmp_path):

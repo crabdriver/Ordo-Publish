@@ -14,8 +14,7 @@ from ordo_engine.platforms.playwright.base_publisher import (
 )
 from ordo_engine.platforms.playwright._common import (
     fill_title_common, fill_body_common,
-    click_publish_common, save_draft_common, verify_result_common,
-    find_visible_button,
+    click_publish_with_evidence, save_draft_common, verify_result_common,
 )
 from ordo_engine.platforms.playwright_yidian.locators import YidianLocators
 
@@ -111,11 +110,12 @@ class YidianPlaywrightPublisher(PlaywrightBasePublisher):
             pass
 
     def click_publish(self):
-        click_publish_common(
-            self.human, self.page,
+        click_publish_with_evidence(
+            self.page,
             YidianLocators.PUBLISH_BUTTON_TEXTS,
             YidianLocators.CONFIRM_PUBLISH_TEXTS,
             "一点号",
+            confirm_scope_selector=YidianLocators.CONFIRM_DIALOG_SELECTOR,
         )
 
     def save_draft(self):

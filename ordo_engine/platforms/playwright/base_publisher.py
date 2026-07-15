@@ -22,6 +22,10 @@ from ordo_engine.run_state import article_key, get_record, mark_done, record_ste
 SMOKE_STATE_PREFIX = "[SMOKE_STATE] "
 
 
+class PublishClickNoEffect(RuntimeError):
+    """发布控件没有产生任何可观察提交过渡。"""
+
+
 class PublishState(str, Enum):
     INIT = "init"
     EDITOR_READY = "editor_ready"
@@ -229,7 +233,13 @@ class PlaywrightBasePublisher(ABC):
             prior_step = (prior or {}).get("last_step") or (prior or {}).get("status")
             if (
                 not article.force_republish
-                and prior_step in {"submit_started", "submitted", "submitted_unverified", "unknown"}
+                and prior_step in {
+                    "submit_started",
+                    "submitted",
+                    "submitted_unverified",
+                    "publish_click_no_effect",
+                    "unknown",
+                }
             ):
                 return self._reconcile(mode)
 
@@ -294,6 +304,24 @@ class PlaywrightBasePublisher(ABC):
             self._persist_result(result, mode)
             return result
 
+        except PublishClickNoEffect as exc:
+            self.state = PublishState.ERROR
+            message = f"publish_click_no_effect: {exc}"
+            self._emit_state(
+                "publish_click_no_effect",
+                page_state="error",
+                error=message,
+            )
+            self._take_screenshot(f"error_{self.state.value}")
+            return PublishResult(
+                platform=self.platform,
+                status="failed",
+                page_state="error",
+                current_url=self.page.url if self.page else "",
+                smoke_step=self.state.value,
+                error=message,
+                screenshots=list(self._screenshots),
+            )
         except Exception as exc:
             if self._submission_started:
                 # 点击后异常不等于已发布。先回查后台：文章可能只存成草稿，

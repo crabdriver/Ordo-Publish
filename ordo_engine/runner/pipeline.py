@@ -539,7 +539,7 @@ class BatchCoordinator:
                 cover_path=None,
                 registry=self.registry)
             identity = stable_article_id(article_path, watch_dir=self.watch_dir)
-            stage = _map_status(payload.get("status", "failed"))
+            stage = _map_payload_stage(payload)
             prec = PlatformRecord(
                 stage=stage,
                 published_ref=payload.get("current_url") if stage == PlatformStage.published else None,
@@ -618,3 +618,9 @@ def _map_status(status):
          "failed": PlatformStage.failed_before_draft,
          "unknown": PlatformStage.manual_verify}
     return m.get(status, PlatformStage.failed_before_draft)
+
+
+def _map_payload_stage(payload):
+    if payload.get("error_type") == "publish_click_no_effect":
+        return PlatformStage.manual_verify
+    return _map_status(payload.get("status", "failed"))

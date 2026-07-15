@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from ordo_engine.platforms import base as platform_base
+from ordo_engine.platforms.playwright import base_publisher as base_publisher_module
 from ordo_engine.platforms.playwright._common import verify_result_common
 from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
 from ordo_engine.platforms.playwright.base_publisher import (
@@ -629,6 +631,47 @@ def test_crash_after_click_records_unverified_and_rerun_never_submits(tmp_path):
     assert second.fill_calls == 0
     assert second.navigate_calls == 0
     assert second.events == ["verify"]
+
+
+def test_publish_click_no_effect_is_failed_not_submitted_unverified(tmp_path):
+    exception_type = getattr(base_publisher_module, "PublishClickNoEffect", None)
+    assert exception_type is not None, "PublishClickNoEffect must exist"
+
+    article = tmp_path / "article.md"
+    article.write_text("# 标题", encoding="utf-8")
+    engine = MagicMock(base_dir=tmp_path)
+    engine.screenshot.return_value = None
+    publisher = StatefulPublisher(
+        engine,
+        submit_error=exception_type("头条号发布按钮点击后页面无变化"),
+    )
+
+    result = publisher.publish(payload(article), "publish")
+
+    assert result.status == "failed"
+    assert result.page_state == "error"
+    assert "页面无变化" in result.error
+    assert get_record(
+        article_key(article),
+        "stub",
+        "publish",
+        state_file=state_file_for(tmp_path),
+    )["last_step"] == "publish_click_no_effect"
+
+
+def test_publish_click_no_effect_has_specific_error_type():
+    expected = getattr(ErrorType, "PUBLISH_CLICK_NO_EFFECT", None)
+    assert expected is not None, "PUBLISH_CLICK_NO_EFFECT must exist"
+
+    result = platform_base.infer_error_type(
+        "failed",
+        {
+            "returncode": 1,
+            "stderr": "publish_click_no_effect: 页面无变化",
+        },
+    )
+
+    assert result == expected
 
 
 @pytest.mark.parametrize(

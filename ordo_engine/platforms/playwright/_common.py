@@ -17,7 +17,10 @@ except ImportError:
     from playwright.sync_api import Locator, Page
 
 from ordo_engine.platforms.playwright.human import HumanBehavior
-from ordo_engine.platforms.playwright.base_publisher import PublishResult
+from ordo_engine.platforms.playwright.base_publisher import (
+    PublishClickNoEffect,
+    PublishResult,
+)
 from markdown_utils import render_markdown_plain_text, should_declare_ai
 
 
@@ -334,6 +337,139 @@ def _feedback_text(page: Page) -> str:
     except Exception:
         pass
     return "\n".join(texts)
+
+
+def _is_interactive(locator: Locator) -> bool:
+    try:
+        return locator.is_visible() and locator.is_enabled()
+    except Exception:
+        return False
+
+
+def _find_scoped_confirm(
+    page: Page,
+    scope_selector: str,
+    confirm_texts: list,
+) -> Optional[Locator]:
+    try:
+        scopes = page.locator(scope_selector)
+        for index in range(scopes.count()):
+            scope = scopes.nth(index)
+            if not scope.is_visible():
+                continue
+            confirm = find_visible_button(scope, confirm_texts)
+            if confirm and _is_interactive(confirm):
+                return confirm
+    except Exception:
+        pass
+    return None
+
+
+def _wait_for_submit_effect(
+    page: Page,
+    publish_btn: Locator,
+    pre_url: str,
+    pre_feedback: str,
+    confirm_texts: list,
+    confirm_scope_selector: str,
+    timeout_seconds: float,
+) -> tuple[bool, Optional[Locator]]:
+    deadline = time.monotonic() + max(0, timeout_seconds)
+    while True:
+        confirm = _find_scoped_confirm(
+            page,
+            confirm_scope_selector,
+            confirm_texts,
+        )
+        if confirm:
+            return True, confirm
+
+        current_feedback = _feedback_text(page)
+        if (
+            (page.url or "") != pre_url
+            or (current_feedback and current_feedback != pre_feedback)
+            or not _is_interactive(publish_btn)
+        ):
+            return True, None
+
+        if time.monotonic() >= deadline:
+            return False, None
+        time.sleep(0.2)
+
+
+def _wait_for_confirm_effect(
+    page: Page,
+    confirm_btn: Locator,
+    pre_url: str,
+    pre_feedback: str,
+    timeout_seconds: float,
+) -> bool:
+    deadline = time.monotonic() + max(0, timeout_seconds)
+    while True:
+        current_feedback = _feedback_text(page)
+        if (
+            (page.url or "") != pre_url
+            or (current_feedback and current_feedback != pre_feedback)
+            or not _is_interactive(confirm_btn)
+        ):
+            return True
+
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.2)
+
+
+def click_publish_with_evidence(
+    page: Page,
+    publish_texts: list,
+    confirm_texts: list,
+    platform: str,
+    *,
+    confirm_scope_selector: str,
+    timeout_seconds: float = 10,
+):
+    """点击发布，并要求每次点击产生可观察页面变化。"""
+    publish_btn = find_visible_button(page, publish_texts)
+    if not publish_btn or not _is_interactive(publish_btn):
+        raise PublishClickNoEffect(f"{platform}发布按钮不可交互")
+
+    pre_url = page.url or ""
+    pre_feedback = _feedback_text(page)
+    print(f"[INFO] 点击{platform}发布按钮...")
+    try:
+        publish_btn.click()
+    except Exception as exc:
+        raise PublishClickNoEffect(f"{platform}发布按钮不可点击: {exc}") from exc
+
+    changed, confirm_btn = _wait_for_submit_effect(
+        page,
+        publish_btn,
+        pre_url,
+        pre_feedback,
+        confirm_texts,
+        confirm_scope_selector,
+        timeout_seconds,
+    )
+    if not changed:
+        raise PublishClickNoEffect(f"{platform}发布按钮点击后页面无变化")
+    if confirm_btn is None:
+        return
+
+    confirm_pre_url = page.url or ""
+    confirm_pre_feedback = _feedback_text(page)
+    print(f"[INFO] 点击{platform}确认发布...")
+    try:
+        confirm_btn.click()
+    except Exception as exc:
+        raise PublishClickNoEffect(f"{platform}确认发布按钮不可点击: {exc}") from exc
+    if not _wait_for_confirm_effect(
+        page,
+        confirm_btn,
+        confirm_pre_url,
+        confirm_pre_feedback,
+        timeout_seconds,
+    ):
+        raise PublishClickNoEffect(f"{platform}确认发布后页面无变化")
 
 
 def _has_feedback_marker(feedback_text: str, markers: list) -> bool:

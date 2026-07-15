@@ -14,8 +14,8 @@ from ordo_engine.platforms.playwright.base_publisher import (
 )
 from ordo_engine.platforms.playwright._common import (
     fill_title_common, fill_body_common, upload_cover_common,
-    click_publish_common, save_draft_common, verify_result_common,
-    find_visible_button, _feedback_text,
+    click_publish_with_evidence, save_draft_common, verify_result_common,
+    _feedback_text,
 )
 from ordo_engine.platforms.playwright_toutiao.locators import ToutiaoLocators
 
@@ -153,11 +153,19 @@ class ToutiaoPlaywrightPublisher(PlaywrightBasePublisher):
             print(f"[WARN] 设置头条号 AI 声明失败: {exc}")
 
     def click_publish(self):
-        click_publish_common(
-            self.human, self.page,
+        mask = self.page.locator(
+            ".ai-assistant-drawer .byte-drawer-mask:visible"
+        ).first
+        if mask.count() > 0:
+            mask.click(force=True, position={"x": 10, "y": 10})
+            time.sleep(0.3)
+
+        click_publish_with_evidence(
+            self.page,
             ToutiaoLocators.PUBLISH_BUTTON_TEXTS,
             ToutiaoLocators.CONFIRM_PUBLISH_TEXTS,
             "头条号",
+            confirm_scope_selector=ToutiaoLocators.CONFIRM_DIALOG_SELECTOR,
         )
 
     def save_draft(self):

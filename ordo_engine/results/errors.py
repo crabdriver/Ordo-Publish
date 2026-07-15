@@ -10,6 +10,7 @@ class ErrorType(str, Enum):
     RATE_LIMITED = "rate_limited"
     TRANSIENT_ERROR = "transient_error"
     DUPLICATE_OR_SKIPPED = "duplicate_or_skipped"
+    PUBLISH_CLICK_NO_EFFECT = "publish_click_no_effect"
     UNKNOWN_ERROR = "unknown_error"
 
 

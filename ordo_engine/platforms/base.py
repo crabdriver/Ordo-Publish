@@ -126,6 +126,8 @@ def infer_error_type(status, process_result):
         return ErrorType.DUPLICATE_OR_SKIPPED
     if process_result.get("timed_out"):
         return ErrorType.TRANSIENT_ERROR
+    if "publish_click_no_effect" in output:
+        return ErrorType.PUBLISH_CLICK_NO_EFFECT
     if any(marker in output for marker in ENVIRONMENT_MARKERS):
         return ErrorType.ENVIRONMENT_ERROR
     if "登录" in output:

@@ -3,7 +3,9 @@ from unittest.mock import patch
 
 import pytest
 
+from ordo_engine.platforms.playwright import _common as common_module
 from ordo_engine.platforms.playwright._common import find_visible_button, upload_cover_common
+from ordo_engine.platforms.playwright.base_publisher import PublishClickNoEffect
 from ordo_engine.platforms.playwright_bilibili.publisher import BilibiliPlaywrightPublisher
 from ordo_engine.platforms.playwright_bilibili.locators import BilibiliLocators
 from ordo_engine.platforms.playwright_jianshu.publisher import JianshuPlaywrightPublisher
@@ -11,6 +13,7 @@ from ordo_engine.platforms.playwright_jianshu.locators import JianshuLocators
 from ordo_engine.platforms.playwright_toutiao.publisher import ToutiaoPlaywrightPublisher
 from ordo_engine.platforms.playwright_toutiao.locators import ToutiaoLocators
 from ordo_engine.platforms.playwright_yidian.publisher import YidianPlaywrightPublisher
+from ordo_engine.platforms.playwright_yidian.locators import YidianLocators
 from ordo_engine.platforms.playwright_zhihu.locators import ZhihuLocators
 
 
@@ -142,6 +145,94 @@ def test_find_visible_button_uses_bounded_dom_text_timeout():
     assert found is candidate
     assert timeouts and all(timeout is not None and timeout <= 1000 for timeout in timeouts)
 
+
+def _evidence_click():
+    click = getattr(common_module, "click_publish_with_evidence", None)
+    assert click is not None, "click_publish_with_evidence must exist"
+    return click
+
+
+def test_evidence_click_rejects_disabled_publish_button():
+    publish = Locator(text="发布", enabled=False)
+    page = MappingPage({'button:visible:has-text("发布")': publish})
+
+    with pytest.raises(PublishClickNoEffect, match="不可交互"):
+        _evidence_click()(
+            page,
+            ["发布"],
+            ["确认发布"],
+            "测试平台",
+            confirm_scope_selector='[role="dialog"]:visible',
+            timeout_seconds=0,
+        )
+
+
+def test_evidence_click_rejects_click_without_page_change():
+    publish = Locator(text="发布")
+    page = MappingPage({'button:visible:has-text("发布")': publish})
+
+    with pytest.raises(PublishClickNoEffect, match="页面无变化"):
+        _evidence_click()(
+            page,
+            ["发布"],
+            ["确认发布"],
+            "测试平台",
+            confirm_scope_selector='[role="dialog"]:visible',
+            timeout_seconds=0,
+        )
+
+
+def test_toutiao_confirmation_does_not_accept_generic_confirm():
+    publish = Locator(text="预览并发布")
+    generic = Locator(text="确定")
+    page = MappingPage({
+        'button:visible:has-text("预览并发布")': publish,
+        'button:visible:has-text("确定")': generic,
+    })
+
+    with pytest.raises(PublishClickNoEffect, match="页面无变化"):
+        _evidence_click()(
+            page,
+            ToutiaoLocators.PUBLISH_BUTTON_TEXTS,
+            ["确定并发布", "确认发布"],
+            "头条号",
+            confirm_scope_selector=(
+                '[role="dialog"]:visible, .byte-modal-wrapper:visible'
+            ),
+            timeout_seconds=0,
+        )
+
+    assert generic.clicked == 0
+
+
+def test_evidence_click_accepts_scoped_confirm_then_transition():
+    publish = Locator(text="发布")
+    confirm = Locator(text="确认发布")
+    dialog = Locator(count=0)
+    dialog.children['button:visible:has-text("确认发布")'] = confirm
+    page = MappingPage({
+        'button:visible:has-text("发布")': publish,
+        '[role="dialog"]:visible': dialog,
+    })
+    publish.on_click = lambda: setattr(dialog, "_count", 1)
+    confirm.on_click = lambda: setattr(
+        page,
+        "url",
+        "https://example.test/manage",
+    )
+
+    _evidence_click()(
+        page,
+        ["发布"],
+        ["确认发布"],
+        "测试平台",
+        confirm_scope_selector='[role="dialog"]:visible',
+        timeout_seconds=0,
+    )
+
+    assert publish.clicked == 1
+    assert confirm.clicked == 1
+
 def cover(tmp_path: Path) -> Path:
     path = tmp_path / "cover.png"
     path.write_bytes(b"png")
@@ -229,17 +320,38 @@ def test_toutiao_opens_cover_picker_before_setting_file(tmp_path):
     assert confirm.clicked == 1
 
 
-def test_toutiao_publish_uses_normal_checked_click_path():
+def test_toutiao_publish_uses_evidence_click_path():
     publisher = object.__new__(ToutiaoPlaywrightPublisher)
-    publisher.page = object()
+    publisher.page = MappingPage({
+        ".ai-assistant-drawer .byte-drawer-mask:visible": Locator(count=0),
+    })
     publisher.human = object()
 
     with patch(
-        "ordo_engine.platforms.playwright_toutiao.publisher.click_publish_common"
+        "ordo_engine.platforms.playwright_toutiao.publisher.click_publish_with_evidence",
+        create=True,
     ) as click:
         publisher.click_publish()
 
     click.assert_called_once()
+    assert ToutiaoLocators.CONFIRM_PUBLISH_TEXTS == ["确定并发布", "确认发布"]
+    assert ToutiaoLocators.CONFIRM_DIALOG_SELECTOR
+
+
+def test_yidian_publish_uses_evidence_click_path():
+    publisher = object.__new__(YidianPlaywrightPublisher)
+    publisher.page = MappingPage({})
+    publisher.human = object()
+
+    with patch(
+        "ordo_engine.platforms.playwright_yidian.publisher.click_publish_with_evidence",
+        create=True,
+    ) as click:
+        publisher.click_publish()
+
+    click.assert_called_once()
+    assert YidianLocators.CONFIRM_PUBLISH_TEXTS == ["确认发布"]
+    assert YidianLocators.CONFIRM_DIALOG_SELECTOR
 
 
 def test_yidian_opens_single_cover_picker_before_setting_file(tmp_path):
