@@ -1,10 +1,10 @@
 import json
-import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
+from ordo_engine.assignment.cover_contract import CoverContractError
 from ordo_engine.runner import pipeline as pipeline_module
 from ordo_engine.run_state import (
     ArticleRecord,
@@ -26,13 +26,20 @@ def _article(path: Path, article_id: str = "article-1") -> Path:
     return path
 
 
-def _coordinator(tmp_path: Path, *, state_file: Path | None = None, engine_factory=None):
+def _coordinator(
+    tmp_path: Path,
+    *,
+    state_file: Path | None = None,
+    engine_factory=None,
+    wechat_adapter=None,
+):
     return BatchCoordinator(
         base_dir=tmp_path,
         watch_dir=tmp_path,
         state_file=state_file or tmp_path / ".ordo" / "auto_publish_state.json",
         registry={},
         engine_factory=engine_factory,
+        wechat_adapter=wechat_adapter,
     )
 
 
@@ -155,59 +162,95 @@ def test_empty_legacy_identity_for_same_source_is_safely_discarded(tmp_path):
     assert coordinator._articles["new-id"].source_path == str(article)
 
 
-def test_wechat_worker_bypasses_publish_cli_lock(tmp_path):
+def test_wechat_batch_uses_vps_adapter_not_local_subprocess(tmp_path):
     article = _article(tmp_path / "a.md")
     cover = tmp_path / "cover.png"
     cover.write_bytes(b"png")
-    coordinator = _coordinator(tmp_path)
+    adapter = Mock()
+    adapter.prepare.return_value = {"command": ["remote-wechat"]}
+    adapter.publish.return_value = {
+        "returncode": 0,
+        "stdout": "[OK] 已写入微信公众号草稿: draft-media-id\n",
+        "stderr": "",
+        "remote_started": True,
+    }
+    adapter.collect_result.return_value = Mock(status="draft_only")
+    coordinator = _coordinator(tmp_path, wechat_adapter=adapter)
     coordinator._articles["article-1"] = ArticleRecord(article_id="article-1")
-    result = subprocess.CompletedProcess(
-        args=[],
-        returncode=0,
-        stdout="[OK] 已写入微信公众号草稿: draft-media-id\n",
-        stderr="",
+
+    with patch("subprocess.run") as local_run:
+        coordinator._run_wechat_via_vps(article, cover)
+
+    local_run.assert_not_called()
+    adapter.prepare.assert_called_once_with(
+        markdown_file=article,
+        mode="draft",
+        cover_path=str(cover),
+        cover_mode="force_on",
     )
-
-    with patch("subprocess.run", return_value=result) as run:
-        coordinator._run_wechat_subprocess(article, cover)
-
-    cmd = run.call_args.args[0]
-    assert run.call_args.kwargs["timeout"] == 300
-    assert Path(cmd[1]).name == "wechat_publisher.py"
-    assert "publish.py" not in [Path(part).name for part in cmd]
-    assert cmd[cmd.index("--cover") + 1] == str(cover)
+    adapter.publish.assert_called_once_with(adapter.prepare.return_value)
     record = coordinator._articles["article-1"].platforms["wechat"]["draft"]
     assert record.stage == PlatformStage.draft_saved
     assert record.draft_ref == "draft-media-id"
 
 
-def test_wechat_batch_delegates_invalid_cover_recovery_to_worker(tmp_path):
+def test_wechat_batch_resolves_cover_before_vps_transfer(tmp_path):
+    article = _article(tmp_path / "a.md")
+    cover = tmp_path / "cover.png"
+    cover.write_bytes(b"png")
+    coordinator = _coordinator(tmp_path)
+    coordinator._articles["article-1"] = ArticleRecord(article_id="article-1")
+
+    with patch.object(
+        pipeline_module,
+        "resolve_wechat_cover",
+        return_value=cover,
+    ), patch.object(coordinator, "_run_wechat_via_vps") as worker:
+        coordinator._run_wechat_batch([article])
+
+    worker.assert_called_once_with(article, cover)
+
+
+def test_wechat_invalid_cover_fails_before_vps_start(tmp_path):
     article = _article(tmp_path / "a.md")
     coordinator = _coordinator(tmp_path)
     coordinator._articles["article-1"] = ArticleRecord(article_id="article-1")
 
-    with patch.object(coordinator, "_run_wechat_subprocess") as worker:
+    with patch.object(
+        pipeline_module,
+        "resolve_wechat_cover",
+        side_effect=CoverContractError("封面必须嵌入 sRGB"),
+    ), patch.object(coordinator, "_run_wechat_via_vps") as worker:
         coordinator._run_wechat_batch([article])
 
-    worker.assert_called_once_with(article, None)
+    worker.assert_not_called()
+    record = coordinator._articles["article-1"].platforms["wechat"]["draft"]
+    assert record.stage == PlatformStage.failed_before_draft
+    assert record.error_type == "cover_preflight_failed"
 
 
 def test_wechat_timeout_is_manual_verify_not_automatic_retry(tmp_path):
     article = _article(tmp_path / "a.md")
     cover = tmp_path / "cover.png"
     cover.write_bytes(b"png")
-    coordinator = _coordinator(tmp_path)
+    adapter = Mock()
+    adapter.prepare.return_value = {"command": ["remote-wechat"]}
+    adapter.publish.return_value = {
+        "returncode": 124,
+        "stdout": "",
+        "stderr": "VPS 微信 worker 超时（300s）",
+        "timed_out": True,
+        "remote_started": True,
+    }
+    adapter.collect_result.return_value = Mock(status="failed")
+    coordinator = _coordinator(tmp_path, wechat_adapter=adapter)
     coordinator._articles["article-1"] = ArticleRecord(article_id="article-1")
 
-    with patch(
-        "subprocess.run",
-        side_effect=subprocess.TimeoutExpired("wechat", 120),
-    ):
-        coordinator._run_wechat_subprocess(article, cover)
+    coordinator._run_wechat_via_vps(article, cover)
 
     record = coordinator._articles["article-1"].platforms["wechat"]["draft"]
     assert record.stage == PlatformStage.manual_verify
-    assert record.error_type == "wechat_worker_timeout"
+    assert record.error_type == "wechat_vps_worker_timeout"
     assert coordinator._needs_processing(
         coordinator._articles["article-1"], "wechat", "draft"
     ) is False

@@ -23,6 +23,7 @@ from ordo_engine.assignment.cover_contract import (
     resolve_publication_cover,
     validate_cover,
 )
+from ordo_engine.platforms.wechat.runtime import require_vps_worker
 
 BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 
@@ -31,12 +32,6 @@ load_dotenv(BASE_DIR / "secrets.env")
 
 APPID = os.getenv("WECHAT_APPID")
 SECRET = os.getenv("WECHAT_SECRET")
-
-# Apply proxy if configured
-wechat_proxy = os.getenv("WECHAT_PROXY")
-if wechat_proxy and os.environ.get("ORDO_WORKER") != "1":
-    os.environ["HTTP_PROXY"] = wechat_proxy
-    os.environ["HTTPS_PROXY"] = wechat_proxy
 
 WECHAT_MARKDOWN_EXTENSIONS = ["extra", "sane_lists"]
 
@@ -328,6 +323,7 @@ class WeChatPublisher:
         self._existing_titles_cache = None
 
     def get_access_token(self):
+        require_vps_worker()
         url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={self.appid}&secret={self.secret}"
         response = requests.get(url, timeout=30).json()
         if 'access_token' in response:
@@ -364,6 +360,7 @@ class WeChatPublisher:
                 raise Exception(f"上传封面失败: {res}")
 
     def post_json(self, url, payload, timeout=60):
+        require_vps_worker()
         response = requests.post(
             url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -927,6 +924,7 @@ def main():
             help="显式忽略同标题记录并重新创建草稿",
         )
         args = parser.parse_args()
+        require_vps_worker()
 
         print("=" * 50)
         print("  ordo 微信公众号自动发布引擎 v3.0")

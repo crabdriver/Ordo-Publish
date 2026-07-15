@@ -1,8 +1,10 @@
+import os
 import subprocess
 import sys
 import unittest
 from tempfile import TemporaryDirectory
 from pathlib import Path
+from unittest.mock import patch
 
 from ordo_engine.platforms.base import BasePlatformAdapter, SubprocessPlatformAdapter
 from ordo_engine.platforms.registry import build_platform_registry
@@ -59,23 +61,46 @@ class PlatformContractTests(unittest.TestCase):
         self.assertIn("wechat_publisher.py", str(prepared["command"][1]))
         self.assertEqual(prepared["command"][-2:], ["--theme", "chinese"])
 
-    def test_wechat_publish_runs_local_command_without_vps_config(self):
+    def test_wechat_publish_refuses_local_without_vps_config(self):
         with TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
-            (repo / "secrets.env").write_text("WECHAT_PROXY=http://127.0.0.1:7890\n", encoding="utf-8")
+            (repo / "secrets.env").write_text("WECHAT_APPID=test-only\n", encoding="utf-8")
             executor = FakeExecutor(stdout="已写入微信公众号草稿")
             adapter = WeChatPlatformAdapter(repo, executor=executor)
             prepared = adapter.prepare(markdown_file=repo / "article.md", mode="publish")
 
             result = adapter.publish(prepared)
 
+        self.assertEqual(result["returncode"], 2)
+        self.assertIn("必须走 VPS", result["stderr"])
+        self.assertEqual(executor.calls, [])
+
+    def test_wechat_remote_command_marks_vps_worker_and_clears_proxy(self):
+        calls = []
+
+        def fake_run(command, **_kwargs):
+            calls.append(command)
+            stdout = "[OK] 已写入微信公众号草稿: media-id" if command[0] == "ssh" and "ORDO_WECHAT_VPS_WORKER=1" in command[-1] else ""
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            article = repo / "article.md"
+            article.write_text("# title\nbody\n", encoding="utf-8")
+            (repo / "secrets.env").write_text(
+                "VPS_IP=203.0.113.10\nVPS_USER=root\nVPS_PATH=/root/ordo-publish\n",
+                encoding="utf-8",
+            )
+            adapter = WeChatPlatformAdapter(repo)
+            prepared = adapter.prepare(markdown_file=article, mode="draft")
+
+            with patch("ordo_engine.platforms.wechat.publisher.subprocess.run", side_effect=fake_run):
+                result = adapter.publish(prepared)
+
         self.assertEqual(result["returncode"], 0)
-        self.assertEqual(len(executor.calls), 1)
-        call = executor.calls[0]
-        self.assertEqual(call["cwd"], str(repo))
-        self.assertEqual(call["command"], prepared["command"])
-        self.assertNotIn("ssh", call["command"])
-        self.assertNotIn("scp", call["command"])
+        remote = [cmd for cmd in calls if cmd[0] == "ssh" and "ORDO_WECHAT_VPS_WORKER=1" in cmd[-1]]
+        self.assertEqual(len(remote), 1)
+        self.assertIn("unset WECHAT_PROXY HTTP_PROXY HTTPS_PROXY", remote[0][-1])
 
     def test_wechat_force_republish_flag_reaches_local_publisher(self):
         with TemporaryDirectory() as tmpdir:
@@ -83,10 +108,11 @@ class PlatformContractTests(unittest.TestCase):
             executor = FakeExecutor(stdout="已写入微信公众号草稿")
             registry = {"wechat": WeChatPlatformAdapter(repo, executor=executor)}
 
-            run_platform_task(
-                repo, "wechat", repo / "article.md", "draft",
-                force_republish=True, registry=registry,
-            )
+            with patch.dict(os.environ, {"ORDO_WORKER": "1", "ORDO_WECHAT_VPS_WORKER": "1"}):
+                run_platform_task(
+                    repo, "wechat", repo / "article.md", "draft",
+                    force_republish=True, registry=registry,
+                )
 
         self.assertIn("--force-republish", executor.calls[0]["command"])
 
@@ -95,9 +121,10 @@ class PlatformContractTests(unittest.TestCase):
             repo = Path(tmpdir)
             executor = FakeExecutor(stdout="已写入微信公众号草稿")
             registry = {"wechat": WeChatPlatformAdapter(repo, executor=executor)}
-            result = run_platform_task(
-                repo, "wechat", repo / "article.md", "draft", registry=registry
-            )
+            with patch.dict(os.environ, {"ORDO_WORKER": "1", "ORDO_WECHAT_VPS_WORKER": "1"}):
+                result = run_platform_task(
+                    repo, "wechat", repo / "article.md", "draft", registry=registry
+                )
 
         self.assertEqual(result["status"], "draft_only")
         self.assertEqual(result["returncode"], 0)
@@ -107,9 +134,10 @@ class PlatformContractTests(unittest.TestCase):
             repo = Path(tmpdir)
             executor = FakeExecutor(stdout="request completed")
             registry = {"wechat": WeChatPlatformAdapter(repo, executor=executor)}
-            result = run_platform_task(
-                repo, "wechat", repo / "article.md", "draft", registry=registry
-            )
+            with patch.dict(os.environ, {"ORDO_WORKER": "1", "ORDO_WECHAT_VPS_WORKER": "1"}):
+                result = run_platform_task(
+                    repo, "wechat", repo / "article.md", "draft", registry=registry
+                )
 
         self.assertEqual(result["status"], "success_unknown")
         self.assertNotEqual(result["returncode"], 0)
@@ -119,9 +147,10 @@ class PlatformContractTests(unittest.TestCase):
             repo = Path(tmpdir)
             executor = FakeExecutor(stdout="已写入微信公众号草稿")
             registry = {"wechat": WeChatPlatformAdapter(repo, executor=executor)}
-            result = run_platform_task(
-                repo, "wechat", repo / "article.md", "publish", registry=registry
-            )
+            with patch.dict(os.environ, {"ORDO_WORKER": "1", "ORDO_WECHAT_VPS_WORKER": "1"}):
+                result = run_platform_task(
+                    repo, "wechat", repo / "article.md", "publish", registry=registry
+                )
 
         self.assertEqual(result["status"], "draft_only")
         self.assertNotEqual(result["returncode"], 0)
@@ -131,9 +160,10 @@ class PlatformContractTests(unittest.TestCase):
             repo = Path(tmpdir)
             executor = FakeExecutor(returncode=9, stdout="已写入微信公众号草稿")
             registry = {"wechat": WeChatPlatformAdapter(repo, executor=executor)}
-            result = run_platform_task(
-                repo, "wechat", repo / "article.md", "draft", registry=registry
-            )
+            with patch.dict(os.environ, {"ORDO_WORKER": "1", "ORDO_WECHAT_VPS_WORKER": "1"}):
+                result = run_platform_task(
+                    repo, "wechat", repo / "article.md", "draft", registry=registry
+                )
 
         self.assertEqual(result["status"], "draft_only")
         self.assertEqual(result["returncode"], 9)

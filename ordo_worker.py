@@ -84,6 +84,7 @@ def execute_tasks_loop(db_path: Path, job_id: str, tasks_to_run, job_dir: Path, 
     # Inject CDP port to environment
     os.environ.setdefault("LIVE_CDP_PORT", "9333")
     os.environ["ORDO_WORKER"] = "1"
+    os.environ["ORDO_WECHAT_VPS_WORKER"] = "1"
     
     blocked_platforms = set()
     

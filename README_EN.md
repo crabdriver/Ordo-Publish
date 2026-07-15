@@ -1,6 +1,6 @@
 # Ordo-Publish
 
-**Ordo-Publish** is a local multi-platform publishing engine. Markdown is the single content source. WeChat uses its official API; Zhihu, Toutiao, Jianshu, Yidian, and Bilibili columns use a repository-isolated browser. Local execution is the default. VPS support remains only as an explicit manual emergency path.
+**Ordo-Publish** is a locally orchestrated multi-platform publishing engine. Markdown is the single content source. WeChat must use the VPS fixed public IP for its official API; Zhihu, Toutiao, Jianshu, Yidian, and Bilibili columns use the repository-isolated local browser. The local machine must never call the WeChat API directly.
 
 The project is terminal / CLI first. Automation loads content, injects it into platforms, saves drafts or publishes, records typed outcomes, and supports safe recovery. It does not automate login, CAPTCHAs, or risk-control bypasses.
 
@@ -13,7 +13,8 @@ The project is terminal / CLI first. Automation loads content, injects it into p
 - Local jobs do not scan `DevToolsActivePort`, connect through CDP, or fall back to primary Chrome or another normal browser session.
 - An uninitialized profile or expired login stops the run. It never triggers a browser fallback.
 - `.ordo/publish.lock` prevents overlapping runs and profile contention.
-- `--remote vps` is enabled only when passed explicitly. Normal CLI and monitor runs are local.
+- WeChat always goes through the dedicated SSH/SCP adapter and VPS worker. Missing VPS configuration blocks the task; there is no local fallback.
+- `--remote vps` controls emergency whole-batch hosting only. It does not change the VPS-only WeChat rule.
 
 ## Entry Points
 
@@ -21,7 +22,7 @@ The project is terminal / CLI first. Automation loads content, injects it into p
 - `scripts/terminal_wizard.py`: source-tree compatibility launcher
 - `publish.py`: unified single-file or directory entry
 - `scripts/monitor_publish.py`: local scheduled-run entry
-- `wechat_publisher.py`: WeChat official-API publisher
+- `wechat_publisher.py`: WeChat official-API publisher for VPS workers only
 - `ordo_worker.py`: manual VPS emergency queue tool
 
 Supported platforms: WeChat, Zhihu, Toutiao, Jianshu, Yidian, and Bilibili columns. Jianshu remains experimental because `403 Forbidden` and platform risk controls may block access.
@@ -65,6 +66,9 @@ cp secrets.env.example secrets.env
 WECHAT_APPID=your_appid
 WECHAT_SECRET=your_secret
 WECHAT_AUTHOR=your_author_name
+VPS_IP=your_fixed_public_ip
+VPS_USER=root
+VPS_PATH=/root/ordo-publish
 ```
 
 Optional project configuration:
@@ -90,7 +94,7 @@ python3 publish.py --bootstrap-browser --platform zhihu,toutiao,jianshu,yidian,b
 
 This command opens only `.ordo/automation-profile`. Log in, then enter `YES` at the terminal prompt. Later automation reuses that profile in a headless context. Rerun bootstrap after login expires. Automatic publishing never launches normal Chrome.
 
-WeChat uses its API and needs no browser login.
+WeChat uses its API from the VPS worker and needs no browser login. Direct local execution of `wechat_publisher.py` is rejected.
 
 ## Manual Local Publishing
 
@@ -106,7 +110,7 @@ Publish:
 python3 publish.py article.md --platform all --mode publish --continue-on-error
 ```
 
-Local is the default, so these commands are equivalent:
+Local execution is the default for browser platforms, so these commands are equivalent:
 
 ```bash
 python3 publish.py article.md --platform zhihu --mode publish
@@ -137,10 +141,10 @@ Daemon scan:
 
 Each pending article uses at most two groups:
 
-1. One WeChat API `draft` group, with no browser.
+1. One WeChat VPS API `draft` group, with no browser. The local machine only packages and transfers files over SSH/SCP.
 2. One `publish` group containing every pending browser platform, sharing one browser context.
 
-Monitor always passes `--remote local`. Each group gets its own `run_id`; only matching `publish_records.csv` rows count for that group. `.ordo/auto_publish_state.json` and `publish_records.csv` jointly enforce idempotency. `[INFO] 没有未处理文章` is a safe no-op.
+Each group gets its own `run_id`; only matching `publish_records.csv` rows count for that group. `.ordo/auto_publish_state.json` and `publish_records.csv` jointly enforce idempotency. `[INFO] 没有未处理文章` is a safe no-op.
 
 Monitor reports five typed categories:
 
@@ -177,7 +181,7 @@ Outcome handling trusts typed status and records for the current run. Process ex
 
 ## Manual VPS Emergency Mode
 
-VPS support remains available, but monitor never invokes it and normal CLI does not default to it. Use it only after manually confirming remote version, browser/CDP, and login state:
+Whole-batch VPS hosting remains an emergency option and monitor never invokes it. It is separate from the dedicated WeChat VPS API route. Use whole-batch hosting only after confirming remote version, browser/CDP, and login state:
 
 ```bash
 python3 publish.py article.md --platform all --mode publish \

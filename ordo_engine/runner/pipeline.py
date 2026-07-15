@@ -13,7 +13,7 @@ from ordo_engine.run_state import (
     load_v2_state, save_v2_state, set_platform_record, stable_article_id,
     compute_package_hash, get_platform_record, StateCorruptionError,
 )
-from ordo_engine.assignment.cover_contract import resolve_wechat_cover
+from ordo_engine.assignment.cover_contract import CoverContractError, resolve_wechat_cover
 from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
 from ordo_engine.platforms.playwright.engine import PlaywrightEngine
 
@@ -395,16 +395,17 @@ class BatchCoordinator:
         a.source_path = str(article_path)
 
     def _run_wechat_batch(self, article_paths):
-        """微信批处理 — 保留原有 subprocess 路径（通过 WECHAT_PROXY 走 VPS IP）。"""
+        """微信批处理只委托 VPS adapter；本机不得运行微信 worker。"""
         for p in article_paths:
             identity = stable_article_id(p, watch_dir=self.watch_dir)
             a = self._articles.get(identity)
             if not a or not self._needs_processing(a, WECHAT_PLATFORM, "draft"):
                 continue
             try:
-                # 封面选择与 AI 兜底由微信 worker 统一处理；协调器不得提前短路。
-                self._run_wechat_subprocess(p, None)
-            except Exception as exc:
+                # VPS 无法访问本机润色目录；必须显式上传已校验封面。
+                cover = resolve_wechat_cover(p)
+                self._run_wechat_via_vps(p, cover)
+            except CoverContractError as exc:
                 prec = PlatformRecord(
                     stage=PlatformStage.failed_before_draft,
                     error=str(exc),
@@ -413,43 +414,64 @@ class BatchCoordinator:
                 set_platform_record(
                     self._articles, identity, WECHAT_PLATFORM, "draft", prec
                 )
+            except Exception as exc:
+                prec = PlatformRecord(
+                    stage=PlatformStage.failed_before_draft,
+                    error=str(exc),
+                    error_type="wechat_vps_adapter_failed",
+                )
+                set_platform_record(
+                    self._articles, identity, WECHAT_PLATFORM, "draft", prec
+                )
             self._save_state()
 
-    def _run_wechat_subprocess(self, article_path, cover_path=None):
-        """微信走专用 worker，避免子进程再次获取批次锁。"""
-        import subprocess as _sub
-        cmd = [
-            sys.executable,
-            str(self.base_dir / "wechat_publisher.py"),
-            str(article_path),
-            "--mode", "draft",
-        ]
+    def _run_wechat_via_vps(self, article_path, cover_path=None):
+        """通过专用 adapter 在 VPS 执行微信 worker。"""
+        adapter = self.wechat_adapter or self.registry.get(WECHAT_PLATFORM)
+        if adapter is None:
+            raise RuntimeError("缺少微信公众号 VPS adapter")
+
+        prepare_args = {
+            "markdown_file": article_path,
+            "mode": "draft",
+        }
         if cover_path is not None:
-            cmd.extend(["--cover", str(cover_path), "--cover-mode", "force_on"])
-        try:
-            result = _sub.run(cmd, cwd=str(self.base_dir),
-                              capture_output=True, text=True, timeout=300)
-            rc = result.returncode
-            output = f"{result.stdout}\n{result.stderr}".strip()
-            err = output[-1000:] if result.returncode != 0 else None
-            error_type = None if rc == 0 else "wechat_worker_failed"
-        except _sub.TimeoutExpired:
-            rc = 1
-            err = "wechat subprocess timeout (300s)"
-            output = ""
-            error_type = "wechat_worker_timeout"
+            prepare_args.update(
+                cover_path=str(cover_path),
+                cover_mode="force_on",
+            )
+        prepared = adapter.prepare(**prepare_args)
+        result = adapter.publish(prepared)
+        structured = adapter.collect_result(result, mode="draft")
+
+        output = f"{result.get('stdout', '')}\n{result.get('stderr', '')}".strip()
         identity = stable_article_id(article_path, watch_dir=self.watch_dir)
         match = re.search(r"已写入微信公众号草稿:\s*(\S+)", output)
-        if match or rc == 0:
+        if match:
             stage = PlatformStage.draft_saved
             error_type = None
+            error = None
+        elif not result.get("remote_started", False):
+            stage = PlatformStage.failed_before_draft
+            error_type = (
+                "wechat_vps_config_missing"
+                if result.get("returncode") == 2
+                else "wechat_vps_transport_failed"
+            )
+            error = output[-1000:] or "VPS 微信任务未启动"
         else:
-            # worker 已经接触远端 API；非零/超时无法证明草稿未创建。
+            # VPS worker 已启动；无 media id 时无法证明草稿未创建。
             stage = PlatformStage.manual_verify
+            error_type = (
+                "wechat_vps_worker_timeout"
+                if result.get("timed_out")
+                else "wechat_vps_result_unverified"
+            )
+            error = output[-1000:] or str(getattr(structured, "summary", ""))
         prec = PlatformRecord(
             stage=stage,
             draft_ref=match.group(1) if match else None,
-            error=err,
+            error=error,
             error_type=error_type,
         )
         set_platform_record(self._articles, identity, WECHAT_PLATFORM, "draft", prec)
