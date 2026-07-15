@@ -29,7 +29,8 @@ class ZhihuLocators:
 
     # ── 封面 ────────────────────────────────────────────────
     COVER_FILE_INPUT = "input.UploadPicture-input"
-    COVER_UPLOAD_SUCCESS = ".UploadPicture-wrapper img, .ArticleCover img"
+    # 实测上传完成后生成远端图片：<img alt="封面图" src="https://picx.zhimg.com/...">。
+    COVER_UPLOAD_SUCCESS = 'img[alt="封面图"]'
 
     # ── 发布按钮 ────────────────────────────────────────────
     PUBLISH_BUTTON_TEXTS = ["发布文章", "立即发布", "发布"]

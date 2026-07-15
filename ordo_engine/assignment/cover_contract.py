@@ -3,12 +3,13 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-from PIL import Image, ImageCms, ImageOps
+from PIL import Image, ImageCms, ImageFilter, ImageOps, ImageStat
 
 
 COVER_FILENAME = "cover.png"
 COVER_SIZE = (2538, 1080)
 COVER_MAX_BYTES = 5 * 1024 * 1024
+MIN_COVER_EDGE_DETAIL = 4.0
 COVER_PLATFORMS = ("wechat", "zhihu", "toutiao", "yidian", "bilibili", "jianshu")
 
 
@@ -76,6 +77,10 @@ def validate_cover(path: str | Path) -> Path:
             profile = ImageCms.ImageCmsProfile(io.BytesIO(icc))
             if "srgb" not in ImageCms.getProfileDescription(profile).lower():
                 raise CoverContractError(f"封面色彩空间必须是 sRGB: {candidate}")
+            inset = image.convert("L").crop((50, 50, image.width - 50, image.height - 50))
+            edge_detail = ImageStat.Stat(inset.filter(ImageFilter.FIND_EDGES)).mean[0]
+            if edge_detail < MIN_COVER_EDGE_DETAIL:
+                raise CoverContractError(f"封面视觉细节不足，疑似占位图: {candidate}")
     except CoverContractError:
         raise
     except Exception as exc:
@@ -94,6 +99,17 @@ def resolve_publication_cover(article_path: str | Path) -> Path:
     if missing:
         raise CoverContractError(f"platform_covers 缺少统一平台路径: {', '.join(missing)}")
 
+    raw_cover = Path(cover_value).expanduser()
+    cover = raw_cover if raw_cover.is_absolute() else article.parent / raw_cover
+    return validate_cover(cover)
+
+
+def resolve_wechat_cover(article_path: str | Path) -> Path:
+    """解析微信封面；浏览器平台封面暂停时不校验 platform_covers。"""
+    article = Path(article_path).expanduser().resolve()
+    cover_value, _platform_covers = _parse_cover_frontmatter(article)
+    if not cover_value:
+        raise CoverContractError(f"发布包缺少 cover: {article.name}")
     raw_cover = Path(cover_value).expanduser()
     cover = raw_cover if raw_cover.is_absolute() else article.parent / raw_cover
     return validate_cover(cover)

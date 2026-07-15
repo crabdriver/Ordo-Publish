@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""本地无人值守发表编排；结果只信 publish_records.csv typed outcome。"""
+"""本地无人值守发表编排；唯一 coordinator + 单锁 + 进程内发布。"""
 from __future__ import annotations
 
 import argparse
@@ -23,7 +23,16 @@ if str(BASE_DIR) not in sys.path:
 from ordo_engine.assignment.cover_contract import resolve_publication_cover
 from ordo_engine.results.publish_records import load_publish_records_at_path
 from ordo_engine.run_lock import RunAlreadyActive, run_lock
-from ordo_engine.run_state import article_key as durable_article_key
+from ordo_engine.run_state import (
+    ArticleStage,
+    StateCorruptionError,
+    article_key as durable_article_key,
+    load_v2_state,
+    stable_article_id,
+)
+from ordo_engine.runner.pipeline import (
+    BatchCoordinator, WECHAT_PLATFORM, BROWSER_PLATFORMS_TUPLE,
+)
 
 DEFAULT_WATCH_DIR = Path("/Users/wizard/tiandidadao/润色")
 STATE_FILE = BASE_DIR / ".ordo" / "auto_publish_state.json"
@@ -31,7 +40,7 @@ PUBLISH_RECORDS_FILE = BASE_DIR / "publish_records.csv"
 PUBLISH_LOCK_FILE = BASE_DIR / ".ordo" / "publish.lock"
 PUBLISH_TIMEOUT_SECONDS = 900
 WECHAT_PLATFORM = "wechat"
-BROWSER_PLATFORMS = ("zhihu", "toutiao", "jianshu", "yidian", "bilibili")
+BROWSER_PLATFORMS = BROWSER_PLATFORMS_TUPLE
 ALL_PLATFORMS = (WECHAT_PLATFORM, *BROWSER_PLATFORMS)
 MODE_BY_PLATFORM = {WECHAT_PLATFORM: "draft", **{item: "publish" for item in BROWSER_PLATFORMS}}
 TERMINAL_BY_MODE = {
@@ -421,110 +430,97 @@ def publish_article(
     article: Path, *, force=False, dry_run=False, state=None,
     default_template_theme=None, default_wechat_theme=None, lock_fd=None,
 ):
+    """发布单篇文章（兼容旧接口，内部使用 BatchCoordinator）。"""
     article = article.expanduser().resolve()
     if not article.is_file():
         raise FileNotFoundError(f"文章不存在: {article}")
     if article.suffix.lower() != ".md":
         raise ValueError(f"只支持 Markdown: {article}")
-    if state is None:
-        state = load_state()
-    key = article_key(article)
-    existing = {"platforms": {}} if force else merge_record_successes(_state_article(state, article), article)
-    pending = _pending_platforms(existing)
-    if not pending:
-        print(f"[SKIP] 所有平台已有明确终态: {article}")
-        return "skipped"
 
-    meta = parse_frontmatter(article)
-    cover = find_sidecar_cover(article, meta)
-    template_theme = meta.get("template_theme") or meta.get("theme") or default_template_theme
-    wechat_theme = meta.get("wechat_theme") or default_wechat_theme
-    print(f"[INFO] 自动发表: {article}")
-
-    groups = []
-    if WECHAT_PLATFORM in pending:
-        run_id = str(uuid.uuid4())
-        groups.append(([WECHAT_PLATFORM], "draft", run_id, build_publish_cmd(
-            article, platforms=WECHAT_PLATFORM, mode="draft", cover=cover,
-            wechat_theme=wechat_theme, force_republish=force, run_id=run_id,
-        )))
-    browser_pending = [p for p in BROWSER_PLATFORMS if p in pending]
-    if browser_pending:
-        run_id = str(uuid.uuid4())
-        groups.append((browser_pending, "publish", run_id, build_publish_cmd(
-            article, platforms=",".join(browser_pending), mode="publish",
-            cover=cover, template_theme=template_theme, force_republish=force, run_id=run_id,
-        )))
     if dry_run:
-        for _platforms, _mode, _run_id, cmd in groups:
-            run_cmd(cmd, dry_run=True, lock_fd=lock_fd)
-        print("[DRY-RUN] 未执行发布，未写状态")
+        print(f"[DRY-RUN] {article}")
         return "dry_run"
 
-    started_at = datetime.now().isoformat(timespec="seconds")
-    platform_state = dict(existing.get("platforms") or {})
-    summary = PublishSummary()
-    for platform in ALL_PLATFORMS:
-        if platform not in pending:
-            summary.skipped.append(platform)
-    for platforms, mode, run_id, cmd in groups:
-        returncode = run_cmd(cmd, lock_fd=lock_fd)
-        outcomes = _new_command_outcomes(article, platforms, mode, run_id, returncode)
-        for platform, outcome in outcomes.items():
-            platform_state[platform] = {**outcome, "updated_at": datetime.now().isoformat(timespec="seconds")}
-            summary.add(
-                platform, outcome["status"], outcome["error_type"], outcome["returncode"]
-            )
-        success = _persist_article_progress(
-            state, key, article, platform_state, started_at=started_at, cover=cover,
-            template_theme=template_theme, wechat_theme=wechat_theme,
-        )
-    summary.print()
-    return "success" if success else "attempted"
+    coordinator = BatchCoordinator(base_dir=BASE_DIR)
+    summary = coordinator.run_batch([article])
+    _print_summary(summary)
+
+    # 判断成功/attempted
+    for identity, article_summary in summary.get("articles", {}).items():
+        platforms = article_summary.get("platforms", {})
+        if not platforms:
+            return "attempted"
+        all_ok = all(v.get("stage") in ("published", "draft_saved")
+                     for v in platforms.values())
+        return "success" if all_ok else "attempted"
+
+    return "attempted"
 
 
 def publish_article_once(article: Path, **kwargs):
+    """发布单篇文章（外部入口，获取后释放锁）。"""
     try:
-        with run_lock(PUBLISH_LOCK_FILE) as lock_fd:
-            return publish_article(article, lock_fd=lock_fd, **kwargs)
+        with run_lock(PUBLISH_LOCK_FILE):
+            return publish_article(article, **kwargs)
     except RunAlreadyActive:
         print("[SKIP] 已有发表任务运行中，本轮跳过")
         return "skipped_overlap"
 
 
 def scan_once(watch_dir: Path, *, force=False, dry_run=False, default_template_theme=None, default_wechat_theme=None):
+    """扫描一次，使用 BatchCoordinator 进程内执行。"""
+    if force:
+        raise AutoPublishRunError("自动发布禁用 --force，避免重复真实发表")
     try:
-        with run_lock(PUBLISH_LOCK_FILE) as lock_fd:
-            state = load_state()
+        with run_lock(PUBLISH_LOCK_FILE) as _lock_fd:
+            try:
+                state = load_v2_state(STATE_FILE)
+            except StateCorruptionError as exc:
+                raise AutoPublishStateError(str(exc)) from exc
             todo = []
             for article in list_articles(watch_dir):
-                existing = merge_record_successes(_state_article(state, article), article)
-                if force or _pending_platforms(existing):
+                identity = stable_article_id(article, watch_dir=watch_dir)
+                existing = state.get(identity)
+                if existing is None or existing.article_stage != ArticleStage.completed:
                     todo.append(article)
             if not todo:
                 print("[INFO] 没有未处理文章")
                 return []
-            failed_articles = []
-            for article in todo:
-                try:
-                    result = publish_article(
-                        article, force=force, dry_run=dry_run, state=state,
-                        default_template_theme=default_template_theme,
-                        default_wechat_theme=default_wechat_theme,
-                        lock_fd=lock_fd,
-                    )
-                    if result == "attempted":
-                        failed_articles.append(article)
-                except Exception as exc:
-                    print(f"[ERROR] 文章 {article.name} 处理失败: {exc}")
-                    failed_articles.append(article)
-            if failed_articles:
-                names = ", ".join(item.name for item in failed_articles)
-                raise AutoPublishRunError(f"自动发表存在非终态结果: {names}")
+
+            coordinator = BatchCoordinator(
+                base_dir=BASE_DIR,
+                watch_dir=watch_dir,
+            )
+            if dry_run:
+                print("[DRY-RUN] 以下文章将处理:", [a.name for a in todo])
+                return todo
+
+            summary = coordinator.run_batch(todo)
+            _print_summary(summary)
+
+            # 检查是否有未完成
+            failed = []
+            for identity, article_summary in summary.get("articles", {}).items():
+                platforms = article_summary.get("platforms", {})
+                if any(v.get("stage") not in ("published", "draft_saved")
+                       for v in platforms.values()):
+                    failed.append(article_summary.get("article_id", identity))
+
+            if failed:
+                raise AutoPublishRunError(f"自动发表存在非终态结果: {', '.join(failed[:3])}")
+
             return todo
     except RunAlreadyActive:
         print("[SKIP] 已有发表任务运行中，本轮跳过")
         return "skipped_overlap"
+
+
+def _print_summary(summary):
+    """打印批次摘要。"""
+    for identity, article in summary.get("articles", {}).items():
+        title = article.get("title") or identity
+        stages = [f"{k}={v.get('stage')}" for k, v in article.get("platforms", {}).items()]
+        print(f"[SUMMARY] {title}: {', '.join(stages)}")
 
 
 def run_daemon(watch_dir: Path, *, interval=300, **kwargs):

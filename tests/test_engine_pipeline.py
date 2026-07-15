@@ -567,7 +567,7 @@ class EnginePipelineTests(unittest.TestCase):
                 registry=registry,
             )
 
-            state_file = base_dir / ".ordo" / "publish-state.json"
+            state_file = base_dir / ".ordo" / "auto_publish_state.json"
             self.assertTrue(state_file.exists())
 
     def test_run_platform_task_passes_context_and_merges_into_payload(self):

@@ -5,8 +5,12 @@ import pytest
 
 from ordo_engine.platforms.playwright._common import upload_cover_common
 from ordo_engine.platforms.playwright_bilibili.publisher import BilibiliPlaywrightPublisher
+from ordo_engine.platforms.playwright_bilibili.locators import BilibiliLocators
 from ordo_engine.platforms.playwright_jianshu.publisher import JianshuPlaywrightPublisher
+from ordo_engine.platforms.playwright_jianshu.locators import JianshuLocators
 from ordo_engine.platforms.playwright_toutiao.publisher import ToutiaoPlaywrightPublisher
+from ordo_engine.platforms.playwright_yidian.publisher import YidianPlaywrightPublisher
+from ordo_engine.platforms.playwright_zhihu.locators import ZhihuLocators
 
 
 class Locator:
@@ -19,6 +23,7 @@ class Locator:
         self.text = text
         self.enabled = enabled
         self.on_set = on_set
+        self.click_kwargs = []
 
     @property
     def first(self):
@@ -32,6 +37,7 @@ class Locator:
 
     def click(self, **_kwargs):
         self.clicked += 1
+        self.click_kwargs.append(_kwargs)
 
     def get_attribute(self, name):
         return self.attrs.get(name)
@@ -75,6 +81,34 @@ class MappingPage:
 
     def goto(self, url, **_kwargs):
         self.url = url
+
+
+class FileChooser:
+    def __init__(self):
+        self.files = []
+
+    def set_files(self, path):
+        self.files.append(path)
+
+
+class FileChooserInfo:
+    def __init__(self, chooser):
+        self.value = chooser
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+
+class FileChooserPage(MappingPage):
+    def __init__(self, mapping, chooser):
+        super().__init__(mapping)
+        self.chooser = chooser
+
+    def expect_file_chooser(self, **_kwargs):
+        return FileChooserInfo(self.chooser)
 
 
 class Human:
@@ -136,16 +170,26 @@ def test_common_cover_upload_rejects_local_blob_preview(tmp_path):
         )
 
 
+def test_zhihu_cover_success_locator_matches_confirmed_cover_image():
+    assert ZhihuLocators.COVER_UPLOAD_SUCCESS == 'img[alt="封面图"]'
+
+
+def test_bilibili_cover_success_locator_matches_confirmed_cover_image():
+    assert BilibiliLocators.COVER_UPLOAD_SUCCESS == 'img[alt="封面图片"]'
+
+
 def test_toutiao_opens_cover_picker_before_setting_file(tmp_path):
     radio = Locator(attrs={"class": "byte-radio-inner checked"})
     add = Locator()
+    local_upload = Locator()
     file_input = Locator()
     uploaded = Locator()
     confirm = Locator()
     page = MappingPage({
         'label:has-text("单图") .byte-radio-inner': radio,
         ".article-cover-add, .article-cover-img-replace": add,
-        '.btn-upload-handle input[type="file"], input[type="file"][accept*="image"]': file_input,
+        'button:visible:has-text("本地上传")': local_upload,
+        '#upload-drag-input, .btn-upload-handle input[type="file"], input[type="file"][accept*="image"]': file_input,
         ".pic-select-image-item:has(.success)": uploaded,
         '.byte-drawer-wrapper button:visible:has-text("确定")': confirm,
     })
@@ -156,6 +200,7 @@ def test_toutiao_opens_cover_picker_before_setting_file(tmp_path):
     publisher.upload_cover(cover(tmp_path))
 
     assert add.clicked == 1
+    assert local_upload.clicked == 1
     assert file_input.files == [str(cover(tmp_path).resolve())]
     assert uploaded.clicked == 1
     assert confirm.clicked == 1
@@ -172,6 +217,25 @@ def test_toutiao_publish_uses_normal_checked_click_path():
         publisher.click_publish()
 
     click.assert_called_once()
+
+
+def test_yidian_opens_single_cover_picker_before_setting_file(tmp_path):
+    single = Locator()
+    cover_item = Locator()
+    chooser = FileChooser()
+    page = FileChooserPage({
+        'text="单图"': single,
+        ".article-cover-container .cover-setter:not([style*='display: none']) .cover-item": cover_item,
+    }, chooser)
+    publisher = object.__new__(YidianPlaywrightPublisher)
+    publisher.page = page
+    publisher.human = Human()
+
+    publisher.upload_cover(cover(tmp_path))
+
+    assert single.clicked == 1
+    assert cover_item.clicked == 1
+    assert chooser.files == [str(cover(tmp_path).resolve())]
 
 
 def test_toutiao_save_failure_blocks_before_submit():
@@ -205,7 +269,7 @@ def test_bilibili_enables_custom_cover_then_uploads_in_editor_frame(tmp_path):
         "div.upload-button": upload,
         'input[type="file"]': file_input,
         'button:visible:has-text("确定")': confirm,
-        "div.upload-button img, .cover-preview img, .upload-preview img": preview,
+        'img[alt="封面图片"]': preview,
     })
     publisher = object.__new__(BilibiliPlaywrightPublisher)
     publisher._editor_frame = frame
@@ -259,3 +323,15 @@ def test_jianshu_clicks_image_tool_then_uploads_cover(tmp_path):
 
     assert image_tool.clicked == 1
     assert file_input.files == [str(cover(tmp_path).resolve())]
+
+
+def test_jianshu_uses_exact_submit_button_with_forced_click():
+    submit = Locator()
+    page = MappingPage({JianshuLocators.PUBLISH_BUTTON_SELECTOR: submit})
+    publisher = object.__new__(JianshuPlaywrightPublisher)
+    publisher.page = page
+    publisher.human = Human()
+
+    publisher.click_publish()
+
+    assert submit.click_kwargs == [{"force": True}]

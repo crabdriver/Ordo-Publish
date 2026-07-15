@@ -36,6 +36,19 @@ class PublishState(str, Enum):
 
 
 @dataclass
+class DraftCheckpoint:
+    """平台草稿检查点 —— 结构化数据，不是任意字符串。"""
+
+    platform: str
+    draft_ref: str          # 平台草稿 ID 或唯一标识
+    draft_url: str = ""     # 草稿编辑页 URL
+    saved_at: str = ""      # ISO 时间戳
+    verification_evidence: dict = field(default_factory=dict)
+    # verification_evidence 示例：
+    # {"method": "draft_list_match", "title_matched": True, "draft_list_url": "..."}
+
+
+@dataclass
 class ArticlePayload:
     """发布任务的文章数据"""
 
@@ -283,6 +296,19 @@ class PlaywrightBasePublisher(ABC):
 
         except Exception as exc:
             if self._submission_started:
+                # 点击后异常不等于已发布。先回查后台：文章可能只存成草稿，
+                # 该状态必须写入结果，不能被模糊的 submitted_unverified 覆盖。
+                try:
+                    result = self.verify_result(mode)
+                except Exception:
+                    result = None
+                if result is not None and result.status in {
+                    "draft_only", "draft_saved", "limit_reached",
+                }:
+                    result.error = result.error or str(exc)
+                    result.screenshots = list(self._screenshots)
+                    self._persist_result(result, mode)
+                    return result
                 result = PublishResult(
                     platform=self.platform,
                     status="submitted_unverified",
@@ -426,3 +452,82 @@ class PlaywrightBasePublisher(ABC):
     def verify_result(self, mode: str) -> PublishResult:
         """验证发布/草稿结果"""
         ...
+
+    # ── 草稿检查点协议（v4.1 新增）────────────────────────
+
+    def save_draft_checkpoint(self) -> DraftCheckpoint | None:
+        """保存草稿并返回结构化的 DraftCheckpoint。
+
+        默认回退到 save_draft() + 基础验证。
+        子类应覆写以提供精确的 draft_ref。
+        无法可靠保存 → 返回 None（调用方应 marc blocked_no_draft）。
+        """
+        try:
+            self.save_draft()
+            return self.verify_draft_checkpoint()
+        except Exception:
+            return None
+
+    def verify_draft_checkpoint(self) -> DraftCheckpoint:
+        """核验草稿并返回 DraftCheckpoint（含 draft_ref）。
+
+        子类必须覆写以提供平台特定的核验逻辑。
+        默认实现返回空 checkpoint —— 调用方应处理为 manual_verify。
+        """
+        return DraftCheckpoint(
+            platform=self.platform,
+            draft_ref="",
+            verification_evidence={"method": "not_implemented"},
+        )
+
+    def publish_from_draft(self, draft_ref: str) -> PublishResult:
+        """从已核验草稿执行正式发布。
+
+        默认回退到 navigate_to_editor + 完整 publish 流程。
+        子类应覆写为：打开 draft_ref 对应的草稿页 → 点击发布。
+        """
+        self.page = self.navigate_to_editor()
+        self._submission_started = True
+        self.click_publish()
+        return self.verify_result("publish")
+
+    def verify_published(self, published_ref: str) -> bool:
+        """核验是否已正式发布（通过公开 URL 或后台已发布列表）。
+
+        子类必须覆写。
+        默认返回 False。
+        """
+        return False
+
+    # ── coordinator 友好流程：prepare → save → verify → publish ─
+
+    def prepare_draft(self, article: ArticlePayload) -> PublishResult:
+        """填写编辑器内容（标题+正文+封面+设置），不提交。"""
+        try:
+            self._article_key = article_key(article.markdown_path)
+            self._mode = "publish"
+            self._article = article
+
+            self.page = self.navigate_to_editor()
+            self.human = self._init_human(self.page)
+            self.fill_title(article.title)
+            self.human.human_wait(0.5, 1.0)
+            self.fill_body(article.body)
+            self.human.human_wait(0.5, 1.5)
+            if article.cover_path and article.cover_mode != "force_off":
+                self.upload_cover(article.cover_path)
+            self.configure_settings(article)
+            return PublishResult(
+                platform=self.platform,
+                status="draft_prepared",
+                page_state="draft_prepared",
+                smoke_step="draft_prepared",
+            )
+        except Exception as exc:
+            return PublishResult(
+                platform=self.platform,
+                status="failed",
+                page_state="error",
+                smoke_step="draft_prepared",
+                error=str(exc),
+            )

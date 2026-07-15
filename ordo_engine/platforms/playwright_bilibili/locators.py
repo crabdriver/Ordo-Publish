@@ -31,6 +31,7 @@ class BilibiliLocators:
 
     # 封面上传（在 iframe 内）
     COVER_FILE_INPUT = 'input[type="file"][accept*="image"]'
+    COVER_UPLOAD_SUCCESS = 'img[alt="封面图片"]'
 
     PUBLISH_BUTTON_TEXTS = ["发布"]
     PUBLISH_BUTTON_CLASS = "vui_button--blue"
@@ -42,7 +43,7 @@ class BilibiliLocators:
 
     PUBLISH_SUCCESS_MARKERS = ["发布成功", "已发布"]
     DRAFT_SUCCESS_MARKERS = ["已保存", "保存成功", "草稿"]
-    LIMIT_MARKERS = ["达到发布上限", "发布上限", "频率限制"]
+    LIMIT_MARKERS = ["达到发布上限", "已达到当日投稿上限", "发布上限", "频率限制"]
 
     # iframe 匹配规则
     IFRAME_SRC_PATTERN = "read-editor"

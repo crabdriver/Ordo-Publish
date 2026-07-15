@@ -5,7 +5,9 @@ import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from ordo_engine.platforms.playwright.engine import PlaywrightEngine
+from ordo_engine.platforms.playwright.engine import (
+    PlaywrightEngine, BrowserProfileBusyError,
+)
 from ordo_engine.platforms.playwright.human import HumanBehavior
 from ordo_engine.platforms.playwright.base_publisher import (
     ArticlePayload,
@@ -50,19 +52,22 @@ class StubPublisher(PlaywrightBasePublisher):
 
 class TestPlaywrightEngine(unittest.TestCase):
     def test_cleanup_stale_profile_lock_keeps_live_pid(self):
+        """存活进程使用 profile → BrowserProfileBusyError。"""
         with tempfile.TemporaryDirectory() as tmpdir:
             engine = PlaywrightEngine(base_dir=Path(tmpdir), headless=True)
             engine.profile_dir.mkdir(parents=True)
             lock = engine.profile_dir / "SingletonLock"
             lock.symlink_to("host-4242")
 
-            with patch("ordo_engine.platforms.playwright.engine.os.kill") as kill:
-                engine._cleanup_stale_lock()
+            with patch.object(engine, "_find_profile_processes",
+                              return_value=[{"pid": 4242, "start_time": "now", "args": "chrome"}]):
+                with self.assertRaises(BrowserProfileBusyError):
+                    engine._cleanup_stale_lock()
 
-            kill.assert_called_once_with(4242, 0)
-            self.assertTrue(lock.is_symlink())
+            self.assertTrue(lock.is_symlink(), "存活进程时不应删除锁")
 
     def test_cleanup_stale_profile_lock_removes_dead_pid(self):
+        """无进程使用 profile → 安全删除孤儿锁。"""
         with tempfile.TemporaryDirectory() as tmpdir:
             engine = PlaywrightEngine(base_dir=Path(tmpdir), headless=True)
             engine.profile_dir.mkdir(parents=True)
@@ -70,10 +75,7 @@ class TestPlaywrightEngine(unittest.TestCase):
             lock.symlink_to("host-4242")
             (engine.profile_dir / "SingletonCookie").write_text("x", encoding="utf-8")
 
-            with patch(
-                "ordo_engine.platforms.playwright.engine.os.kill",
-                side_effect=ProcessLookupError,
-            ):
+            with patch.object(engine, "_find_profile_processes", return_value=[]):
                 engine._cleanup_stale_lock()
 
             self.assertFalse(lock.is_symlink())
@@ -265,6 +267,33 @@ class TestPlaywrightEngine(unittest.TestCase):
         publisher.click_publish.assert_not_called()
         publisher.save_draft.assert_not_called()
 
+    def test_post_submit_exception_rechecks_and_reports_draft_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article_path = base_dir / "article.md"
+            article_path.write_text("# Article", encoding="utf-8")
+
+            class DraftAfterSubmitFailurePublisher(StubPublisher):
+                def click_publish(self):
+                    raise RuntimeError("publish dialog closed unexpectedly")
+
+                def verify_result(self, _mode):
+                    return PublishResult(
+                        platform=self.platform,
+                        status="draft_only",
+                        page_state="draft_saved",
+                    )
+
+            engine = MagicMock(base_dir=base_dir)
+            engine.screenshot.return_value = None
+            result = DraftAfterSubmitFailurePublisher(engine).publish(
+                ArticlePayload(title="Article", body="Body", markdown_path=article_path),
+                mode="publish",
+            )
+
+        self.assertEqual(result.status, "draft_only")
+        self.assertEqual(result.page_state, "draft_saved")
+
     def test_base_publisher_records_steps_in_engine_base_dir_for_active_mode(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             base_dir = Path(tmpdir)
@@ -304,7 +333,8 @@ class TestPlaywrightEngine(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             engine = PlaywrightEngine(debug_port=9999, base_dir=Path(tmpdir))
             engine.mark_profile_initialized()
-            engine.connect()
+            with patch.object(engine, "_capture_ownership"):
+                engine.connect()
 
             mock_p.chromium.launch_persistent_context.assert_called_once()
             launch_kwargs = mock_p.chromium.launch_persistent_context.call_args.kwargs

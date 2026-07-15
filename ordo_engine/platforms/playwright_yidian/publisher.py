@@ -10,10 +10,10 @@ except ImportError:
 
 from markdown_utils import should_declare_ai
 from ordo_engine.platforms.playwright.base_publisher import (
-    ArticlePayload, PlaywrightBasePublisher, PublishResult,
+    ArticlePayload, DraftCheckpoint, PlaywrightBasePublisher, PublishResult,
 )
 from ordo_engine.platforms.playwright._common import (
-    fill_title_common, fill_body_common, upload_cover_common,
+    fill_title_common, fill_body_common,
     click_publish_common, save_draft_common, verify_result_common,
     find_visible_button,
 )
@@ -53,10 +53,18 @@ class YidianPlaywrightPublisher(PlaywrightBasePublisher):
         except Exception:
             pass
 
-        upload_cover_common(
-            self.page, cover_path, YidianLocators.COVER_FILE_INPUT, "一点号",
-            success_selector=YidianLocators.COVER_UPLOAD_SUCCESS,
-        )
+        picker = self.page.locator(YidianLocators.COVER_PICKER)
+        if picker.count() == 0:
+            raise RuntimeError("未找到一点号单图封面上传入口")
+        try:
+            with self.page.expect_file_chooser(timeout=10000) as chooser_info:
+                self.human.human_click(picker.first)
+            chooser_info.value.set_files(str(Path(cover_path).expanduser().resolve()))
+        except Exception as exc:
+            raise RuntimeError(
+                "一点号账号未提供本地封面上传入口：该账号只能从正文已有图片选封面，"
+                "请开通站外图片上传权限或在正文加入可用图片"
+            ) from exc
         self.human.human_wait(0.5, 1.0)
 
     def configure_settings(self, article: ArticlePayload):
@@ -110,3 +118,45 @@ class YidianPlaywrightPublisher(PlaywrightBasePublisher):
             YidianLocators.DRAFT_MANAGEMENT_URL,
             expected_title=self._article.title,
         )
+
+    # ── 草稿检查点协议 ──────────────────────────────────────
+
+    def verify_draft_checkpoint(self) -> DraftCheckpoint:
+        """核验一点号草稿。一点号封面限制较多，draft_ref 可能为空 → 调用方应处理为 blocked_no_draft 或 manual_verify。"""
+        from datetime import datetime, timezone
+        try:
+            self.page.goto(YidianLocators.DRAFT_MANAGEMENT_URL or YidianLocators.MANAGEMENT_URL,
+                           wait_until="domcontentloaded", timeout=15000)
+            self.human.human_wait(1, 2)
+            title = getattr(self._article, "title", "")
+            draft_ref = ""
+            if title:
+                try:
+                    el = self.page.locator(f'text="{title}"').first
+                    if el.count() > 0:
+                        draft_ref = self.page.url or ""
+                except Exception:
+                    pass
+            return DraftCheckpoint(
+                platform=self.platform, draft_ref=draft_ref,
+                saved_at=datetime.now(timezone.utc).isoformat(),
+                verification_evidence={"method": "draft_list_title_match",
+                                       "title_matched": bool(draft_ref)})
+        except Exception as exc:
+            return DraftCheckpoint(
+                platform=self.platform, draft_ref="",
+                verification_evidence={"method": "draft_list_error", "error": str(exc)})
+
+    def publish_from_draft(self, draft_ref: str) -> PublishResult:
+        if draft_ref:
+            self.page.goto(draft_ref, wait_until="domcontentloaded", timeout=15000)
+        self._submission_started = True
+        self.click_publish()
+        return self.verify_result("publish")
+
+    def verify_published(self, published_ref: str) -> bool:
+        try:
+            self.page.goto(published_ref, wait_until="domcontentloaded", timeout=10000)
+            return self.page.title() != "" and "404" not in self.page.title()
+        except Exception:
+            return False

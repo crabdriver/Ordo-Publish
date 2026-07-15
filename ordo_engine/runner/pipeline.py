@@ -1,9 +1,19 @@
 import sys
+import traceback
+import re
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from ordo_engine.platforms.registry import build_platform_registry
 from ordo_engine.platforms.base import is_terminal_outcome
-from ordo_engine.run_state import article_key, is_done, mark_done, state_file_for
+from ordo_engine.run_state import (
+    article_key, is_done, mark_done, state_file_for,
+    PlatformStage, ArticleStage, ArticleRecord, PlatformRecord,
+    load_v2_state, save_v2_state, set_platform_record, stable_article_id,
+    compute_package_hash, get_platform_record, StateCorruptionError,
+)
+from ordo_engine.assignment.cover_contract import resolve_wechat_cover
 from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
 from ordo_engine.platforms.playwright.engine import PlaywrightEngine
 
@@ -268,3 +278,344 @@ def run_publish_pipeline(
             active_error.add_note(f"共享浏览器关闭失败: {close_error}")
 
     return results, exit_code
+
+
+# ── BatchCoordinator ──────────────────────────────────────────────
+
+
+WECHAT_PLATFORM = "wechat"
+BROWSER_PLATFORMS_TUPLE = ("zhihu", "toutiao", "jianshu", "yidian", "bilibili")
+AUTO_PLATFORM_ORDER = (WECHAT_PLATFORM, "zhihu", "jianshu", "toutiao", "yidian", "bilibili")
+
+
+class BatchCoordinator:
+    """单批次协调器 — 一个锁、一次状态加载、逐平台逐文章处理。"""
+
+    def __init__(self, base_dir: Path, *, state_file=None, watch_dir=None,
+                 registry=None, engine_factory=None, wechat_adapter=None,
+                 record_callback=None):
+        self.base_dir = Path(base_dir)
+        self.state_file = state_file or state_file_for(self.base_dir)
+        self.watch_dir = Path(watch_dir) if watch_dir else None
+        self._registry = registry
+        self.engine_factory = engine_factory or PlaywrightEngine
+        self.wechat_adapter = wechat_adapter
+        self.record_callback = record_callback
+        self._articles: dict[str, ArticleRecord] = {}
+        self._batch_identities: set[str] = set()
+
+    @property
+    def registry(self):
+        if self._registry is None:
+            self._registry = build_platform_registry(self.base_dir)
+        return self._registry
+
+    def run_batch(self, article_paths: list[Path]) -> dict:
+        self._load_or_init_state(article_paths)
+        self._batch_identities = {
+            stable_article_id(path, watch_dir=self.watch_dir)
+            for path in article_paths
+        }
+        self._preflight_all(article_paths)
+        self._run_wechat_batch(article_paths)
+        for platform in BROWSER_PLATFORMS_TUPLE:
+            if platform not in self.registry:
+                continue
+            self._run_browser_platform(platform, article_paths)
+        self._save_state()
+        return self._build_summary()
+
+    def _load_or_init_state(self, article_paths):
+        self._articles = load_v2_state(self.state_file)
+        sources: dict[Path, set[str]] = {}
+        for existing_identity, record in self._articles.items():
+            if not record.source_path:
+                continue
+            source = Path(record.source_path).expanduser().resolve()
+            sources.setdefault(source, set()).add(existing_identity)
+        for p in article_paths:
+            identity = stable_article_id(p, watch_dir=self.watch_dir)
+            source = Path(p).expanduser().resolve()
+            conflicts = sources.get(source, set()) - {identity}
+            if conflicts:
+                protected_conflicts = {
+                    conflict
+                    for conflict in conflicts
+                    if self._articles[conflict].platforms
+                    or self._articles[conflict].article_stage != ArticleStage.pending
+                }
+                if protected_conflicts:
+                    raise StateCorruptionError(
+                        f"文章 identity 冲突: {source} 同时对应 "
+                        f"{sorted(protected_conflicts)} 和 {identity}"
+                    )
+                for empty_alias in conflicts:
+                    self._articles.pop(empty_alias, None)
+                    sources[source].discard(empty_alias)
+            if identity not in self._articles:
+                self._articles[identity] = ArticleRecord(
+                    article_id=identity, source_path=str(p),
+                    article_stage=ArticleStage.pending)
+            sources.setdefault(source, set()).add(identity)
+
+    def _save_state(self):
+        save_v2_state(self._articles, self.state_file)
+
+    def _preflight_all(self, article_paths):
+        for p in article_paths:
+            try:
+                self._preflight_one(p)
+            except Exception as exc:
+                identity = stable_article_id(p, watch_dir=self.watch_dir)
+                a = self._articles.get(identity)
+                if a:
+                    a.article_block_reason = f"preflight: {exc}"
+
+    def _preflight_one(self, article_path):
+        identity = stable_article_id(article_path, watch_dir=self.watch_dir)
+        a = self._articles.setdefault(identity, ArticleRecord(
+            article_id=identity, source_path=str(article_path)))
+
+        # ── 1. frontmatter 格式检查 ──
+        text = article_path.read_text(encoding="utf-8")
+        if not text.startswith("---\n"):
+            a.article_stage = ArticleStage.needs_review
+            a.article_block_reason = "frontmatter 格式错误：必须以 --- 开头"
+            return
+
+        # 浏览器平台暂停封面；封面仅在微信分支单独验证。
+        obsolete_cover_block = (
+            "封面合同失败", "封面质量不合格", "缺少封面文件",
+        )
+        if a.article_block_reason and a.article_block_reason.startswith(obsolete_cover_block):
+            a.article_block_reason = None
+            if a.article_stage == ArticleStage.needs_review:
+                a.article_stage = ArticleStage.pending
+        a.package_hash = compute_package_hash(article_path, None)
+        a.source_path = str(article_path)
+
+    def _run_wechat_batch(self, article_paths):
+        """微信批处理 — 保留原有 subprocess 路径（通过 WECHAT_PROXY 走 VPS IP）。"""
+        for p in article_paths:
+            identity = stable_article_id(p, watch_dir=self.watch_dir)
+            a = self._articles.get(identity)
+            if not a or not self._needs_processing(a, WECHAT_PLATFORM, "draft"):
+                continue
+            try:
+                cover = resolve_wechat_cover(p)
+                a.cover_path = str(cover)
+                self._run_wechat_subprocess(p, cover)
+            except Exception as exc:
+                prec = PlatformRecord(
+                    stage=PlatformStage.failed_before_draft,
+                    error=str(exc),
+                    error_type="cover_preflight_failed",
+                )
+                set_platform_record(
+                    self._articles, identity, WECHAT_PLATFORM, "draft", prec
+                )
+            self._save_state()
+
+    def _run_wechat_subprocess(self, article_path, cover_path):
+        """微信走专用 worker，避免子进程再次获取批次锁。"""
+        import subprocess as _sub
+        cmd = [
+            sys.executable,
+            str(self.base_dir / "wechat_publisher.py"),
+            str(article_path),
+            "--mode", "draft",
+            "--cover", str(cover_path),
+            "--cover-mode", "force_on",
+        ]
+        try:
+            result = _sub.run(cmd, cwd=str(self.base_dir),
+                              capture_output=True, text=True, timeout=120)
+            rc = result.returncode
+            output = f"{result.stdout}\n{result.stderr}".strip()
+            err = output[-1000:] if result.returncode != 0 else None
+            error_type = None if rc == 0 else "wechat_worker_failed"
+        except _sub.TimeoutExpired:
+            rc = 1
+            err = "wechat subprocess timeout (120s)"
+            output = ""
+            error_type = "wechat_worker_timeout"
+        identity = stable_article_id(article_path, watch_dir=self.watch_dir)
+        match = re.search(r"已写入微信公众号草稿:\s*(\S+)", output)
+        if match or rc == 0:
+            stage = PlatformStage.draft_saved
+            error_type = None
+        else:
+            # worker 已经接触远端 API；非零/超时无法证明草稿未创建。
+            stage = PlatformStage.manual_verify
+        prec = PlatformRecord(
+            stage=stage,
+            draft_ref=match.group(1) if match else None,
+            error=err,
+            error_type=error_type,
+        )
+        set_platform_record(self._articles, identity, WECHAT_PLATFORM, "draft", prec)
+
+    def _run_browser_platform(self, platform, article_paths):
+        eligible = []
+        for p in article_paths:
+            identity = stable_article_id(p, watch_dir=self.watch_dir)
+            article = self._articles.get(identity)
+            if article and self._needs_processing(article, platform, "publish"):
+                eligible.append(p)
+        if not eligible:
+            return
+
+        engine = None
+        try:
+            engine = self.engine_factory(mode="standalone", headless=True, base_dir=self.base_dir)
+            engine.connect()
+        except Exception as exc:
+            for p in eligible:
+                identity = stable_article_id(p, watch_dir=self.watch_dir)
+                article = self._articles.get(identity)
+                if article and self._needs_processing(article, platform, "publish"):
+                    prec = PlatformRecord(stage=PlatformStage.not_executed,
+                                          error=str(exc), error_type="browser_start_failed")
+                    set_platform_record(self._articles, identity, platform, "publish", prec)
+            self._save_state()
+            return
+        try:
+            for p in eligible:
+                identity = stable_article_id(p, watch_dir=self.watch_dir)
+                a = self._articles.get(identity)
+                if not a or not self._needs_processing(a, platform, "publish"):
+                    continue
+                try:
+                    self._run_one_browser_article(p, platform, engine)
+                except Exception as exc:
+                    self._record_error(identity, platform, "publish", str(exc))
+            self._save_state()
+        finally:
+            # ── close + verify（即使 close 异常也执行验证）──
+            close_error = None
+            try:
+                engine.close()
+            except Exception as e:
+                close_error = e
+
+            verify_result = None
+            try:
+                verify_result = engine.verify_cleanup()
+            except Exception:
+                verify_result = {"ok": False, "details": ["verify_cleanup 自身异常"]}
+
+            cleanup_failed = close_error is not None or not (verify_result or {}).get("ok", False)
+            if cleanup_failed:
+                details = (verify_result or {}).get("details", [])
+                if close_error:
+                    details.append(f"close: {close_error}")
+                remaining = [bp for bp in BROWSER_PLATFORMS_TUPLE
+                             if BROWSER_PLATFORMS_TUPLE.index(bp) > BROWSER_PLATFORMS_TUPLE.index(platform)]
+                for rp in remaining:
+                    for p in article_paths:
+                        identity = stable_article_id(p, watch_dir=self.watch_dir)
+                        existing = get_platform_record(self._articles, identity, rp, "publish")
+                        if existing and existing.stage != PlatformStage.pending:
+                            continue
+                        prec = PlatformRecord(
+                            stage=PlatformStage.not_executed,
+                            error="; ".join(details) if details else str(close_error or "cleanup failed"),
+                            error_type="browser_cleanup_failed")
+                        set_platform_record(self._articles, identity, rp, "publish", prec)
+                self._save_state()
+                if close_error:
+                    raise close_error
+
+    def _run_one_browser_article(self, article_path, platform, engine):
+        adapter = self.registry.get(platform)
+        if adapter is None:
+            raise RuntimeError(f"平台未注册: {platform}")
+        if isinstance(adapter, PlaywrightPlatformAdapter):
+            adapter.set_shared_engine(engine)
+        try:
+            identity = stable_article_id(article_path, watch_dir=self.watch_dir)
+            payload = run_platform_task(
+                base_dir=self.base_dir, platform=platform,
+                markdown_file=str(article_path), mode="publish",
+                cover_path=None,
+                registry=self.registry)
+            identity = stable_article_id(article_path, watch_dir=self.watch_dir)
+            stage = _map_status(payload.get("status", "failed"))
+            prec = PlatformRecord(
+                stage=stage,
+                published_ref=payload.get("current_url") if stage == PlatformStage.published else None,
+                error=payload.get("stderr"), error_type=payload.get("error_type"))
+            set_platform_record(self._articles, identity, platform, "publish", prec)
+            # 记录审计
+            if self.record_callback:
+                self.record_callback(str(article_path), platform, "publish", payload)
+        finally:
+            if isinstance(adapter, PlaywrightPlatformAdapter):
+                try:
+                    engine.release_page_for_platform(platform)
+                except Exception:
+                    pass
+                adapter.set_shared_engine(None)
+
+    def _needs_processing(self, article, platform, mode):
+        """判断文章+平台+mode 是否需要处理（恢复规则）。"""
+        # 文章级阻断
+        if article.article_stage == ArticleStage.needs_review:
+            return False
+        prec = article.platforms.get(platform, {}).get(mode)
+        if prec is None:
+            return True
+        # retry_after 检查
+        if prec.retry_after:
+            now = _now_iso() if hasattr(self, '_now_iso') else datetime.now(timezone.utc).isoformat()
+            if now < prec.retry_after:
+                return False
+        # 不应重试的终态
+        skip_stages = {
+            PlatformStage.published,
+            PlatformStage.manual_verify,
+            PlatformStage.blocked_no_draft,
+            PlatformStage.publish_attempted,
+            # 草稿恢复尚未接入 coordinator；重建会产生重复草稿。
+            PlatformStage.draft_saved,
+        }
+        if prec.stage in skip_stages:
+            return False
+        # limited_after_draft: 有 retry_after 但已过期 → 允许重试
+        # failed_before_draft: 允许重试
+        # pending / preflight_ok / draft_prepared / draft_saved / publish_attempted → 允许
+        return True
+
+    def _record_error(self, identity, platform, mode, error):
+        prec = PlatformRecord(stage=PlatformStage.failed_before_draft, error=error)
+        set_platform_record(self._articles, identity, platform, mode, prec)
+
+    def _build_summary(self):
+        s = {"articles": {}}
+        for identity, article in self._articles.items():
+            if self._batch_identities and identity not in self._batch_identities:
+                continue
+            pf = {}
+            for pn, modes in article.platforms.items():
+                for md, prec in modes.items():
+                    pf[f"{pn}:{md}"] = {
+                        "stage": prec.stage.value,
+                        "error": prec.error, "error_type": prec.error_type,
+                        "draft_ref": prec.draft_ref, "published_ref": prec.published_ref}
+            s["articles"][identity] = {
+                "article_id": article.article_id,
+                "article_stage": article.article_stage.value,
+                "title": article.title, "platforms": pf}
+        return s
+
+
+def _map_status(status):
+    m = {"published": PlatformStage.published, "scheduled": PlatformStage.published,
+         "draft_saved": PlatformStage.draft_saved, "draft_only": PlatformStage.draft_saved,
+         "skipped_existing": PlatformStage.published,
+         "limit_reached": PlatformStage.limited_after_draft,
+         "rate_limited": PlatformStage.limited_after_draft,
+         "submitted_unverified": PlatformStage.manual_verify,
+         "failed": PlatformStage.failed_before_draft,
+         "unknown": PlatformStage.manual_verify}
+    return m.get(status, PlatformStage.failed_before_draft)

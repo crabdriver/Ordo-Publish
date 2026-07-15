@@ -14,6 +14,17 @@ from ordo_engine.run_lock import run_lock
 
 
 class PublishPreflightTests(unittest.TestCase):
+    @staticmethod
+    def _draw_cover_detail(image):
+        from PIL import ImageDraw
+
+        draw = ImageDraw.Draw(image)
+        for x in range(120, image.width - 120, 120):
+            draw.line((x, 100, x, image.height - 100), fill=(220, 180, 100), width=8)
+        for y in range(100, image.height - 100, 100):
+            draw.line((120, y, image.width - 120, y), fill=(120, 180, 220), width=8)
+        return image
+
     def _initialize_browser_profile(self, base: Path):
         profile = base / ".ordo" / "automation-profile"
         profile.mkdir(parents=True, exist_ok=True)
@@ -26,7 +37,7 @@ class PublishPreflightTests(unittest.TestCase):
 
     def _write_canonical_cover(self, path: Path):
         profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
-        Image.new("RGB", (2538, 1080), color=(23, 45, 67)).save(
+        self._draw_cover_detail(Image.new("RGB", (2538, 1080), color=(23, 45, 67))).save(
             path,
             format="PNG",
             icc_profile=profile,
@@ -37,7 +48,7 @@ class PublishPreflightTests(unittest.TestCase):
         cover = root / relative
         cover.parent.mkdir(parents=True)
         profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
-        Image.new("RGB", cover_size, color=(23, 45, 67)).save(
+        self._draw_cover_detail(Image.new("RGB", cover_size, color=(23, 45, 67))).save(
             cover,
             format="PNG",
             icc_profile=profile,
@@ -808,33 +819,29 @@ class PublishPreflightTests(unittest.TestCase):
             self.assertEqual(rows[0]["platform"], "zhihu")
             self.assertEqual(rows[1]["article_id"], "new-1")
 
-    def test_append_publish_record_recovers_from_corrupt_csv(self):
+    def test_append_publish_record_blocks_on_corrupt_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
             rec = Path(tmp) / "publish_records.csv"
             rec.write_bytes(b"\xff\xfe\x00broken")
             with patch.object(publish, "PUBLISH_RECORDS_FILE", rec):
-                publish.append_publish_record(
-                    {
-                        "article": "/a/b/new.md",
-                        "platform": "wechat",
-                        "mode": "draft",
-                        "status": "draft_only",
-                        "returncode": 0,
-                        "stdout": "",
-                        "stderr": "",
-                        "article_id": "new-1",
-                        "theme_name": "",
-                        "template_mode": "default",
-                        "cover_path": "",
-                        "error_type": None,
-                    }
-                )
-            backup = rec.with_name("publish_records.csv.bak")
-            self.assertTrue(backup.exists())
-            with rec.open(encoding="utf-8", newline="") as fp:
-                rows = list(csv.DictReader(fp))
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["article_id"], "new-1")
+                with self.assertRaisesRegex(RuntimeError, "损坏"):
+                    publish.append_publish_record(
+                        {
+                            "article": "/a/b/new.md",
+                            "platform": "wechat",
+                            "mode": "draft",
+                            "status": "draft_only",
+                            "returncode": 0,
+                            "stdout": "",
+                            "stderr": "",
+                            "article_id": "new-1",
+                            "theme_name": "",
+                            "template_mode": "default",
+                            "cover_path": "",
+                            "error_type": None,
+                        }
+                    )
+            self.assertEqual(rec.read_bytes(), b"\xff\xfe\x00broken")
 
     def test_print_result_emits_meta_json_line(self):
         out = []

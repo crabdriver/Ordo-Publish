@@ -91,10 +91,10 @@ def _load_publish_record_rows(path: Path):
             reader = csv.DictReader(fp)
             old_fn = list(reader.fieldnames or [])
             rows = list(reader)
-    except (OSError, UnicodeDecodeError, csv.Error):
-        _backup_publish_records(path)
-        path.unlink(missing_ok=True)
-        return []
+    except (OSError, UnicodeDecodeError, csv.Error) as exc:
+        # 发布记录是幂等性依据。损坏时清空等同于忘掉所有已发记录，
+        # 会触发重复草稿或重复正式发布，必须保留原文件并阻断。
+        raise RuntimeError(f"发布记录 CSV 损坏，已阻断发布: {path}") from exc
     if set(old_fn) == set(PUBLISH_RECORD_FIELDNAMES):
         return [{k: (row.get(k) or "") for k in PUBLISH_RECORD_FIELDNAMES} for row in rows]
     if not LEGACY_REQUIRED_FIELDS.issubset(old_fn):

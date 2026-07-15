@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import random
+import subprocess
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -75,6 +76,16 @@ class BrowserCleanupError(RuntimeError):
     pass
 
 
+class BrowserOwnershipError(RuntimeError):
+    """无法唯一识别 owned 浏览器进程。"""
+    pass
+
+
+class BrowserProfileBusyError(RuntimeError):
+    """profile 正被其他进程使用。"""
+    pass
+
+
 class PlaywrightEngine:
     """管理 Playwright 浏览器连接（standalone 模式）
 
@@ -128,6 +139,10 @@ class PlaywrightEngine:
             SYSTEM_CHROME if os.path.exists(SYSTEM_CHROME) else None
         )
 
+        # Owned-process 追踪
+        self._owned_pid: Optional[int] = None
+        self._owned_start_time: Optional[str] = None
+
     @property
     def _is_standalone(self) -> bool:
         return self.mode == "standalone"
@@ -174,28 +189,71 @@ class PlaywrightEngine:
         """启动独立浏览器"""
         self._launch_standalone()
 
+    def _find_profile_processes(self) -> list[dict]:
+        """通过完整命令行 `--user-data-dir=<profile>` 查找使用本 profile 的进程。
+
+        返回 list[dict]，每项含 pid, start_time, args。
+        无法唯一识别 → BrowserOwnershipError。
+        禁止按 Chrome 名称清理。
+        """
+        profile_str = str(self.profile_dir.resolve())
+        try:
+            result = subprocess.run(
+                ["ps", "-eo", "pid,lstart,args"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except FileNotFoundError:
+            return []
+        except Exception:
+            return []
+
+        if result.returncode != 0:
+            return []  # sandbox/权限限制
+
+        processes = []
+        for line in result.stdout.splitlines():
+            if f"--user-data-dir={profile_str}" in line:
+                parts = line.strip().split(None, 2)
+                if len(parts) >= 3:
+                    try:
+                        pid = int(parts[0])
+                    except ValueError:
+                        continue
+                    processes.append({
+                        "pid": pid,
+                        "start_time": parts[1].strip(),
+                        "args": parts[2],
+                    })
+
+        return processes
+
     def _cleanup_stale_lock(self):
-        """只在 SingletonLock 明确指向已退出 PID 时清理。"""
+        """安全清理 SingletonLock。
+
+        规则：
+        - 锁存在且精确 profile 进程仍存活 → BrowserProfileBusyError，停止。
+        - 锁存在但没有任何进程使用该 profile → 允许删除孤儿锁。
+        - 禁止仅凭文件年龄判断锁已经失效。
+        """
         lock = self.profile_dir / "SingletonLock"
         if not lock.is_symlink():
             return
-        try:
-            pid = int(os.readlink(lock).rsplit("-", 1)[1])
-        except (OSError, ValueError, IndexError):
-            return
-        try:
-            os.kill(pid, 0)
-            return
-        except ProcessLookupError:
-            pass
-        except (PermissionError, OSError):
-            return
+
+        # 检查是否有存活进程使用这个 profile
+        processes = self._find_profile_processes()
+        if processes:
+            raise BrowserProfileBusyError(
+                f"profile 正被进程使用: PID={processes[0]['pid']} "
+                f"profile={self.profile_dir}"
+            )
+
+        # 无存活进程 → 安全删除孤儿锁
         for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
             try:
                 (self.profile_dir / name).unlink(missing_ok=True)
             except Exception:
                 pass
-        print("[engine] 检测到孤儿锁（上次异常退出遗留），已清理")
+        print("[engine] 检测到孤儿锁（无存活进程使用 profile），已清理")
 
     def _random_viewport(self) -> dict:
         """在几组常见真实分辨率间随机选择，避免固定视口形成可识别的行为画像。"""
@@ -257,6 +315,9 @@ class PlaywrightEngine:
 
         mode_label = "无头" if effective_headless else "有头"
         print(f"[engine] 独立浏览器已启动 ({mode_label}模式, profile={self.profile_dir.name})")
+
+        # 识别 owned 进程：通过 --user-data-dir 命令行
+        self._capture_ownership()
 
     @property
     def browser(self) -> Browser:
@@ -336,23 +397,84 @@ class PlaywrightEngine:
         except Exception:
             return None
 
-    def close(self):
-        """关闭浏览器连接
+    def _capture_ownership(self):
+        """捕获 owned 浏览器根进程的 PID 和启动时间。
 
-        standalone 模式：关闭浏览器并释放所有内存
-        cdp 模式：仅断开连接（不关闭用户的浏览器）
+        headed 模式（bootstrap/手动登录）：跳过严格验证。
+        无法通过 ps 识别时记录告警但不阻断。
+        """
+        if not self.headless:
+            print("[engine] headed 模式跳过进程所有权验证")
+            return
+
+        processes = self._find_profile_processes()
+        if not processes:
+            print("[engine] 无法通过 ps 识别浏览器进程（sandbox/权限限制），跳过所有权验证")
+            return
+        if len(processes) > 1:
+            raise BrowserOwnershipError(
+                f"多个进程使用同一 profile ({self.profile_dir}): "
+                f"PIDs={[p['pid'] for p in processes]}"
+            )
+        proc = processes[0]
+        self._owned_pid = proc["pid"]
+        self._owned_start_time = proc["start_time"]
+        print(f"[engine] owned PID={self._owned_pid}")
+
+    def verify_cleanup(self) -> dict:
+        """验证 owned 浏览器已彻底退出。
+
+        检查：
+        1. owned PID 已退出
+        2. 无其他进程使用本 profile（SingletonLock 已释放或可安全删除）
+        3. 返回验证结果 dict
+
+        即使 close() 抛异常，也必须执行此验证。
+        """
+        result = {"ok": True, "pid_exited": True, "profile_free": True, "details": []}
+
+        # 1. 验证 owned PID 退出
+        if self._owned_pid is not None:
+            try:
+                os.kill(self._owned_pid, 0)
+                result["pid_exited"] = False
+                result["ok"] = False
+                result["details"].append(f"PID {self._owned_pid} 仍存活")
+            except ProcessLookupError:
+                pass
+            except (PermissionError, OSError):
+                result["details"].append(f"无法确认 PID {self._owned_pid} 状态")
+
+        # 2. 验证 profile 无其他进程
+        processes = self._find_profile_processes()
+        if processes:
+            result["profile_free"] = False
+            result["ok"] = False
+            result["details"].append(
+                f"仍有进程使用 profile: PIDs={[p['pid'] for p in processes]}"
+            )
+
+        if result["ok"]:
+            print("[engine] 浏览器清理验证通过")
+
+        return result
+
+    def close(self):
+        """关闭浏览器并释放所有内存。
+
+        standalone 模式：关闭 page → 关闭 context → 停止 playwright。
+        关闭失败时记录错误但继续执行（调用方应随后执行 verify_cleanup）。
+        禁止按进程名清理，禁止 killall Chrome。
         """
         errors = []
         if self._is_standalone:
-            for platform in list(self._platform_pages):
+            for platform_name in list(self._platform_pages):
                 try:
-                    self.release_page_for_platform(platform)
+                    self.release_page_for_platform(platform_name)
                 except Exception as exc:
                     errors.append(exc)
-            # 关闭所有页面
             if self._context:
                 try:
-                    # 关闭 context 会关闭所有页面并释放浏览器进程
                     self._context.close()
                 except Exception as exc:
                     errors.append(exc)
@@ -360,7 +482,6 @@ class PlaywrightEngine:
                     self._context = None
                     self._platform_pages.clear()
         else:
-            # CDP 模式：不关闭浏览器，只断开连接
             self._browser = None
 
         if self._playwright:

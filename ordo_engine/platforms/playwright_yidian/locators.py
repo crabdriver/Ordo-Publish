@@ -21,8 +21,7 @@ class YidianLocators:
     EDITOR_AREA_MIN_WIDTH = 300
     EDITOR_AREA_MIN_HEIGHT = 100
 
-    COVER_FILE_INPUT = "input.upload-input"
-    COVER_UPLOAD_SUCCESS = ".upload-img img, .cover-img img, .article-cover img"
+    COVER_PICKER = ".article-cover-container .cover-setter:not([style*='display: none']) .cover-item"
     COVER_SINGLE_TEXT = "单图"
 
     PUBLISH_BUTTON_TEXTS = ["发文章", "发布"]

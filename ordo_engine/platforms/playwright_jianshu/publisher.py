@@ -10,7 +10,7 @@ except ImportError:
 
 from markdown_utils import should_declare_ai
 from ordo_engine.platforms.playwright.base_publisher import (
-    ArticlePayload, PlaywrightBasePublisher, PublishResult,
+    ArticlePayload, DraftCheckpoint, PlaywrightBasePublisher, PublishResult,
 )
 from ordo_engine.platforms.playwright._common import (
     fill_title_common, fill_body_common, upload_cover_common,
@@ -106,6 +106,12 @@ class JianshuPlaywrightPublisher(PlaywrightBasePublisher):
         pass
 
     def click_publish(self):
+        submit = self.page.locator(JianshuLocators.PUBLISH_BUTTON_SELECTOR).first
+        if submit.count() > 0:
+            # 无头 writer 页侧栏会遮挡按钮坐标；目标选择器已限定为文章提交按钮。
+            submit.click(force=True)
+            print("[INFO] 已点击简书真实提交按钮")
+            return
         click_publish_common(
             self.human, self.page,
             JianshuLocators.PUBLISH_BUTTON_TEXTS,
@@ -130,3 +136,46 @@ class JianshuPlaywrightPublisher(PlaywrightBasePublisher):
             JianshuLocators.DRAFT_MANAGEMENT_URL,
             expected_title=self._article.title,
         )
+
+    # ── 草稿检查点协议 ──────────────────────────────────────
+
+    def verify_draft_checkpoint(self) -> DraftCheckpoint:
+        """核验简书草稿：导航到文章管理页，匹配标题。"""
+        from datetime import datetime, timezone
+        try:
+            self.page.goto(JianshuLocators.DRAFT_MANAGEMENT_URL or JianshuLocators.MANAGEMENT_URL,
+                           wait_until="domcontentloaded", timeout=15000)
+            self.human.human_wait(1, 2)
+            title = getattr(self._article, "title", "")
+            draft_ref = ""
+            if title:
+                try:
+                    el = self.page.locator(f'text="{title}"').first
+                    if el.count() > 0:
+                        draft_ref = self.page.url or ""
+                except Exception:
+                    pass
+            return DraftCheckpoint(
+                platform=self.platform, draft_ref=draft_ref,
+                saved_at=datetime.now(timezone.utc).isoformat(),
+                verification_evidence={"method": "draft_list_title_match",
+                                       "title_matched": bool(draft_ref)})
+        except Exception as exc:
+            return DraftCheckpoint(
+                platform=self.platform, draft_ref="",
+                verification_evidence={"method": "draft_list_error", "error": str(exc)})
+
+    def publish_from_draft(self, draft_ref: str) -> PublishResult:
+        """从简书草稿发布。"""
+        if draft_ref:
+            self.page.goto(draft_ref, wait_until="domcontentloaded", timeout=15000)
+        self._submission_started = True
+        self.click_publish()
+        return self.verify_result("publish")
+
+    def verify_published(self, published_ref: str) -> bool:
+        try:
+            self.page.goto(published_ref, wait_until="domcontentloaded", timeout=10000)
+            return self.page.title() != "" and "404" not in self.page.title()
+        except Exception:
+            return False

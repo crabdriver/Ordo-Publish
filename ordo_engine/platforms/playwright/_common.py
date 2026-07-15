@@ -363,36 +363,24 @@ def verify_result_common(page: Page, platform: str, mode: str, published_url_pat
             smoke_step="verify", message="达到发布上限",
         )
 
-    if mode == "publish":
-        if _has_feedback_marker(feedback_text, success_markers):
-            return PublishResult(
-                platform=platform, status="published",
-                current_url=current_url, page_state="published",
-                smoke_step="verify",
-            )
-    else:
-        if _has_feedback_marker(feedback_text, draft_markers):
-            return PublishResult(
-                platform=platform, status="draft_only",
-                current_url=current_url, page_state="draft_saved",
-                smoke_step="verify", message=f"已写入{platform}草稿页",
-            )
+    # 页面提示、按钮点击、编辑器 URL 都会残留或误报，不能单独证明落库。
+    # 发布模式依次核验正式列表、草稿列表，避免把“已存草稿”误报为发布成功。
+    checks = []
+    if mode == "publish" and management_url:
+        checks.append((management_url, "published", "published"))
+    if draft_management_url:
+        checks.append((draft_management_url, "draft_only", "draft_saved"))
 
-    # 跳转到管理页面验证
-    url = draft_management_url if (mode == "draft" and draft_management_url) else management_url
-    if url and expected_title:
+    expected = _normalize_title(expected_title)
+    for url, status, page_state in checks:
+        if not expected:
+            continue
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
         except Exception:
-            return PublishResult(
-                platform=platform, status="submitted_unverified",
-                current_url=page.url, page_state="submitted_unverified",
-                smoke_step="verify", message="提交结果无法确认：管理页导航失败",
-            )
+            continue
 
-        expected = _normalize_title(expected_title)
-
-        # SPA 管理列表通常需要较长时间渲染，带重试的动态等待
+        # SPA 管理列表通常需要较长时间渲染，带重试的动态等待。
         max_attempts = 3
         for attempt in range(max_attempts):
             # 等网络空闲（SPA 数据加载完）
@@ -411,8 +399,6 @@ def verify_result_common(page: Page, platform: str, mode: str, published_url_pat
 
             # 精确匹配
             if expected and expected in management_titles:
-                status = "draft_only" if mode == "draft" else "published"
-                page_state = "draft_saved" if mode == "draft" else "published"
                 return PublishResult(
                     platform=platform, status=status,
                     current_url=page.url, page_state=page_state,

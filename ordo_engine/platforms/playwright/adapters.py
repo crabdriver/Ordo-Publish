@@ -13,6 +13,20 @@ from ordo_engine.results.errors import is_retryable_error
 from ordo_engine.results.record import ExecutionResult
 
 
+def _frontmatter_title(raw_text: str) -> str | None:
+    if not raw_text.startswith("---\n"):
+        return None
+    end = raw_text.find("\n---", 4)
+    if end == -1:
+        return None
+    for line in raw_text[4:end].splitlines():
+        if line.startswith((" ", "\t")) or not line.startswith("title:"):
+            continue
+        title = line.split(":", 1)[1].strip().strip("\"'")
+        return title or None
+    return None
+
+
 class PlaywrightPlatformAdapter(BasePlatformAdapter):
     """将 Playwright 发布器适配到现有 pipeline 接口
 
@@ -172,6 +186,8 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
         if outcome_status in {
             "published", "scheduled", "draft_only", "draft_saved", "skipped_existing",
         } and not is_terminal_outcome(outcome_status, mode):
+            if mode == "publish" and outcome_status in {"draft_only", "draft_saved"}:
+                return "draft_only"
             return "failed"
         if outcome_status in {
             "published", "scheduled", "draft_only", "draft_saved", "skipped_existing",
@@ -223,7 +239,7 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
             if len(parts) >= 3:
                 body = parts[2].lstrip()
 
-        title = strip_title_marker(markdown_path.stem)
+        title = strip_title_marker(_frontmatter_title(raw_text) or markdown_path.stem)
 
         for line in body.splitlines():
             stripped = line.strip()

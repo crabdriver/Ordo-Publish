@@ -11,6 +11,7 @@ except ImportError:
 from markdown_utils import render_markdown_plain_text, should_declare_ai
 from ordo_engine.platforms.playwright.base_publisher import (
     ArticlePayload,
+    DraftCheckpoint,
     PlaywrightBasePublisher,
     PublishResult,
 )
@@ -159,3 +160,74 @@ class ZhihuPlaywrightPublisher(PlaywrightBasePublisher):
             ZhihuLocators.DRAFT_MANAGEMENT_URL,
             expected_title=self._article.title,
         )
+
+    # ── 草稿检查点协议 ──────────────────────────────────────
+
+    def verify_draft_checkpoint(self) -> DraftCheckpoint:
+        """核验知乎草稿：导航到创作中心草稿列表，匹配标题。
+
+        无法核验 → draft_ref 为空，调用方应处理为 manual_verify。
+        """
+        from datetime import datetime, timezone
+
+        try:
+            # 导航到草稿管理页
+            self.page.goto(
+                ZhihuLocators.DRAFT_MANAGEMENT_URL,
+                wait_until="domcontentloaded",
+                timeout=15000,
+            )
+            self.human.human_wait(1, 2)
+
+            # 尝试匹配标题
+            title = getattr(self._article, "title", "")
+            draft_ref = ""
+            if title:
+                try:
+                    link = self.page.locator(f'a[href*="/p/"]:has-text("{title}")').first
+                    if link.count() > 0:
+                        href = link.get_attribute("href") or ""
+                        if "/p/" in href:
+                            draft_ref = href.split("/p/")[-1].split("?")[0]
+                except Exception:
+                    pass
+
+            return DraftCheckpoint(
+                platform=self.platform,
+                draft_ref=draft_ref,
+                draft_url=ZhihuLocators.DRAFT_MANAGEMENT_URL,
+                saved_at=datetime.now(timezone.utc).isoformat(),
+                verification_evidence={
+                    "method": "draft_list_title_match",
+                    "title_matched": bool(draft_ref),
+                    "draft_list_url": ZhihuLocators.DRAFT_MANAGEMENT_URL,
+                },
+            )
+        except Exception as exc:
+            return DraftCheckpoint(
+                platform=self.platform,
+                draft_ref="",
+                verification_evidence={
+                    "method": "draft_list_error",
+                    "error": str(exc),
+                },
+            )
+
+    def publish_from_draft(self, draft_ref: str) -> PublishResult:
+        """从已有草稿发布：打开草稿编辑页 → 点击发布。"""
+        draft_url = f"https://zhuanlan.zhihu.com/p/{draft_ref}/edit"
+        self.page.goto(draft_url, wait_until="domcontentloaded", timeout=15000)
+        self.human.human_wait(2, 3)
+        self._submission_started = True
+        self.click_publish()
+        return self.verify_result("publish")
+
+    def verify_published(self, published_ref: str) -> bool:
+        """核验知乎是否已正式发布。"""
+        try:
+            article_url = f"https://zhuanlan.zhihu.com/p/{published_ref}"
+            self.page.goto(article_url, wait_until="domcontentloaded", timeout=10000)
+            # 如果有标题内容出现即视为已发布
+            return self.page.title() != "" and "404" not in self.page.title()
+        except Exception:
+            return False

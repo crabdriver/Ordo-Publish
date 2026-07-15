@@ -10,7 +10,7 @@ except ImportError:
 
 from markdown_utils import should_declare_ai
 from ordo_engine.platforms.playwright.base_publisher import (
-    ArticlePayload, PlaywrightBasePublisher, PublishResult,
+    ArticlePayload, DraftCheckpoint, PlaywrightBasePublisher, PublishResult,
 )
 from ordo_engine.platforms.playwright._common import (
     fill_title_common, fill_body_common, upload_cover_common,
@@ -62,8 +62,14 @@ class ToutiaoPlaywrightPublisher(PlaywrightBasePublisher):
             raise RuntimeError("未找到头条号添加封面入口")
         self.human.human_click(add)
 
+        # 当前头条抽屉先显示「本地上传」入口；点击后才挂载真正的 file input。
+        local_upload = self.page.locator('button:visible:has-text("本地上传")').first
+        if local_upload.count() == 0:
+            raise RuntimeError("未找到头条号本地上传入口")
+        self.human.human_click(local_upload)
+
         file_input = self.page.locator(
-            '.btn-upload-handle input[type="file"], input[type="file"][accept*="image"]'
+            '#upload-drag-input, .btn-upload-handle input[type="file"], input[type="file"][accept*="image"]'
         ).first
         file_input.wait_for(state="attached", timeout=10000)
         file_input.set_input_files(str(path))
@@ -126,3 +132,44 @@ class ToutiaoPlaywrightPublisher(PlaywrightBasePublisher):
             ToutiaoLocators.DRAFT_MANAGEMENT_URL,
             expected_title=self._article.title,
         )
+
+    # ── 草稿检查点协议 ──────────────────────────────────────
+
+    def verify_draft_checkpoint(self) -> DraftCheckpoint:
+        from datetime import datetime, timezone
+        try:
+            self.page.goto(ToutiaoLocators.DRAFT_MANAGEMENT_URL or ToutiaoLocators.MANAGEMENT_URL,
+                           wait_until="domcontentloaded", timeout=15000)
+            self.human.human_wait(1, 2)
+            title = getattr(self._article, "title", "")
+            draft_ref = ""
+            if title:
+                try:
+                    el = self.page.locator(f'text="{title}"').first
+                    if el.count() > 0:
+                        draft_ref = self.page.url or ""
+                except Exception:
+                    pass
+            return DraftCheckpoint(
+                platform=self.platform, draft_ref=draft_ref,
+                saved_at=datetime.now(timezone.utc).isoformat(),
+                verification_evidence={"method": "draft_list_title_match",
+                                       "title_matched": bool(draft_ref)})
+        except Exception as exc:
+            return DraftCheckpoint(
+                platform=self.platform, draft_ref="",
+                verification_evidence={"method": "draft_list_error", "error": str(exc)})
+
+    def publish_from_draft(self, draft_ref: str) -> PublishResult:
+        if draft_ref:
+            self.page.goto(draft_ref, wait_until="domcontentloaded", timeout=15000)
+        self._submission_started = True
+        self.click_publish()
+        return self.verify_result("publish")
+
+    def verify_published(self, published_ref: str) -> bool:
+        try:
+            self.page.goto(published_ref, wait_until="domcontentloaded", timeout=10000)
+            return self.page.title() != "" and "404" not in self.page.title()
+        except Exception:
+            return False

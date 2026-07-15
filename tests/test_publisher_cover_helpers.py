@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 import jianshu_publisher
 import toutiao_publisher
@@ -14,6 +14,16 @@ import wechat_publisher
 import yidian_publisher
 import zhihu_publisher
 from ordo_engine.assignment.cover_contract import validate_cover
+
+
+def _write_detailed_source(path: Path, size=(3200, 1600)) -> None:
+    image = Image.new("RGB", size, color=(23, 45, 67))
+    draw = ImageDraw.Draw(image)
+    for x in range(100, size[0] - 100, 100):
+        draw.line((x, 80, x, size[1] - 80), fill=(220, 180, 100), width=8)
+    for y in range(80, size[1] - 80, 80):
+        draw.line((100, y, size[0] - 100, y), fill=(120, 180, 220), width=8)
+    image.save(path)
 
 
 def _toutiao_successful_cdp(command, _target_id, *args, **_kwargs):
@@ -394,7 +404,7 @@ class WechatCoverResolutionTests(unittest.TestCase):
                 captured["cmd"] = cmd
                 source = Path(cmd[cmd.index("--out") + 1])
                 source.parent.mkdir(parents=True, exist_ok=True)
-                Image.new("RGB", (3200, 1600), color=(23, 45, 67)).save(source)
+                _write_detailed_source(source)
                 return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
             with patch.object(wechat_publisher, "BASE_DIR", root), patch(
@@ -418,7 +428,7 @@ class WechatCoverResolutionTests(unittest.TestCase):
             source = root / "source.png"
             cover = root / "assets" / "article-1" / "cover.png"
             source.parent.mkdir(parents=True, exist_ok=True)
-            Image.new("RGB", (3200, 1600), color=(23, 45, 67)).save(source)
+            _write_detailed_source(source)
             from ordo_engine.assignment.cover_contract import normalize_cover_source
 
             normalize_cover_source(source, cover)

@@ -23,10 +23,19 @@ from ordo_engine.run_state import article_key, get_record, is_done, record_step,
 
 
 class FakePage:
-    def __init__(self, *, url="https://example.test/editor", text="", management_text="", feedback=()):
+    def __init__(
+        self,
+        *,
+        url="https://example.test/editor",
+        text="",
+        management_text="",
+        management_text_by_url=None,
+        feedback=(),
+    ):
         self.url = url
         self.text = text
         self.management_text = management_text
+        self.management_text_by_url = management_text_by_url or {}
         self.feedback = list(feedback)
         self.visited_urls = []
 
@@ -36,7 +45,7 @@ class FakePage:
     def goto(self, url, **_kwargs):
         self.visited_urls.append(url)
         self.url = url
-        self.text = self.management_text
+        self.text = self.management_text_by_url.get(url, self.management_text)
 
     def locator(self, _selector):
         return FakeLocator(self.feedback)
@@ -95,6 +104,25 @@ def test_management_navigation_without_exact_title_is_unverified():
 
     assert result.status == "submitted_unverified"
     assert result.page_state == "submitted_unverified"
+
+
+def test_publish_falls_back_to_draft_management_before_unverified():
+    page = FakePage(
+        management_text_by_url={
+            "https://example.test/manage": "其他已发布文章",
+            "https://example.test/drafts": "目标标题\n其他草稿",
+        }
+    )
+
+    with patch("ordo_engine.platforms.playwright._common.time.sleep"):
+        result = verify_common(page)
+
+    assert result.status == "draft_only"
+    assert result.page_state == "draft_saved"
+    assert page.visited_urls == [
+        "https://example.test/manage",
+        "https://example.test/drafts",
+    ]
 
 
 def test_bilibili_generic_opus_manager_is_not_publication_evidence():
@@ -184,12 +212,13 @@ def test_direct_url_wins_over_limit_words_in_body_and_feedback():
     assert result.status == "published"
 
 
-def test_explicit_toast_success_is_terminal_success():
+def test_explicit_toast_success_without_durable_evidence_is_unverified():
     page = FakePage(text="普通页面", feedback=["发布成功"])
 
-    result = verify_common(page)
+    with patch("ordo_engine.platforms.playwright._common.time.sleep"):
+        result = verify_common(page)
 
-    assert result.status == "published"
+    assert result.status == "submitted_unverified"
 
 
 def test_hidden_historical_success_toast_is_not_evidence():
@@ -254,6 +283,20 @@ def test_explicit_alert_limit_is_retryable_nonzero(tmp_path):
     assert collected.retryable
 
 
+def test_bilibili_daily_upload_limit_is_retryable_nonzero():
+    result = verify_result_common(
+        FakePage(feedback=["已达到当日投稿上限，只能保存草稿哦~"]),
+        "B站",
+        "publish",
+        BilibiliLocators.PUBLISHED_URL_PATTERN,
+        BilibiliLocators.PUBLISH_SUCCESS_MARKERS,
+        BilibiliLocators.DRAFT_SUCCESS_MARKERS,
+        BilibiliLocators.LIMIT_MARKERS,
+    )
+
+    assert result.status == "limit_reached"
+
+
 @pytest.mark.parametrize("limit_marker", ["达到发布上限", "发布上限", "请明天再来"])
 def test_explicit_limit_feedback_phrase_is_retryable_nonzero(tmp_path, limit_marker):
     result = verify_result_common(
@@ -302,7 +345,7 @@ def test_zhihu_management_navigation_without_title_is_unverified():
         result = publisher.verify_result("publish")
 
     assert result.status == "submitted_unverified"
-    assert page.url == ZhihuLocators.MANAGEMENT_URL
+    assert page.url == ZhihuLocators.DRAFT_MANAGEMENT_URL
 
 
 @pytest.mark.parametrize(
@@ -310,8 +353,8 @@ def test_zhihu_management_navigation_without_title_is_unverified():
     [
         ("published", 0, "published"),
         ("scheduled", 0, "scheduled"),
-        ("draft_only", 1, "failed"),
-        ("draft_saved", 1, "failed"),
+        ("draft_only", 1, "draft_only"),
+        ("draft_saved", 1, "draft_only"),
         ("skipped_existing", 0, "skipped_existing"),
         ("limit_reached", 1, "limit_reached"),
         ("submitted_unverified", 1, "submitted_unverified"),
@@ -343,10 +386,10 @@ def test_adapter_returncode_only_accepts_terminal_outcomes(
 
 
 @pytest.mark.parametrize(
-    ("mode", "status"),
-    [("publish", "draft_only"), ("draft", "published")],
+    ("mode", "status", "expected"),
+    [("publish", "draft_only", "draft_only"), ("draft", "published", "failed")],
 )
-def test_adapter_rejects_mode_mismatched_terminal_outcome(tmp_path, mode, status):
+def test_adapter_preserves_publish_draft_evidence_only(tmp_path, mode, status, expected):
     article = tmp_path / "article.md"
     article.write_text("# 标题\n正文", encoding="utf-8")
 
@@ -362,7 +405,47 @@ def test_adapter_rejects_mode_mismatched_terminal_outcome(tmp_path, mode, status
     result = adapter.publish(adapter.prepare(article, mode))
 
     assert result["returncode"] != 0
-    assert adapter.verify(result, mode) == "failed"
+    assert adapter.verify(result, mode) == expected
+
+
+def test_publish_mode_keeps_draft_only_evidence_with_nonzero_returncode(tmp_path):
+    article = tmp_path / "article.md"
+    article.write_text("# 标题\n正文", encoding="utf-8")
+
+    class ResultPublisher:
+        def __init__(self, _engine):
+            pass
+
+        def publish(self, _article, _mode):
+            return PublishResult(platform="stub", status="draft_only", page_state="draft_saved")
+
+    adapter = PlaywrightPlatformAdapter(tmp_path, "stub", ResultPublisher)
+    adapter.set_shared_engine(MagicMock())
+    result = adapter.publish(adapter.prepare(article, "publish"))
+
+    assert result["returncode"] == 1
+    assert adapter.verify(result, "publish") == "draft_only"
+
+
+def test_adapter_uses_frontmatter_title_instead_of_revision_filename(tmp_path):
+    article = tmp_path / "20260714-年轻人不买了-算了一笔账之后-r1.md"
+    article.write_text(
+        "---\n"
+        "article_id: 20260714-renting-life-recalculation\n"
+        "title: 年轻人不买了，算了一笔账之后\n"
+        "---\n\n"
+        "正文。\n",
+        encoding="utf-8",
+    )
+
+    adapter = PlaywrightPlatformAdapter(tmp_path, "stub", MagicMock)
+    adapter._content_variants_enabled = lambda: False
+
+    loaded = adapter._load_article(adapter.prepare(article, "draft"))
+
+    assert loaded.title == "年轻人不买了，算了一笔账之后"
+    assert "title:" not in loaded.body
+    assert loaded.body == "正文。\n"
 
 
 def test_rate_limit_is_retryable_next_run():
@@ -573,7 +656,10 @@ def test_recovery_uses_blank_page_and_management_title_only(
         result = publisher.publish(payload(article), "publish")
 
     assert result.status == expected_status
-    assert blank.visited_urls == ["https://example.test/manage"]
+    expected_urls = ["https://example.test/manage"]
+    if expected_status == "submitted_unverified":
+        expected_urls.append("https://example.test/drafts")
+    assert blank.visited_urls == expected_urls
     assert all("editor" not in url for url in blank.visited_urls)
     assert publisher.navigate_calls == 0
     engine.get_page_for_platform.assert_not_called()

@@ -10,7 +10,7 @@ except ImportError:
 
 from markdown_utils import render_markdown_plain_text, should_declare_ai
 from ordo_engine.platforms.playwright.base_publisher import (
-    ArticlePayload, PlaywrightBasePublisher, PublishResult,
+    ArticlePayload, DraftCheckpoint, PlaywrightBasePublisher, PublishResult,
 )
 from ordo_engine.platforms.playwright._common import verify_result_common, find_visible_button
 from ordo_engine.platforms.playwright_bilibili.locators import BilibiliLocators
@@ -196,9 +196,7 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
         if upload.count() == 0:
             raise RuntimeError("未找到B站添加封面入口")
         upload.click()
-        preview = ef.locator(
-            "div.upload-button img, .cover-preview img, .upload-preview img"
-        )
+        preview = ef.locator(BilibiliLocators.COVER_UPLOAD_SUCCESS)
         before_sources = {
             source for index in range(preview.count())
             if (source := preview.nth(index).get_attribute("src"))
@@ -220,7 +218,7 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
             after_sources = {
                 source for index in range(preview.count())
                 if (source := preview.nth(index).get_attribute("src"))
-                and source.startswith(("http://", "https://"))
+                and source.startswith(("http://", "https://", "//"))
             }
             if after_sources and after_sources != before_sources:
                 break
@@ -308,3 +306,44 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
             BilibiliLocators.DRAFT_MANAGEMENT_URL,
             expected_title=self._article.title,
         )
+
+    # ── 草稿检查点协议 ──────────────────────────────────────
+
+    def verify_draft_checkpoint(self) -> DraftCheckpoint:
+        from datetime import datetime, timezone
+        try:
+            self.page.goto(BilibiliLocators.DRAFT_MANAGEMENT_URL or BilibiliLocators.MANAGEMENT_URL,
+                           wait_until="domcontentloaded", timeout=15000)
+            self.human.human_wait(1, 2)
+            title = getattr(self._article, "title", "")
+            draft_ref = ""
+            if title:
+                try:
+                    el = self.page.locator(f'text="{title}"').first
+                    if el.count() > 0:
+                        draft_ref = self.page.url or ""
+                except Exception:
+                    pass
+            return DraftCheckpoint(
+                platform=self.platform, draft_ref=draft_ref,
+                saved_at=datetime.now(timezone.utc).isoformat(),
+                verification_evidence={"method": "draft_list_title_match",
+                                       "title_matched": bool(draft_ref)})
+        except Exception as exc:
+            return DraftCheckpoint(
+                platform=self.platform, draft_ref="",
+                verification_evidence={"method": "draft_list_error", "error": str(exc)})
+
+    def publish_from_draft(self, draft_ref: str) -> PublishResult:
+        if draft_ref:
+            self.page.goto(draft_ref, wait_until="domcontentloaded", timeout=15000)
+        self._submission_started = True
+        self.click_publish()
+        return self.verify_result("publish")
+
+    def verify_published(self, published_ref: str) -> bool:
+        try:
+            self.page.goto(published_ref, wait_until="domcontentloaded", timeout=10000)
+            return self.page.title() != "" and "404" not in self.page.title()
+        except Exception:
+            return False

@@ -11,6 +11,7 @@ from ordo_engine.assignment.cover_contract import (
     CoverContractError,
     normalize_cover_source,
     resolve_publication_cover,
+    resolve_wechat_cover,
     validate_cover,
 )
 
@@ -24,13 +25,33 @@ def write_png(path: Path, *, size=COVER_SIZE, profile=True):
     Image.new("RGB", size, color=(23, 45, 67)).save(path, format="PNG", **kwargs)
 
 
+def write_detailed_png(path: Path, *, size=COVER_SIZE):
+    image = Image.new("RGB", size, color=(23, 45, 67))
+    from PIL import ImageDraw
+
+    draw = ImageDraw.Draw(image)
+    for x in range(120, size[0] - 120, 120):
+        draw.line((x, 100, x, size[1] - 100), fill=(220, 180, 100), width=8)
+    for y in range(100, size[1] - 100, 100):
+        draw.line((120, y, size[0] - 120, y), fill=(120, 180, 220), width=8)
+    image.save(path, format="PNG", icc_profile=srgb_profile_bytes())
+
+
 class CoverContractTests(unittest.TestCase):
     def test_valid_cover_matches_canonical_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
             cover = Path(tmp) / COVER_FILENAME
-            write_png(cover)
+            write_detailed_png(cover)
 
             self.assertEqual(validate_cover(cover), cover.resolve())
+
+    def test_rejects_low_detail_placeholder_cover(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cover = Path(tmp) / COVER_FILENAME
+            write_png(cover)
+
+            with self.assertRaisesRegex(CoverContractError, "视觉细节"):
+                validate_cover(cover)
 
     def test_rejects_obsolete_and_inexact_dimensions(self):
         for size in ((1200, 510), (2541, 1080)):
@@ -69,7 +90,7 @@ class CoverContractTests(unittest.TestCase):
             relative = "assets/article-1/cover.png"
             cover = root / relative
             cover.parent.mkdir(parents=True)
-            write_png(cover)
+            write_detailed_png(cover)
             article = root / "article.md"
             article.write_text(
                 "---\n"
@@ -101,12 +122,33 @@ class CoverContractTests(unittest.TestCase):
             with self.assertRaisesRegex(CoverContractError, "同一张"):
                 resolve_publication_cover(article)
 
+    def test_wechat_cover_does_not_depend_on_paused_browser_cover_mappings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            relative = "assets/article-1/cover.png"
+            cover = root / relative
+            cover.parent.mkdir(parents=True)
+            write_detailed_png(cover)
+            article = root / "article.md"
+            article.write_text(
+                "---\n"
+                "article_id: article-1\n"
+                f"cover: {relative}\n"
+                "platform_covers:\n"
+                f"  wechat: {relative}\n"
+                "  zhihu: paused\n"
+                "---\n\n# Article\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(resolve_wechat_cover(article), cover.resolve())
+
     def test_normalizes_only_high_resolution_sources(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             source = root / "source.png"
             output = root / COVER_FILENAME
-            Image.new("RGB", (3200, 1600), color=(23, 45, 67)).save(source)
+            write_detailed_png(source, size=(3200, 1600))
 
             self.assertEqual(normalize_cover_source(source, output), output.resolve())
             self.assertEqual(validate_cover(output), output.resolve())

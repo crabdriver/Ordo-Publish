@@ -15,37 +15,44 @@
 
 `scripts/monitor_publish.py` 是唯一批次协调器和唯一锁持有者。它不再为每篇文章启动一个继承锁的 `publish.py` 子进程。
 
-协调器在存在浏览器工作时创建一个隔离 profile 的 standalone 浏览器 context。每次只保留一个活动平台页面；完成当前平台后关闭或复用该页面，再处理下一平台。批次完成、超时或异常时关闭 context，释放内存。
+协调器不使用 CDP。每个平台独立启动一次 owned browser，处理该平台全部文章后彻底关闭并释放内存，再启动下一个平台。任意时刻最多一个 browser context、一个活动 page。
 
 ```text
 定时任务 -> BatchCoordinator(唯一 publish.lock)
-          -> 微信 API 草稿
-          -> 隔离浏览器 context
-             -> 文章 A / 平台 X
-             -> 文章 A / 平台 Y
-             -> 文章 B / 平台 X
-          -> 关闭 context -> 生成只读报告
+          -> 微信专用 worker 草稿（不经过 publish.py，不重复获取锁）
+          -> zhihu:  启动 owned browser → 全部文章 → 彻底关闭
+          -> jianshu:启动 owned browser → 全部文章 → 彻底关闭
+          -> toutiao:启动 owned browser → 全部文章 → 彻底关闭
+          -> yidian: 启动 owned browser → 全部文章 → 彻底关闭
+          -> bilibili:启动 owned browser → 全部文章 → 彻底关闭
+          -> 生成只读报告
 ```
+
+每个平台 browser 使用 `.ordo/automation-profile` 隔离 profile。系统 Chrome binary 可以保留，但必须通过精确 `--user-data-dir` 命令行识别 owned 进程并确认无其他进程使用同一 profile。
 
 ## 状态与恢复
 
 `.ordo/auto_publish_state.json` 是唯一恢复依据。`publish_records.csv` 是追加审计日志，不参与恢复决策。
 
-每个 `article_key + platform` 保存：
+每个 `article_key + platform` 保存模式维度（draft/publish），自动任务固定读取 wechat.draft / browser.publish。手动路径的 draft 和 publish 互不覆盖。
 
-- `package_hash`：Markdown 与统一封面身份；变更后旧检查点失效。
-- `stage`：`preflight_ok`、`draft_saved`、`publish_attempted`、`published`、`limited_after_draft`、`blocked_no_draft`、`manual_verify`。
+- `package_hash`：Markdown 内容身份；浏览器平台暂停封面。微信封面单独验证。
+- `stage`：`pending`、`preflight_ok`、`draft_prepared`、`draft_saved`、`publish_attempted`、`published`、`limited_after_draft`、`blocked_no_draft`、`manual_verify`、`failed_before_draft`、`not_executed`。
 - `draft_ref`：平台草稿 ID 或编辑 URL；无可靠平台草稿时为空。
 - `published_ref`：平台公开 URL；只有可验证时写入。
 - `error`、`retry_after`、`updated_at`。
 
 恢复规则：
 
-- `published` 跳过。
-- `draft_saved` 从草稿恢复，不创建第二篇。
+- `completed` 整篇跳过。
+- `published` 该平台跳过。
+- `draft_saved` 禁止重新创建草稿；平台恢复路径完成并验证前保持跳过。
 - `limited_after_draft` 在 `retry_after` 前不再尝试正式发布。
 - `blocked_no_draft` 不自动重试；只有包或平台能力改变后才重新预检。
 - `manual_verify` 不自动重投，等待平台后台人工确认。
+- `not_executed` 允许正常执行。
+- `failed_before_draft` 按错误可重试性决定。
+- `needs_review`（文章级）不进入任何平台发布。
 
 ## 平台检查点协议
 
@@ -68,14 +75,15 @@
 
 ## 资源上限
 
-- 一个批次最多一个 standalone 浏览器 context。
-- 同时最多一个活动页面。
+- 每个平台一个独立 browser 生命周期；平台之间彻底关闭并释放内存。
+- 任意时刻最多一个 browser context、一个活动 page。
 - 无待处理浏览器工作时不启动浏览器。
 - 每篇、每平台有独立超时；超时先保存/核验草稿，再释放页面。
+- 浏览器清理失败时停止启动后续平台，剩余任务标记 `not_executed`。
 
 ## 报告契约
 
-飞书和任务输出只能读取状态，逐篇逐平台报告下列之一：
+项目输出终端文本或结构化报告，逐篇逐平台报告下列之一。外部自动化软件负责推送飞书：
 
 - `已发表`
 - `草稿已核验，待正式发布`
@@ -88,9 +96,9 @@
 
 ## 验收标准
 
-1. 八篇文章的批次只启动一个隔离浏览器 context，主力浏览器零访问。
+1. 八篇文章批次中，每个平台独立启动并关闭 owned browser；平台间主进程完全不保留浏览器进程，主力浏览器零访问。
 2. 第一篇的平台错误不会阻断第二篇进入编辑器。
 3. 封面或权限失败后，状态明确为 `draft_saved` 或 `blocked_no_draft`，不存在无解释的 `failed`。
-4. 已核验草稿重跑时恢复同一 `draft_ref`，不创建重复草稿。
+4. 已核验草稿重跑时不得创建重复草稿；未接入可靠恢复路径的平台保持跳过。
 5. 限额只阻断对应平台的正式发布，其他平台和文章继续。
 6. 报告与 `auto_publish_state.json` 的阶段逐项一致。
