@@ -254,3 +254,47 @@ def test_wechat_timeout_is_manual_verify_not_automatic_retry(tmp_path):
     assert coordinator._needs_processing(
         coordinator._articles["article-1"], "wechat", "draft"
     ) is False
+
+
+def test_batch_summary_excludes_untouched_historical_success(tmp_path):
+    coordinator = _coordinator(tmp_path)
+    coordinator._articles["article-1"] = ArticleRecord(
+        article_id="article-1",
+        platforms={
+            "wechat": {
+                "draft": PlatformRecord(
+                    stage=PlatformStage.draft_saved,
+                    draft_ref="old-draft",
+                )
+            },
+            "zhihu": {
+                "publish": PlatformRecord(
+                    stage=PlatformStage.published,
+                    published_ref="https://example.test/old",
+                )
+            },
+        },
+    )
+    coordinator._batch_identities = {"article-1"}
+
+    assert coordinator._build_summary()["articles"] == {}
+
+
+def test_batch_summary_includes_only_touched_platform(tmp_path):
+    coordinator = _coordinator(tmp_path)
+    coordinator._articles["article-1"] = ArticleRecord(
+        article_id="article-1",
+        platforms={
+            "zhihu": {
+                "publish": PlatformRecord(stage=PlatformStage.published),
+            },
+        },
+    )
+    coordinator._batch_identities = {"article-1"}
+
+    coordinator._record_error(
+        "article-1", "wechat", "draft", "transport failed"
+    )
+
+    platforms = coordinator._build_summary()["articles"]["article-1"]["platforms"]
+    assert set(platforms) == {"wechat:draft"}

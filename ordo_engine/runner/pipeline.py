@@ -303,6 +303,7 @@ class BatchCoordinator:
         self.record_callback = record_callback
         self._articles: dict[str, ArticleRecord] = {}
         self._batch_identities: set[str] = set()
+        self._touched_records: set[tuple[str, str, str]] = set()
 
     @property
     def registry(self):
@@ -311,6 +312,7 @@ class BatchCoordinator:
         return self._registry
 
     def run_batch(self, article_paths: list[Path]) -> dict:
+        self._touched_records.clear()
         self._load_or_init_state(article_paths)
         self._batch_identities = {
             stable_article_id(path, watch_dir=self.watch_dir)
@@ -413,8 +415,8 @@ class BatchCoordinator:
                         error=str(exc),
                         error_type="cover_preflight_failed",
                     )
-                    set_platform_record(
-                        self._articles, identity, WECHAT_PLATFORM, "draft", prec
+                    self._set_platform_record(
+                        identity, WECHAT_PLATFORM, "draft", prec
                     )
                 except Exception as exc:
                     prec = PlatformRecord(
@@ -422,8 +424,8 @@ class BatchCoordinator:
                         error=str(exc),
                         error_type="wechat_vps_adapter_failed",
                     )
-                    set_platform_record(
-                        self._articles, identity, WECHAT_PLATFORM, "draft", prec
+                    self._set_platform_record(
+                        identity, WECHAT_PLATFORM, "draft", prec
                     )
                 self._save_state()
         finally:
@@ -479,7 +481,7 @@ class BatchCoordinator:
             error=error,
             error_type=error_type,
         )
-        set_platform_record(self._articles, identity, WECHAT_PLATFORM, "draft", prec)
+        self._set_platform_record(identity, WECHAT_PLATFORM, "draft", prec)
 
     def _run_browser_platform(self, platform, article_paths):
         eligible = []
@@ -502,7 +504,7 @@ class BatchCoordinator:
                 if article and self._needs_processing(article, platform, "publish"):
                     prec = PlatformRecord(stage=PlatformStage.not_executed,
                                           error=str(exc), error_type="browser_start_failed")
-                    set_platform_record(self._articles, identity, platform, "publish", prec)
+                    self._set_platform_record(identity, platform, "publish", prec)
             self._save_state()
             return
         try:
@@ -547,7 +549,7 @@ class BatchCoordinator:
                             stage=PlatformStage.not_executed,
                             error="; ".join(details) if details else str(close_error or "cleanup failed"),
                             error_type="browser_cleanup_failed")
-                        set_platform_record(self._articles, identity, rp, "publish", prec)
+                        self._set_platform_record(identity, rp, "publish", prec)
                 self._save_state()
                 if close_error:
                     raise close_error
@@ -571,7 +573,7 @@ class BatchCoordinator:
                 stage=stage,
                 published_ref=payload.get("current_url") if stage == PlatformStage.published else None,
                 error=payload.get("stderr"), error_type=payload.get("error_type"))
-            set_platform_record(self._articles, identity, platform, "publish", prec)
+            self._set_platform_record(identity, platform, "publish", prec)
             # 记录审计
             if self.record_callback:
                 self.record_callback(str(article_path), platform, "publish", payload)
@@ -614,16 +616,29 @@ class BatchCoordinator:
 
     def _record_error(self, identity, platform, mode, error):
         prec = PlatformRecord(stage=PlatformStage.failed_before_draft, error=error)
-        set_platform_record(self._articles, identity, platform, mode, prec)
+        self._set_platform_record(identity, platform, mode, prec)
+
+    def _set_platform_record(self, identity, platform, mode, record):
+        set_platform_record(self._articles, identity, platform, mode, record)
+        self._touched_records.add((identity, platform, mode))
 
     def _build_summary(self):
         s = {"articles": {}}
         for identity, article in self._articles.items():
             if self._batch_identities and identity not in self._batch_identities:
                 continue
+            touched = {
+                (platform, mode)
+                for record_identity, platform, mode in self._touched_records
+                if record_identity == identity
+            }
+            if not touched:
+                continue
             pf = {}
             for pn, modes in article.platforms.items():
                 for md, prec in modes.items():
+                    if (pn, md) not in touched:
+                        continue
                     pf[f"{pn}:{md}"] = {
                         "stage": prec.stage.value,
                         "error": prec.error, "error_type": prec.error_type,
