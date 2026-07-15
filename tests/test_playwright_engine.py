@@ -51,6 +51,49 @@ class StubPublisher(PlaywrightBasePublisher):
 
 
 class TestPlaywrightEngine(unittest.TestCase):
+    @patch("ordo_engine.platforms.playwright.engine.subprocess.run")
+    def test_find_profile_processes_parses_parent_pid_and_full_start_time(self, run):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = PlaywrightEngine(base_dir=Path(tmpdir), headless=True)
+            profile = str(engine.profile_dir.resolve())
+            run.return_value = MagicMock(
+                returncode=0,
+                stdout=(
+                    "  100    50 Tue Jul 15 11:29:28 2026 "
+                    f"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome "
+                    f"--user-data-dir={profile}\n"
+                ),
+            )
+
+            processes = engine._find_profile_processes()
+
+            self.assertEqual(processes, [{
+                "pid": 100,
+                "ppid": 50,
+                "start_time": "Tue Jul 15 11:29:28 2026",
+                "args": (
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome "
+                    f"--user-data-dir={profile}"
+                ),
+            }])
+
+    def test_capture_ownership_treats_chrome_process_tree_as_one_browser(self):
+        """Chrome 根进程及其 helper 子进程属于同一个 owned browser。"""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            engine = PlaywrightEngine(base_dir=Path(tmpdir), headless=True)
+            processes = [
+                {"pid": 100, "ppid": 50, "start_time": "root-start", "args": "chrome"},
+                {"pid": 101, "ppid": 100, "start_time": "child-start", "args": "renderer"},
+                {"pid": 102, "ppid": 100, "start_time": "child-start", "args": "gpu"},
+                {"pid": 103, "ppid": 101, "start_time": "child-start", "args": "utility"},
+            ]
+
+            with patch.object(engine, "_find_profile_processes", return_value=processes):
+                engine._capture_ownership()
+
+            self.assertEqual(engine._owned_pid, 100)
+            self.assertEqual(engine._owned_start_time, "root-start")
+
     def test_cleanup_stale_profile_lock_keeps_live_pid(self):
         """存活进程使用 profile → BrowserProfileBusyError。"""
         with tempfile.TemporaryDirectory() as tmpdir:

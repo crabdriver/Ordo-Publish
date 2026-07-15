@@ -199,7 +199,7 @@ class PlaywrightEngine:
         profile_str = str(self.profile_dir.resolve())
         try:
             result = subprocess.run(
-                ["ps", "-eo", "pid,lstart,args"],
+                ["ps", "-ww", "-eo", "pid=,ppid=,lstart=,args="],
                 capture_output=True, text=True, timeout=10,
             )
         except FileNotFoundError:
@@ -213,16 +213,18 @@ class PlaywrightEngine:
         processes = []
         for line in result.stdout.splitlines():
             if f"--user-data-dir={profile_str}" in line:
-                parts = line.strip().split(None, 2)
-                if len(parts) >= 3:
+                parts = line.strip().split(None, 7)
+                if len(parts) == 8:
                     try:
                         pid = int(parts[0])
+                        ppid = int(parts[1])
                     except ValueError:
                         continue
                     processes.append({
                         "pid": pid,
-                        "start_time": parts[1].strip(),
-                        "args": parts[2],
+                        "ppid": ppid,
+                        "start_time": " ".join(parts[2:7]),
+                        "args": parts[7],
                     })
 
         return processes
@@ -411,12 +413,18 @@ class PlaywrightEngine:
         if not processes:
             print("[engine] 无法通过 ps 识别浏览器进程（sandbox/权限限制），跳过所有权验证")
             return
-        if len(processes) > 1:
+        matching_pids = {proc["pid"] for proc in processes}
+        roots = [
+            proc for proc in processes
+            if proc.get("ppid") not in matching_pids
+        ]
+        if len(roots) != 1:
             raise BrowserOwnershipError(
-                f"多个进程使用同一 profile ({self.profile_dir}): "
-                f"PIDs={[p['pid'] for p in processes]}"
+                f"无法唯一识别 profile 根进程 ({self.profile_dir}): "
+                f"root_PIDs={[p['pid'] for p in roots]} "
+                f"all_PIDs={[p['pid'] for p in processes]}"
             )
-        proc = processes[0]
+        proc = roots[0]
         self._owned_pid = proc["pid"]
         self._owned_start_time = proc["start_time"]
         print(f"[engine] owned PID={self._owned_pid}")
