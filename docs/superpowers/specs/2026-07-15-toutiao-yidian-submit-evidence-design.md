@@ -59,6 +59,7 @@
 - 草稿管理列表精确标题：`draft_only`。
 - 已观察到真实提交过渡，但管理页暂时无法核验：保留 `submitted_unverified`，禁止自动重投。
 - 没有观察到提交过渡：失败，`error_type=publish_click_no_effect`。
+- `publish_click_no_effect` 作为危险步骤持久化；自动任务只能核验，不能直接重投。
 - 明确限流反馈：`limit_reached`，保留平台原始原因。
 
 ## 测试设计
