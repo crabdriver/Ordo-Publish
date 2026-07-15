@@ -3,18 +3,19 @@ from unittest.mock import patch
 
 import pytest
 
-from ordo_engine.platforms.playwright._common import upload_cover_common
+from ordo_engine.platforms.playwright._common import find_visible_button, upload_cover_common
 from ordo_engine.platforms.playwright_bilibili.publisher import BilibiliPlaywrightPublisher
 from ordo_engine.platforms.playwright_bilibili.locators import BilibiliLocators
 from ordo_engine.platforms.playwright_jianshu.publisher import JianshuPlaywrightPublisher
 from ordo_engine.platforms.playwright_jianshu.locators import JianshuLocators
 from ordo_engine.platforms.playwright_toutiao.publisher import ToutiaoPlaywrightPublisher
+from ordo_engine.platforms.playwright_toutiao.locators import ToutiaoLocators
 from ordo_engine.platforms.playwright_yidian.publisher import YidianPlaywrightPublisher
 from ordo_engine.platforms.playwright_zhihu.locators import ZhihuLocators
 
 
 class Locator:
-    def __init__(self, *, count=1, attrs=None, text="", enabled=True, on_set=None):
+    def __init__(self, *, count=1, attrs=None, text="", enabled=True, on_set=None, on_click=None):
         self._count = count
         self.attrs = attrs or {}
         self.clicked = 0
@@ -23,6 +24,7 @@ class Locator:
         self.text = text
         self.enabled = enabled
         self.on_set = on_set
+        self.on_click = on_click
         self.click_kwargs = []
 
     @property
@@ -38,6 +40,8 @@ class Locator:
     def click(self, **_kwargs):
         self.clicked += 1
         self.click_kwargs.append(_kwargs)
+        if self.on_click:
+            self.on_click()
 
     def get_attribute(self, name):
         return self.attrs.get(name)
@@ -59,7 +63,10 @@ class Locator:
     def is_enabled(self):
         return self.enabled
 
-    def inner_text(self):
+    def is_checked(self):
+        return bool(self.attrs.get("checked"))
+
+    def inner_text(self, **_kwargs):
         return self.text
 
 
@@ -118,6 +125,22 @@ class Human:
     def human_wait(self, *_args):
         pass
 
+
+def test_find_visible_button_uses_bounded_dom_text_timeout():
+    candidate = Locator(text="确认发布")
+    timeouts = []
+
+    def inner_text(**kwargs):
+        timeouts.append(kwargs.get("timeout"))
+        return "确认发布"
+
+    candidate.inner_text = inner_text
+    page = MappingPage({'button:visible:has-text("确认发布")': candidate})
+
+    found = find_visible_button(page, ["确认发布"])
+
+    assert found is candidate
+    assert timeouts and all(timeout is not None and timeout <= 1000 for timeout in timeouts)
 
 def cover(tmp_path: Path) -> Path:
     path = tmp_path / "cover.png"
@@ -325,13 +348,125 @@ def test_jianshu_clicks_image_tool_then_uploads_cover(tmp_path):
     assert file_input.files == [str(cover(tmp_path).resolve())]
 
 
-def test_jianshu_uses_exact_submit_button_with_forced_click():
-    submit = Locator()
-    page = MappingPage({JianshuLocators.PUBLISH_BUTTON_SELECTOR: submit})
+def test_jianshu_clicks_publish_article_instead_of_collection_submit():
+    collection_submit = Locator()
+    page = MappingPage({JianshuLocators.PUBLISH_BUTTON_SELECTOR: collection_submit})
     publisher = object.__new__(JianshuPlaywrightPublisher)
     publisher.page = page
     publisher.human = Human()
 
-    publisher.click_publish()
+    with patch(
+        "ordo_engine.platforms.playwright_jianshu.publisher.click_publish_common"
+    ) as click:
+        publisher.click_publish()
 
-    assert submit.click_kwargs == [{"force": True}]
+    assert collection_submit.clicked == 0
+    click.assert_called_once()
+    assert JianshuLocators.PUBLISH_BUTTON_TEXTS[0] == "发布文章"
+    assert "提交" not in JianshuLocators.PUBLISH_BUTTON_TEXTS
+
+
+def test_jianshu_verifies_published_note_through_author_api():
+    class NotePage:
+        url = "https://www.jianshu.com/writer#/notebooks/44589321/notes/140679661"
+
+        def evaluate(self, _script, note_id):
+            assert note_id == "140679661"
+            return {"shared": True, "slug": "published-slug"}
+
+    publisher = object.__new__(JianshuPlaywrightPublisher)
+    publisher.page = NotePage()
+    publisher._article = type("Article", (), {"title": "目标标题"})()
+
+    result = publisher.verify_result("publish")
+
+    assert result.status == "published"
+    assert result.current_url == "https://www.jianshu.com/p/published-slug"
+
+
+def test_toutiao_selects_no_cover_when_cover_is_disabled():
+    drawer_mask = Locator()
+    no_cover = Locator(attrs={"class": "byte-radio"})
+    radio_input = Locator(attrs={"checked": False})
+    no_cover.children['input[type="radio"]'] = radio_input
+    no_cover.on_click = lambda: radio_input.attrs.update({"checked": True})
+    page = MappingPage({
+        ".ai-assistant-drawer .byte-drawer-mask:visible": drawer_mask,
+        'label.byte-radio:has-text("无封面")': no_cover,
+    })
+    publisher = object.__new__(ToutiaoPlaywrightPublisher)
+    publisher.page = page
+    publisher.human = Human()
+    article = type("Article", (), {
+        "title": "标题", "body": "正文", "ai_declaration_mode": "force_off",
+        "cover_path": None, "cover_mode": "force_off",
+    })()
+
+    with patch(
+        "ordo_engine.platforms.playwright_toutiao.publisher.should_declare_ai",
+        return_value=False,
+    ):
+        publisher.configure_settings(article)
+
+    assert drawer_mask.clicked == 1
+    assert no_cover.clicked == 1
+    assert no_cover.click_kwargs == [{"force": True}]
+    assert radio_input.is_checked()
+
+
+def test_toutiao_accepts_navigation_timeout_when_editor_is_already_ready():
+    title = Locator()
+
+    class TimedOutPage(MappingPage):
+        def __init__(self):
+            super().__init__({ToutiaoLocators.TITLE_INPUT: title})
+            self.url = "https://example.test/loading"
+
+        def goto(self, url, **_kwargs):
+            self.url = url
+            raise RuntimeError("domcontentloaded timeout")
+
+    page = TimedOutPage()
+    engine = type("Engine", (), {"get_page_for_platform": lambda _self, _platform: page})()
+    instance = ToutiaoPlaywrightPublisher(engine)
+    instance._wait_for_login_if_needed = lambda *_args, **_kwargs: None
+
+    assert instance.navigate_to_editor() is page
+
+
+def test_yidian_selects_platform_default_cover_when_custom_cover_is_disabled():
+    default = Locator(attrs={"class": "item"})
+    default.on_click = lambda: default.attrs.update({"class": "item checked"})
+    page = MappingPage({
+        '.cover-type .item:has-text("默认")': default,
+    })
+    publisher = object.__new__(YidianPlaywrightPublisher)
+    publisher.page = page
+    publisher.human = Human()
+    article = type("Article", (), {
+        "title": "标题", "body": "正文", "ai_declaration_mode": "force_off",
+        "cover_path": None, "cover_mode": "force_off",
+    })()
+
+    with patch(
+        "ordo_engine.platforms.playwright_yidian.publisher.should_declare_ai",
+        return_value=False,
+    ):
+        publisher.configure_settings(article)
+
+    assert default.clicked == 1
+    assert default.click_kwargs == [{"force": True}]
+    assert "checked" in default.attrs["class"]
+
+
+def test_bilibili_reports_daily_limit_before_generic_disabled_button_error():
+    disabled = Locator(enabled=False)
+    frame = MappingPage({
+        'button.vui_button--blue:visible:has-text("发布")': disabled,
+    })
+    frame.evaluate = lambda _script: "已达到当日投稿上限，只能保存草稿哦~"
+    publisher = object.__new__(BilibiliPlaywrightPublisher)
+    publisher._editor_frame = frame
+
+    with pytest.raises(RuntimeError, match="达到发布上限"):
+        publisher.configure_settings(object())

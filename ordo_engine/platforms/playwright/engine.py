@@ -373,9 +373,9 @@ class PlaywrightEngine:
             ctx = contexts[0] if contexts else self.browser.new_context()
             page = ctx.new_page()
 
-        # goto/登录/选择器可抛错；必须先登记，确保 adapter finally 能释放。
+        # 页面生命周期由 engine 拥有，导航由各平台 publisher 负责。
+        # 禁止在这里隐式导航，否则 publisher 无法按平台处理 SPA 导航超时。
         self._platform_pages[platform] = page
-        page.goto(editor_url, wait_until="domcontentloaded", timeout=30000)
         return page
 
     def release_page_for_platform(self, platform: str) -> Optional[Page]:

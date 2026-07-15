@@ -361,6 +361,60 @@ class YidianStrictSettingTests(unittest.TestCase):
 
 
 class WechatCoverResolutionTests(unittest.TestCase):
+    def test_create_ai_cover_falls_back_to_listenhub_env_when_project_config_is_placeholder(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workspace = Path(tmpdir)
+            publish_root = workspace / "ordo-publish"
+            scribe_root = workspace / "ordo-scribe"
+            publish_root.mkdir()
+            scribe_root.mkdir()
+            (publish_root / "config.json").write_text(
+                json.dumps(
+                    {
+                        "settings": {
+                            "base_url": "https://example.invalid",
+                            "model": "CHANGE_ME_GEMINI_IMAGE_MODEL",
+                        },
+                        "secrets": {"api_key": "api_key_here"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (scribe_root / ".env").write_text(
+                "LISTENHUB_API_KEY=listenhub-secret\n"
+                "LISTENHUB_IMAGE_BASE_URL=https://images.test/v1\n"
+                "LISTENHUB_IMAGE_PROVIDER=openai\n"
+                "LISTENHUB_IMAGE_MODEL=gpt-image-2\n"
+                "LISTENHUB_IMAGE_SIZE=4K\n"
+                "LISTENHUB_IMAGE_ASPECT_RATIO=21:9\n",
+                encoding="utf-8",
+            )
+            article = workspace / "article.md"
+            article.write_text("---\narticle_id: article-1\n---\n# Title\n", encoding="utf-8")
+            captured = {}
+
+            def fake_generate(settings, prompt, source):
+                captured.update(settings)
+                captured["prompt"] = prompt
+                _write_detailed_source(source)
+
+            with patch.object(wechat_publisher, "BASE_DIR", publish_root), patch.dict(
+                wechat_publisher.os.environ,
+                {"ORDO_SCRIBE_ROOT": str(scribe_root)},
+                clear=False,
+            ), patch.object(
+                wechat_publisher,
+                "_generate_listenhub_cover_source",
+                side_effect=fake_generate,
+            ):
+                selected = wechat_publisher.create_ai_cover("Title", article)
+
+            self.assertEqual(captured["api_key"], "listenhub-secret")
+            self.assertEqual(captured["endpoint"], "https://images.test/v1/images/generation")
+            self.assertEqual(captured["model"], "gpt-image-2")
+            self.assertIn("任何可见文字", captured["prompt"])
+            self.assertEqual(validate_cover(selected), Path(selected).resolve())
+
     def test_force_republish_bypasses_duplicate_title_guard(self):
         publisher = MagicMock()
         publisher.get_existing_titles.return_value = {"Title"}
@@ -382,14 +436,14 @@ class WechatCoverResolutionTests(unittest.TestCase):
 
         publisher.publish_draft.assert_called_once()
 
-    def test_create_ai_cover_generates_text_free_4k_source_and_canonical_png(self):
+    def test_create_ai_cover_generates_required_cover_even_when_ai_is_not_preferred(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             (root / "scripts").mkdir()
             (root / "config.json").write_text(
                 json.dumps(
                     {
-                        "cover": {"prefer_ai_first": True},
+                        "cover": {"prefer_ai_first": False},
                         "settings": {"base_url": "https://api.test.invalid", "model": "image-model"},
                         "secrets": {"api_key": "secret-key"},
                     }
@@ -421,6 +475,34 @@ class WechatCoverResolutionTests(unittest.TestCase):
             self.assertIn("1600x800", prompt)
             self.assertEqual(Path(selected).name, "cover.png")
             self.assertEqual(validate_cover(selected), Path(selected).resolve())
+
+    def test_invalid_declared_cover_falls_back_to_ai_generation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            article = root / "article.md"
+            article.write_text(
+                "---\n"
+                "article_id: article-1\n"
+                "cover: assets/article-1/cover.png\n"
+                "---\n"
+                "# Title\n",
+                encoding="utf-8",
+            )
+            generated = root / "assets" / "article-1" / "cover.png"
+
+            with patch.object(
+                wechat_publisher,
+                "resolve_publication_cover",
+                side_effect=wechat_publisher.CoverContractError("占位图"),
+            ), patch.object(
+                wechat_publisher,
+                "create_ai_cover",
+                return_value=str(generated),
+            ) as create:
+                selected = wechat_publisher.select_cover_for_path(article, title="Title")
+
+            self.assertEqual(selected, str(generated))
+            create.assert_called_once_with("Title", article)
 
     def test_select_cover_for_path_uses_publication_package_cover(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -39,6 +39,8 @@ def render_report(snapshot: dict) -> str:
         for pf_key, pf_data in sorted(platforms.items()):
             stage = pf_data.get("stage", "pending")
             label = _STAGE_LABELS.get(stage, stage)
+            if stage == "limited_after_draft" and not pf_data.get("draft_ref"):
+                label = "达到发布数量限制，草稿未核验"
             error = pf_data.get("error")
             error_type = pf_data.get("error_type")
             ref = pf_data.get("draft_ref") or pf_data.get("published_ref") or ""

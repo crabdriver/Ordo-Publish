@@ -171,16 +171,15 @@ class TestPlaywrightEngine(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "symlink"):
                 _ = engine.profile_is_initialized
 
-    def test_new_platform_page_is_leased_before_initial_navigation(self):
+    def test_new_platform_page_is_leased_without_implicit_navigation(self):
         engine = PlaywrightEngine(base_dir=Path("/tmp/repo"), headless=False)
         page = MagicMock(url="about:blank")
-        page.goto.side_effect = RuntimeError("goto failed")
         context = MagicMock(pages=[])
         context.new_page.return_value = page
         engine._context = context
 
-        with self.assertRaisesRegex(RuntimeError, "goto failed"):
-            engine.get_page_for_platform("zhihu")
+        self.assertIs(engine.get_page_for_platform("zhihu"), page)
+        page.goto.assert_not_called()
 
         released = engine.release_page_for_platform("zhihu")
         self.assertIs(released, page)

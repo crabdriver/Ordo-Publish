@@ -161,12 +161,24 @@ def test_wechat_worker_bypasses_publish_cli_lock(tmp_path):
         coordinator._run_wechat_subprocess(article, cover)
 
     cmd = run.call_args.args[0]
+    assert run.call_args.kwargs["timeout"] == 300
     assert Path(cmd[1]).name == "wechat_publisher.py"
     assert "publish.py" not in [Path(part).name for part in cmd]
     assert cmd[cmd.index("--cover") + 1] == str(cover)
     record = coordinator._articles["article-1"].platforms["wechat"]["draft"]
     assert record.stage == PlatformStage.draft_saved
     assert record.draft_ref == "draft-media-id"
+
+
+def test_wechat_batch_delegates_invalid_cover_recovery_to_worker(tmp_path):
+    article = _article(tmp_path / "a.md")
+    coordinator = _coordinator(tmp_path)
+    coordinator._articles["article-1"] = ArticleRecord(article_id="article-1")
+
+    with patch.object(coordinator, "_run_wechat_subprocess") as worker:
+        coordinator._run_wechat_batch([article])
+
+    worker.assert_called_once_with(article, None)
 
 
 def test_wechat_timeout_is_manual_verify_not_automatic_retry(tmp_path):

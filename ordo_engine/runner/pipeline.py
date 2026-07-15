@@ -402,9 +402,8 @@ class BatchCoordinator:
             if not a or not self._needs_processing(a, WECHAT_PLATFORM, "draft"):
                 continue
             try:
-                cover = resolve_wechat_cover(p)
-                a.cover_path = str(cover)
-                self._run_wechat_subprocess(p, cover)
+                # 封面选择与 AI 兜底由微信 worker 统一处理；协调器不得提前短路。
+                self._run_wechat_subprocess(p, None)
             except Exception as exc:
                 prec = PlatformRecord(
                     stage=PlatformStage.failed_before_draft,
@@ -416,7 +415,7 @@ class BatchCoordinator:
                 )
             self._save_state()
 
-    def _run_wechat_subprocess(self, article_path, cover_path):
+    def _run_wechat_subprocess(self, article_path, cover_path=None):
         """微信走专用 worker，避免子进程再次获取批次锁。"""
         import subprocess as _sub
         cmd = [
@@ -424,19 +423,19 @@ class BatchCoordinator:
             str(self.base_dir / "wechat_publisher.py"),
             str(article_path),
             "--mode", "draft",
-            "--cover", str(cover_path),
-            "--cover-mode", "force_on",
         ]
+        if cover_path is not None:
+            cmd.extend(["--cover", str(cover_path), "--cover-mode", "force_on"])
         try:
             result = _sub.run(cmd, cwd=str(self.base_dir),
-                              capture_output=True, text=True, timeout=120)
+                              capture_output=True, text=True, timeout=300)
             rc = result.returncode
             output = f"{result.stdout}\n{result.stderr}".strip()
             err = output[-1000:] if result.returncode != 0 else None
             error_type = None if rc == 0 else "wechat_worker_failed"
         except _sub.TimeoutExpired:
             rc = 1
-            err = "wechat subprocess timeout (120s)"
+            err = "wechat subprocess timeout (300s)"
             output = ""
             error_type = "wechat_worker_timeout"
         identity = stable_article_id(article_path, watch_dir=self.watch_dir)

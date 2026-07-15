@@ -48,7 +48,10 @@ def test_limited_after_draft_shows_draft_preserved():
                 "title": "测试",
                 "article_stage": "pending",
                 "platforms": {
-                    "toutiao:publish": {"stage": "limited_after_draft"},
+                    "toutiao:publish": {
+                        "stage": "limited_after_draft",
+                        "draft_ref": "https://example.test/draft/1",
+                    },
                 },
             }
         }
@@ -56,6 +59,30 @@ def test_limited_after_draft_shows_draft_preserved():
     text = render_report(snapshot)
     assert "受发布数量限制" in text
     assert "草稿已保存" in text
+
+
+def test_rate_limit_without_draft_evidence_does_not_claim_draft_saved():
+    snapshot = {
+        "articles": {
+            "test": {
+                "article_id": "test",
+                "title": "测试",
+                "article_stage": "pending",
+                "platforms": {
+                    "bilibili:publish": {
+                        "stage": "limited_after_draft",
+                        "error_type": "rate_limited",
+                    },
+                },
+            }
+        }
+    }
+
+    text = render_report(snapshot)
+
+    assert "达到发布数量限制" in text
+    assert "草稿未核验" in text
+    assert "草稿已保存" not in text
 
 
 def test_published_shown_correctly():

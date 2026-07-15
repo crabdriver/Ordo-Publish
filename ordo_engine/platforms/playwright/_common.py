@@ -38,12 +38,13 @@ def find_visible_button(page, texts: list, button_class: str = None) -> Optional
             btns = page.locator(f'button.{button_class}:visible:has-text("{text}")')
         else:
             btns = page.locator(f'button:visible:has-text("{text}")')
-        for i in range(btns.count()):
+        for i in range(min(btns.count(), 12)):
             candidates.append(btns.nth(i))
-        # 也收集 a/span/div
-        for tag in ["a", "span", "div"]:
+        # 只收集可交互元素。禁止扫描普通 span/div 祖先：SPA 页面中它们可能
+        # 成百上千，并在节点失效时让 inner_text 默认等待 30 秒。
+        for tag in ["a", '[role="button"]']:
             els = page.locator(f'{tag}:visible:has-text("{text}")')
-            for i in range(els.count()):
+            for i in range(min(els.count(), 12)):
                 candidates.append(els.nth(i))
 
         if not candidates:
@@ -52,7 +53,7 @@ def find_visible_button(page, texts: list, button_class: str = None) -> Optional
         # 优先返回精确匹配
         for c in candidates:
             try:
-                if c.inner_text().strip() == text:
+                if c.inner_text(timeout=500).strip() == text:
                     return c
             except Exception:
                 pass
@@ -62,7 +63,7 @@ def find_visible_button(page, texts: list, button_class: str = None) -> Optional
         best_len = float('inf')
         for c in candidates:
             try:
-                c_len = len(c.inner_text().strip())
+                c_len = len(c.inner_text(timeout=500).strip())
                 if c_len < best_len:
                     best = c
                     best_len = c_len

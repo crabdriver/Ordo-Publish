@@ -229,6 +229,10 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
 
     def configure_settings(self, article: ArticlePayload):
         self._expand_settings_in_frame()
+        frame_text = self._ef().evaluate("() => document.body?.innerText || ''")
+        for marker in BilibiliLocators.LIMIT_MARKERS:
+            if marker in frame_text:
+                raise RuntimeError(f"达到发布上限: {marker}")
         publish_btn = self._ef().locator(
             'button.vui_button--blue:visible:has-text("发布")'
         ).first

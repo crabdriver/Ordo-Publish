@@ -27,11 +27,11 @@ class JianshuLocators:
     EDITOR_AREA_MIN_HEIGHT = 100
 
     COVER_FILE_INPUT = 'input[type="file"][accept*="image"]'
-    # writer 页还有无关的 submit 表单；只允许点击文章头部真实提交按钮。
+    # writer 页的哈希 class submit 属于“新建文集”，不是文章发布按钮。
     PUBLISH_BUTTON_SELECTOR = "button.dwU8Q._3zXcJ._3QfkW:visible"
 
-    PUBLISH_BUTTON_TEXTS = ["提交", "发布文章", "发布"]
-    CONFIRM_PUBLISH_TEXTS = ["确认发布", "确定"]
+    PUBLISH_BUTTON_TEXTS = ["发布文章"]
+    CONFIRM_PUBLISH_TEXTS = ["直接发布", "确定发布", "确认发布"]
     SAVE_DRAFT_TEXTS = ["保存", "存草稿"]
 
     PUBLISH_SUCCESS_MARKERS = ["发布成功，点击查看文章", "发布成功", "已发布"]

@@ -28,7 +28,15 @@ class ToutiaoPlaywrightPublisher(PlaywrightBasePublisher):
     def navigate_to_editor(self) -> Page:
         page = self.engine.get_page_for_platform("toutiao")
         if "publish" not in (page.url or ""):
-            page.goto(ToutiaoLocators.EDITOR_URL, wait_until="domcontentloaded", timeout=30000)
+            try:
+                page.goto(ToutiaoLocators.EDITOR_URL, wait_until="domcontentloaded", timeout=30000)
+            except Exception:
+                # 头条 SPA 的后台长连接可能让 domcontentloaded 超时；只有标题框
+                # 已真实可见时才允许继续，否则保留原异常并 fail closed。
+                title = page.locator(ToutiaoLocators.TITLE_INPUT).first
+                if title.count() == 0 or not title.is_visible():
+                    raise
+                print("[WARN] 头条号导航超时，但编辑器已可见，继续执行")
         self._wait_for_login_if_needed(page, "publish", ToutiaoLocators.TITLE_INPUT, "头条号", ToutiaoLocators.EDITOR_URL)
         print(f"[INFO] 头条号编辑器已就绪: {page.url}")
         return page
@@ -86,12 +94,46 @@ class ToutiaoPlaywrightPublisher(PlaywrightBasePublisher):
         self.human.human_wait(0.5, 1.0)
 
     def configure_settings(self, article: ArticlePayload):
-        need_ai = should_declare_ai(article.title, article.body, article.ai_declaration_mode or "auto")
-        if need_ai:
-            self._set_ai_declaration()
         feedback = _feedback_text(self.page)
         if "保存失败" in feedback:
             raise RuntimeError(f"头条号编辑器保存失败，阻止提交: {feedback.strip()}")
+        if not getattr(article, "cover_path", None) or getattr(article, "cover_mode", None) == "force_off":
+            self._select_no_cover()
+        need_ai = should_declare_ai(article.title, article.body, article.ai_declaration_mode or "auto")
+        if need_ai:
+            self._set_ai_declaration()
+
+    def _select_no_cover(self):
+        # 正文输入后头条会自动打开 AI 助手抽屉；点击官方遮罩关闭，
+        # 否则其 mask 会拦截所有封面单选框的真实鼠标事件。
+        mask = self.page.locator(".ai-assistant-drawer .byte-drawer-mask:visible").first
+        if mask.count() > 0:
+            mask.click(force=True, position={"x": 10, "y": 10})
+            time.sleep(0.3)
+
+        radio = self.page.locator('label.byte-radio:has-text("无封面")').first
+        if radio.count() == 0:
+            raise RuntimeError("未找到头条号无封面选项")
+
+        radio_input = radio.locator('input[type="radio"]').first
+
+        def selected():
+            try:
+                if radio_input.count() > 0 and radio_input.is_checked():
+                    return True
+            except Exception:
+                pass
+            classes = (radio.get_attribute("class") or "").split()
+            return "byte-radio-checked" in classes or radio.get_attribute("aria-checked") == "true"
+
+        if not selected():
+            # AI 助手遮罩可能不可关闭；force click 仍把真实点击发送到 React 单选框，
+            # 并以 input.checked 而非易变 class 作为最终证据。
+            radio.click(force=True)
+            time.sleep(0.5)
+        if not selected():
+            raise RuntimeError("头条号未切换到无封面")
+        print("[INFO] 头条号已切换为无封面")
 
     def _set_ai_declaration(self):
         print("[INFO] 开始设置头条号 AI 声明...")

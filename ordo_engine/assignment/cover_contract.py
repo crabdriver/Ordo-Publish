@@ -10,6 +10,7 @@ COVER_FILENAME = "cover.png"
 COVER_SIZE = (2538, 1080)
 COVER_MAX_BYTES = 5 * 1024 * 1024
 MIN_COVER_EDGE_DETAIL = 4.0
+MIN_COVER_TONAL_VARIATION = 12.0
 COVER_PLATFORMS = ("wechat", "zhihu", "toutiao", "yidian", "bilibili", "jianshu")
 
 
@@ -79,7 +80,8 @@ def validate_cover(path: str | Path) -> Path:
                 raise CoverContractError(f"封面色彩空间必须是 sRGB: {candidate}")
             inset = image.convert("L").crop((50, 50, image.width - 50, image.height - 50))
             edge_detail = ImageStat.Stat(inset.filter(ImageFilter.FIND_EDGES)).mean[0]
-            if edge_detail < MIN_COVER_EDGE_DETAIL:
+            tonal_variation = ImageStat.Stat(inset).stddev[0]
+            if edge_detail < MIN_COVER_EDGE_DETAIL and tonal_variation < MIN_COVER_TONAL_VARIATION:
                 raise CoverContractError(f"封面视觉细节不足，疑似占位图: {candidate}")
     except CoverContractError:
         raise

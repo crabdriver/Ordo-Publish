@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -106,12 +107,6 @@ class JianshuPlaywrightPublisher(PlaywrightBasePublisher):
         pass
 
     def click_publish(self):
-        submit = self.page.locator(JianshuLocators.PUBLISH_BUTTON_SELECTOR).first
-        if submit.count() > 0:
-            # 无头 writer 页侧栏会遮挡按钮坐标；目标选择器已限定为文章提交按钮。
-            submit.click(force=True)
-            print("[INFO] 已点击简书真实提交按钮")
-            return
         click_publish_common(
             self.human, self.page,
             JianshuLocators.PUBLISH_BUTTON_TEXTS,
@@ -126,6 +121,30 @@ class JianshuPlaywrightPublisher(PlaywrightBasePublisher):
         print("[INFO] 简书草稿已保存（自动保存）")
 
     def verify_result(self, mode: str) -> PublishResult:
+        if mode == "publish":
+            note_id = getattr(self, "_note_id", "") or self._note_id_from_url(self.page.url or "")
+            if note_id:
+                try:
+                    note = self.page.evaluate(
+                        """async (noteId) => {
+                            const response = await fetch(`/author/notes/${noteId}`, {credentials: 'include'});
+                            if (!response.ok) throw new Error(`note API ${response.status}`);
+                            return await response.json();
+                        }""",
+                        note_id,
+                    )
+                    if note.get("shared") is True and note.get("slug"):
+                        published_url = f"https://www.jianshu.com/p/{note['slug']}"
+                        return PublishResult(
+                            platform=self.platform,
+                            status="published",
+                            current_url=published_url,
+                            page_state="published",
+                            smoke_step="verify",
+                            message=f"已发布到简书: {published_url}",
+                        )
+                except Exception as exc:
+                    print(f"[WARN] 简书文章 API 核验失败，回退页面核验: {exc}")
         return verify_result_common(
             self.page, "简书", mode,
             JianshuLocators.PUBLISHED_URL_PATTERN,
@@ -136,6 +155,11 @@ class JianshuPlaywrightPublisher(PlaywrightBasePublisher):
             JianshuLocators.DRAFT_MANAGEMENT_URL,
             expected_title=self._article.title,
         )
+
+    @staticmethod
+    def _note_id_from_url(url: str) -> str:
+        match = re.search(r"/notes/(\d+)", url or "")
+        return match.group(1) if match else ""
 
     # ── 草稿检查点协议 ──────────────────────────────────────
 
@@ -167,6 +191,7 @@ class JianshuPlaywrightPublisher(PlaywrightBasePublisher):
 
     def publish_from_draft(self, draft_ref: str) -> PublishResult:
         """从简书草稿发布。"""
+        self._note_id = self._note_id_from_url(draft_ref)
         if draft_ref:
             self.page.goto(draft_ref, wait_until="domcontentloaded", timeout=15000)
         self._submission_started = True

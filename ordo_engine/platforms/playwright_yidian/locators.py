@@ -23,6 +23,7 @@ class YidianLocators:
 
     COVER_PICKER = ".article-cover-container .cover-setter:not([style*='display: none']) .cover-item"
     COVER_SINGLE_TEXT = "单图"
+    COVER_DEFAULT_SELECTOR = '.cover-type .item:has-text("默认")'
 
     PUBLISH_BUTTON_TEXTS = ["发文章", "发布"]
     CONFIRM_PUBLISH_TEXTS = ["确认发布", "确认", "确定"]

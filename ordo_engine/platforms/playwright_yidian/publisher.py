@@ -68,12 +68,26 @@ class YidianPlaywrightPublisher(PlaywrightBasePublisher):
         self.human.human_wait(0.5, 1.0)
 
     def configure_settings(self, article: ArticlePayload):
+        if not getattr(article, "cover_path", None) or getattr(article, "cover_mode", None) == "force_off":
+            self._select_default_cover()
         need_ai = should_declare_ai(article.title, article.body, article.ai_declaration_mode or "auto")
         if need_ai:
             self._set_ai_declaration()
 
         # 设置个人观点声明
         self._set_personal_opinion()
+
+    def _select_default_cover(self):
+        default = self.page.locator(YidianLocators.COVER_DEFAULT_SELECTOR).first
+        if default.count() == 0:
+            raise RuntimeError("未找到一点号默认封面选项")
+        if "checked" not in (default.get_attribute("class") or "").split():
+            # 该 Vue 单选框的可点击区域与视觉框不完全重合，坐标点击会静默失败。
+            default.click(force=True)
+            time.sleep(0.5)
+        if "checked" not in (default.get_attribute("class") or "").split():
+            raise RuntimeError("一点号默认封面未选中")
+        print("[INFO] 一点号已选择平台默认封面")
 
     def _set_ai_declaration(self):
         print("[INFO] 开始设置一点号 AI 声明...")

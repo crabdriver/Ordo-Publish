@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from PIL import Image, ImageCms
+from PIL import Image, ImageCms, ImageDraw, ImageFilter
 
 from ordo_engine.assignment.cover_contract import (
     COVER_FILENAME,
@@ -52,6 +52,17 @@ class CoverContractTests(unittest.TestCase):
 
             with self.assertRaisesRegex(CoverContractError, "视觉细节"):
                 validate_cover(cover)
+
+    def test_accepts_soft_focus_photo_with_broad_tonal_detail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cover = Path(tmp) / COVER_FILENAME
+            image = Image.new("RGB", COVER_SIZE, color=(18, 24, 30))
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((500, 100, 2100, 1000), fill=(210, 215, 220))
+            image = image.filter(ImageFilter.GaussianBlur(radius=140))
+            image.save(cover, format="PNG", icc_profile=srgb_profile_bytes())
+
+            self.assertEqual(validate_cover(cover), cover.resolve())
 
     def test_rejects_obsolete_and_inexact_dimensions(self):
         for size in ((1200, 510), (2541, 1080)):
