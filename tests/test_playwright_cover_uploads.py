@@ -46,8 +46,11 @@ class Locator:
         if self.on_click:
             self.on_click()
 
-    def get_attribute(self, name):
+    def get_attribute(self, name, **_kwargs):
         return self.attrs.get(name)
+
+    def bounding_box(self, **_kwargs):
+        return self.attrs.get("bounding_box")
 
     def locator(self, selector):
         return self.children.get(selector, Locator(count=0))
@@ -232,6 +235,85 @@ def test_evidence_click_accepts_scoped_confirm_then_transition():
 
     assert publish.clicked == 1
     assert confirm.clicked == 1
+
+
+def test_toutiao_accepts_exact_confirmation_on_editor_page():
+    publish = Locator(text="预览并发布")
+    confirm = Locator(text="确认发布", count=0)
+    page = MappingPage({
+        'button:visible:has-text("预览并发布")': publish,
+        'button:visible:has-text("确认发布")': confirm,
+    })
+    publish.on_click = lambda: setattr(confirm, "_count", 1)
+    confirm.on_click = lambda: setattr(page, "url", "https://example.test/manage")
+
+    _evidence_click()(
+        page,
+        ToutiaoLocators.PUBLISH_BUTTON_TEXTS,
+        ToutiaoLocators.CONFIRM_PUBLISH_TEXTS,
+        "头条号",
+        confirm_scope_selector=ToutiaoLocators.CONFIRM_DIALOG_SELECTOR,
+        allow_unscoped_confirm=True,
+        failure_markers=ToutiaoLocators.SUBMIT_FAILURE_MARKERS,
+        timeout_seconds=0,
+    )
+
+    assert publish.clicked == 1
+    assert confirm.clicked == 1
+
+
+def test_toutiao_save_failure_stops_before_confirmation():
+    publish = Locator(text="预览并发布")
+    confirm = Locator(text="确认发布", count=0)
+    feedback = Locator(text="保存失败", count=0)
+    page = MappingPage({
+        'button:visible:has-text("预览并发布")': publish,
+        'button:visible:has-text("确认发布")': confirm,
+        common_module.FEEDBACK_SELECTOR: feedback,
+    })
+
+    def fail_save():
+        feedback._count = 1
+        confirm._count = 1
+
+    publish.on_click = fail_save
+
+    with pytest.raises(PublishClickNoEffect, match="保存失败"):
+        _evidence_click()(
+            page,
+            ToutiaoLocators.PUBLISH_BUTTON_TEXTS,
+            ToutiaoLocators.CONFIRM_PUBLISH_TEXTS,
+            "头条号",
+            confirm_scope_selector=ToutiaoLocators.CONFIRM_DIALOG_SELECTOR,
+            allow_unscoped_confirm=True,
+            failure_markers=ToutiaoLocators.SUBMIT_FAILURE_MARKERS,
+            timeout_seconds=0,
+        )
+
+    assert confirm.clicked == 0
+
+
+def test_no_effect_error_contains_bounded_button_diagnostics():
+    publish = Locator(
+        text="发文章",
+        attrs={"class": "publish disabled-look", "aria-disabled": "false"},
+    )
+    page = MappingPage({'button:visible:has-text("发文章")': publish})
+
+    with pytest.raises(PublishClickNoEffect) as exc_info:
+        _evidence_click()(
+            page,
+            ["发文章"],
+            ["确认发布"],
+            "一点号",
+            confirm_scope_selector='[role="dialog"]:visible',
+            timeout_seconds=0,
+        )
+
+    message = str(exc_info.value)
+    assert "text='发文章'" in message
+    assert "class='publish disabled-look'" in message
+    assert "aria-disabled='false'" in message
 
 def cover(tmp_path: Path) -> Path:
     path = tmp_path / "cover.png"

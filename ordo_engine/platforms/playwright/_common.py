@@ -365,6 +365,60 @@ def _find_scoped_confirm(
     return None
 
 
+def _locator_diagnostics(page: Page, locator: Locator) -> str:
+    """返回有界、只读的控件诊断信息。"""
+    parts = []
+    try:
+        parts.append(f"text={locator.inner_text(timeout=500).strip()[:120]!r}")
+    except Exception:
+        parts.append("text=<unavailable>")
+    for name in ("class", "disabled", "aria-disabled"):
+        try:
+            value = locator.get_attribute(name, timeout=500)
+        except Exception:
+            value = None
+        if value is not None:
+            parts.append(f"{name}={value!r}")
+    try:
+        box = locator.bounding_box(timeout=500)
+    except Exception:
+        box = None
+    if box:
+        parts.append(f"box={box!r}")
+
+    feedback = _feedback_text(page).strip()
+    if feedback:
+        parts.append(f"feedback={feedback[:300]!r}")
+    try:
+        validation = page.locator(
+            ':invalid, [aria-invalid="true"], .is-error, .has-error, '
+            '.el-form-item__error, .error-message'
+        )
+        validation_texts = []
+        for index in range(min(validation.count(), 8)):
+            item = validation.nth(index)
+            if item.is_visible():
+                text = (item.inner_text(timeout=500) or "").strip()
+                if text:
+                    validation_texts.append(text)
+        if validation_texts:
+            parts.append(f"validation={' | '.join(validation_texts)[:300]!r}")
+    except Exception:
+        pass
+    return ", ".join(parts)[:900]
+
+
+def _raise_if_submit_failed(
+    feedback: str,
+    failure_markers: Optional[list],
+    platform: str,
+) -> None:
+    if failure_markers and _has_feedback_phrase(feedback, failure_markers):
+        raise PublishClickNoEffect(
+            f"{platform}提交出现明确失败反馈: {feedback.strip()[:500]}"
+        )
+
+
 def _wait_for_submit_effect(
     page: Page,
     publish_btn: Locator,
@@ -373,18 +427,28 @@ def _wait_for_submit_effect(
     confirm_texts: list,
     confirm_scope_selector: str,
     timeout_seconds: float,
+    *,
+    platform: str,
+    allow_unscoped_confirm: bool = False,
+    failure_markers: Optional[list] = None,
 ) -> tuple[bool, Optional[Locator]]:
     deadline = time.monotonic() + max(0, timeout_seconds)
     while True:
+        current_feedback = _feedback_text(page)
+        _raise_if_submit_failed(current_feedback, failure_markers, platform)
+
         confirm = _find_scoped_confirm(
             page,
             confirm_scope_selector,
             confirm_texts,
         )
+        if confirm is None and allow_unscoped_confirm:
+            confirm = find_visible_button(page, confirm_texts)
+            if confirm is not None and not _is_interactive(confirm):
+                confirm = None
         if confirm:
             return True, confirm
 
-        current_feedback = _feedback_text(page)
         if (
             (page.url or "") != pre_url
             or (current_feedback and current_feedback != pre_feedback)
@@ -403,10 +467,14 @@ def _wait_for_confirm_effect(
     pre_url: str,
     pre_feedback: str,
     timeout_seconds: float,
+    *,
+    platform: str,
+    failure_markers: Optional[list] = None,
 ) -> bool:
     deadline = time.monotonic() + max(0, timeout_seconds)
     while True:
         current_feedback = _feedback_text(page)
+        _raise_if_submit_failed(current_feedback, failure_markers, platform)
         if (
             (page.url or "") != pre_url
             or (current_feedback and current_feedback != pre_feedback)
@@ -426,6 +494,8 @@ def click_publish_with_evidence(
     platform: str,
     *,
     confirm_scope_selector: str,
+    allow_unscoped_confirm: bool = False,
+    failure_markers: Optional[list] = None,
     timeout_seconds: float = 10,
 ):
     """点击发布，并要求每次点击产生可观察页面变化。"""
@@ -449,9 +519,15 @@ def click_publish_with_evidence(
         confirm_texts,
         confirm_scope_selector,
         timeout_seconds,
+        platform=platform,
+        allow_unscoped_confirm=allow_unscoped_confirm,
+        failure_markers=failure_markers,
     )
     if not changed:
-        raise PublishClickNoEffect(f"{platform}发布按钮点击后页面无变化")
+        raise PublishClickNoEffect(
+            f"{platform}发布按钮点击后页面无变化; "
+            f"diagnostics: {_locator_diagnostics(page, publish_btn)}"
+        )
     if confirm_btn is None:
         return
 
@@ -468,8 +544,13 @@ def click_publish_with_evidence(
         confirm_pre_url,
         confirm_pre_feedback,
         timeout_seconds,
+        platform=platform,
+        failure_markers=failure_markers,
     ):
-        raise PublishClickNoEffect(f"{platform}确认发布后页面无变化")
+        raise PublishClickNoEffect(
+            f"{platform}确认发布后页面无变化; "
+            f"diagnostics: {_locator_diagnostics(page, confirm_btn)}"
+        )
 
 
 def _has_feedback_marker(feedback_text: str, markers: list) -> bool:

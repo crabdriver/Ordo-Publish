@@ -166,6 +166,8 @@ class ToutiaoPlaywrightPublisher(PlaywrightBasePublisher):
             ToutiaoLocators.CONFIRM_PUBLISH_TEXTS,
             "头条号",
             confirm_scope_selector=ToutiaoLocators.CONFIRM_DIALOG_SELECTOR,
+            allow_unscoped_confirm=True,
+            failure_markers=ToutiaoLocators.SUBMIT_FAILURE_MARKERS,
         )
 
     def save_draft(self):

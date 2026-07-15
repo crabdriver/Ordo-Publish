@@ -31,6 +31,7 @@ class ToutiaoLocators:
     CONFIRM_DIALOG_SELECTOR = (
         '[role="dialog"]:visible, .byte-modal-wrapper:visible'
     )
+    SUBMIT_FAILURE_MARKERS = ["保存失败", "提交失败", "发布失败"]
     SAVE_DRAFT_TEXTS = ["存草稿", "保存草稿"]
 
     AI_CHECKBOX_LABEL = "引用AI"
