@@ -396,34 +396,39 @@ class BatchCoordinator:
 
     def _run_wechat_batch(self, article_paths):
         """微信批处理只委托 VPS adapter；本机不得运行微信 worker。"""
-        for p in article_paths:
-            identity = stable_article_id(p, watch_dir=self.watch_dir)
-            a = self._articles.get(identity)
-            if not a or not self._needs_processing(a, WECHAT_PLATFORM, "draft"):
-                continue
-            try:
-                # VPS 无法访问本机润色目录；必须显式上传已校验封面。
-                cover = resolve_wechat_cover(p)
-                self._run_wechat_via_vps(p, cover)
-            except CoverContractError as exc:
-                prec = PlatformRecord(
-                    stage=PlatformStage.failed_before_draft,
-                    error=str(exc),
-                    error_type="cover_preflight_failed",
-                )
-                set_platform_record(
-                    self._articles, identity, WECHAT_PLATFORM, "draft", prec
-                )
-            except Exception as exc:
-                prec = PlatformRecord(
-                    stage=PlatformStage.failed_before_draft,
-                    error=str(exc),
-                    error_type="wechat_vps_adapter_failed",
-                )
-                set_platform_record(
-                    self._articles, identity, WECHAT_PLATFORM, "draft", prec
-                )
-            self._save_state()
+        adapter = self.wechat_adapter or self.registry.get(WECHAT_PLATFORM)
+        try:
+            for p in article_paths:
+                identity = stable_article_id(p, watch_dir=self.watch_dir)
+                a = self._articles.get(identity)
+                if not a or not self._needs_processing(a, WECHAT_PLATFORM, "draft"):
+                    continue
+                try:
+                    # VPS 无法访问本机润色目录；必须显式上传已校验封面。
+                    cover = resolve_wechat_cover(p)
+                    self._run_wechat_via_vps(p, cover)
+                except CoverContractError as exc:
+                    prec = PlatformRecord(
+                        stage=PlatformStage.failed_before_draft,
+                        error=str(exc),
+                        error_type="cover_preflight_failed",
+                    )
+                    set_platform_record(
+                        self._articles, identity, WECHAT_PLATFORM, "draft", prec
+                    )
+                except Exception as exc:
+                    prec = PlatformRecord(
+                        stage=PlatformStage.failed_before_draft,
+                        error=str(exc),
+                        error_type="wechat_vps_adapter_failed",
+                    )
+                    set_platform_record(
+                        self._articles, identity, WECHAT_PLATFORM, "draft", prec
+                    )
+                self._save_state()
+        finally:
+            if adapter is not None and hasattr(adapter, "close_batch"):
+                adapter.close_batch()
 
     def _run_wechat_via_vps(self, article_path, cover_path=None):
         """通过专用 adapter 在 VPS 执行微信 worker。"""

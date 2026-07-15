@@ -102,6 +102,117 @@ class PlatformContractTests(unittest.TestCase):
         self.assertEqual(len(remote), 1)
         self.assertIn("unset WECHAT_PROXY HTTP_PROXY HTTPS_PROXY", remote[0][-1])
 
+    def test_wechat_batch_reuses_one_control_master(self):
+        calls = []
+
+        def fake_run(command, **_kwargs):
+            calls.append(command)
+            stdout = (
+                "[OK] 已写入微信公众号草稿: media-id"
+                if "ORDO_WECHAT_VPS_WORKER=1" in command[-1]
+                else ""
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            first = repo / "first.md"
+            second = repo / "second.md"
+            first.write_text("# first\n", encoding="utf-8")
+            second.write_text("# second\n", encoding="utf-8")
+            (repo / "secrets.env").write_text(
+                "VPS_IP=203.0.113.10\nVPS_USER=root\nVPS_PATH=/root/ordo-publish\n",
+                encoding="utf-8",
+            )
+            adapter = WeChatPlatformAdapter(repo)
+            with patch(
+                "ordo_engine.platforms.wechat.publisher.subprocess.run",
+                side_effect=fake_run,
+            ):
+                adapter.publish(adapter.prepare(markdown_file=first, mode="draft"))
+                adapter.publish(adapter.prepare(markdown_file=second, mode="draft"))
+                adapter.close_batch()
+
+        masters = [cmd for cmd in calls if cmd[0] == "ssh" and "-M" in cmd]
+        control_paths = {
+            arg
+            for cmd in calls
+            for arg in cmd
+            if isinstance(arg, str) and arg.startswith("ControlPath=")
+        }
+        self.assertEqual(len(masters), 1)
+        self.assertEqual(len(control_paths), 1)
+
+    def test_wechat_master_start_retries_transport_close(self):
+        calls = []
+
+        def fake_run(command, **_kwargs):
+            calls.append(command)
+            master_count = sum(
+                1 for cmd in calls if cmd[0] == "ssh" and "-M" in cmd
+            )
+            if command[0] == "ssh" and "-M" in command and master_count == 1:
+                raise subprocess.CalledProcessError(
+                    255, command, stderr="Connection closed by host"
+                )
+            stdout = (
+                "[OK] 已写入微信公众号草稿: media-id"
+                if "ORDO_WECHAT_VPS_WORKER=1" in command[-1]
+                else ""
+            )
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            article = repo / "article.md"
+            article.write_text("# article\n", encoding="utf-8")
+            (repo / "secrets.env").write_text(
+                "VPS_IP=203.0.113.10\n", encoding="utf-8"
+            )
+            adapter = WeChatPlatformAdapter(repo)
+            with patch(
+                "ordo_engine.platforms.wechat.publisher.subprocess.run",
+                side_effect=fake_run,
+            ), patch("ordo_engine.platforms.wechat.publisher.time.sleep") as sleep:
+                adapter.publish(adapter.prepare(markdown_file=article, mode="draft"))
+
+        masters = [cmd for cmd in calls if cmd[0] == "ssh" and "-M" in cmd]
+        self.assertEqual(len(masters), 2)
+        sleep.assert_called_once()
+
+    def test_wechat_worker_connection_loss_is_not_retried(self):
+        calls = []
+
+        def fake_run(command, **_kwargs):
+            calls.append(command)
+            if "ORDO_WECHAT_VPS_WORKER=1" in command[-1]:
+                return subprocess.CompletedProcess(
+                    command, 255, stdout="", stderr="Connection closed"
+                )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with TemporaryDirectory() as tmpdir:
+            repo = Path(tmpdir)
+            article = repo / "article.md"
+            article.write_text("# article\n", encoding="utf-8")
+            (repo / "secrets.env").write_text(
+                "VPS_IP=203.0.113.10\n", encoding="utf-8"
+            )
+            adapter = WeChatPlatformAdapter(repo)
+            with patch(
+                "ordo_engine.platforms.wechat.publisher.subprocess.run",
+                side_effect=fake_run,
+            ):
+                result = adapter.publish(
+                    adapter.prepare(markdown_file=article, mode="draft")
+                )
+
+        workers = [
+            cmd for cmd in calls if "ORDO_WECHAT_VPS_WORKER=1" in cmd[-1]
+        ]
+        self.assertEqual(len(workers), 1)
+        self.assertTrue(result["remote_started"])
+
     def test_wechat_force_republish_flag_reaches_local_publisher(self):
         with TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)

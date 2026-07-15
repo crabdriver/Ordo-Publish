@@ -2,6 +2,9 @@ import os
 import re
 import shlex
 import subprocess
+import tempfile
+import time
+import uuid
 from pathlib import Path
 
 from ordo_engine.platforms.base import SubprocessPlatformAdapter, _extract_smoke_state
@@ -34,6 +37,34 @@ class WeChatPlatformAdapter(SubprocessPlatformAdapter):
             supports_cover_mode=True,
             executor=executor,
         )
+        self._control_path: str | None = None
+        self._master_ssh_options: list[str] = []
+        self._master_target: str | None = None
+
+    def close_batch(self) -> None:
+        control_path = self._control_path
+        target = self._master_target
+        try:
+            if control_path and target:
+                subprocess.run(
+                    [
+                        "ssh",
+                        *self._master_ssh_options,
+                        "-S",
+                        control_path,
+                        "-O",
+                        "exit",
+                        target,
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+        finally:
+            if control_path:
+                Path(control_path).unlink(missing_ok=True)
+            self._control_path = None
+            self._master_ssh_options = []
+            self._master_target = None
 
     def publish(self, prepared_context):
         if (
@@ -75,24 +106,39 @@ class WeChatPlatformAdapter(SubprocessPlatformAdapter):
             remote_cover = f"{remote_temp}/{local_cover.name}"
 
         try:
-            subprocess.run(
-                ["ssh", *ssh_options, target, f"mkdir -p {shlex.quote(remote_temp)}"],
-                check=True,
-                capture_output=True,
-                text=True,
+            self._run_pre_worker(
+                lambda control: [
+                    "ssh",
+                    *ssh_options,
+                    *self._control_options(control),
+                    target,
+                    f"mkdir -p {shlex.quote(remote_temp)}",
+                ],
+                ssh_options,
+                target,
             )
-            subprocess.run(
-                ["scp", *scp_options, str(local_article), f"{target}:{remote_article}"],
-                check=True,
-                capture_output=True,
-                text=True,
+            self._run_pre_worker(
+                lambda control: [
+                    "scp",
+                    *scp_options,
+                    *self._control_options(control),
+                    str(local_article),
+                    f"{target}:{remote_article}",
+                ],
+                ssh_options,
+                target,
             )
             if local_cover is not None:
-                subprocess.run(
-                    ["scp", *scp_options, str(local_cover), f"{target}:{remote_cover}"],
-                    check=True,
-                    capture_output=True,
-                    text=True,
+                self._run_pre_worker(
+                    lambda control: [
+                        "scp",
+                        *scp_options,
+                        *self._control_options(control),
+                        str(local_cover),
+                        f"{target}:{remote_cover}",
+                    ],
+                    ssh_options,
+                    target,
                 )
             self._upload_referenced_images(
                 local_article,
@@ -124,7 +170,22 @@ class WeChatPlatformAdapter(SubprocessPlatformAdapter):
             f"elif [ -x .venv/bin/python ]; then .venv/bin/python {quoted_args}; "
             f"else python3 {quoted_args}; fi"
         )
-        ssh_command = ["ssh", *ssh_options, target, remote_shell]
+        try:
+            self._ensure_master(ssh_options, target)
+        except subprocess.CalledProcessError as exc:
+            stderr = self._subprocess_error(exc)
+            return self._failed(
+                prepared_context,
+                exc.returncode,
+                f"微信任务上传 VPS 失败: {stderr}",
+            )
+        ssh_command = [
+            "ssh",
+            *ssh_options,
+            *self._control_options(self._control_path),
+            target,
+            remote_shell,
+        ]
 
         try:
             result = subprocess.run(
@@ -185,18 +246,111 @@ class WeChatPlatformAdapter(SubprocessPlatformAdapter):
                 continue
             remote_image = f"{remote_temp}/{image_path}"
             remote_dir = str(Path(remote_image).parent)
-            subprocess.run(
-                ["ssh", *ssh_options, target, f"mkdir -p {shlex.quote(remote_dir)}"],
-                check=True,
-                capture_output=True,
-                text=True,
+            self._run_pre_worker(
+                lambda control: [
+                    "ssh",
+                    *ssh_options,
+                    *self._control_options(control),
+                    target,
+                    f"mkdir -p {shlex.quote(remote_dir)}",
+                ],
+                ssh_options,
+                target,
             )
-            subprocess.run(
-                ["scp", *scp_options, str(local_image), f"{target}:{remote_image}"],
-                check=True,
-                capture_output=True,
-                text=True,
+            self._run_pre_worker(
+                lambda control: [
+                    "scp",
+                    *scp_options,
+                    *self._control_options(control),
+                    str(local_image),
+                    f"{target}:{remote_image}",
+                ],
+                ssh_options,
+                target,
             )
+
+    def _run_pre_worker(self, command_factory, ssh_options, target):
+        for attempt in range(3):
+            self._ensure_master(ssh_options, target)
+            command = command_factory(self._control_path)
+            try:
+                return subprocess.run(
+                    command,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                if attempt == 2 or not self._is_transport_error(exc):
+                    raise
+                self.close_batch()
+                time.sleep(2**attempt)
+        raise AssertionError("unreachable")
+
+    def _ensure_master(self, ssh_options, target) -> None:
+        if self._control_path:
+            return
+        control_path = str(
+            Path(tempfile.gettempdir())
+            / f"ordo-wechat-{os.getpid()}-{uuid.uuid4().hex[:8]}.sock"
+        )
+        command = [
+            "ssh",
+            *ssh_options,
+            "-M",
+            "-N",
+            "-f",
+            "-o",
+            "ControlMaster=yes",
+            "-o",
+            "ControlPersist=60",
+            "-o",
+            f"ControlPath={control_path}",
+            target,
+        ]
+        for attempt in range(3):
+            try:
+                subprocess.run(
+                    command,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                self._control_path = control_path
+                self._master_ssh_options = list(ssh_options)
+                self._master_target = target
+                return
+            except subprocess.CalledProcessError as exc:
+                if attempt == 2 or not self._is_transport_error(exc):
+                    raise
+                time.sleep(2**attempt)
+
+    @staticmethod
+    def _control_options(control_path: str | None) -> list[str]:
+        if not control_path:
+            raise RuntimeError("VPS SSH ControlMaster 尚未建立")
+        return [
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            f"ControlPath={control_path}",
+        ]
+
+    @staticmethod
+    def _is_transport_error(exc: subprocess.CalledProcessError) -> bool:
+        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        output = f"{stdout}\n{stderr}".lower()
+        return any(
+            marker in output
+            for marker in (
+                "connection closed",
+                "connection reset",
+                "broken pipe",
+                "control socket connect",
+                "mux_client_request_session",
+            )
+        )
 
     @staticmethod
     def _cleanup_remote(target: str, remote_temp: str, ssh_options: list[str]) -> None:
