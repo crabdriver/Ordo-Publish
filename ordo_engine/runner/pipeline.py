@@ -11,7 +11,8 @@ from ordo_engine.run_state import (
     article_key, is_done, mark_done, state_file_for,
     PlatformStage, ArticleStage, ArticleRecord, PlatformRecord,
     load_v2_state, save_v2_state, set_platform_record, stable_article_id,
-    compute_package_hash, get_platform_record, StateCorruptionError,
+    compute_package_hash, get_platform_record, is_article_completed,
+    StateCorruptionError,
 )
 from ordo_engine.assignment.cover_contract import CoverContractError, resolve_wechat_cover
 from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
@@ -324,6 +325,7 @@ class BatchCoordinator:
             if platform not in self.registry:
                 continue
             self._run_browser_platform(platform, article_paths)
+        self._refresh_article_stages()
         self._save_state()
         return self._build_summary()
 
@@ -613,6 +615,27 @@ class BatchCoordinator:
         # failed_before_draft: 允许重试
         # pending / preflight_ok / draft_prepared / draft_saved / publish_attempted → 允许
         return True
+
+    def needs_any_processing(self, article: ArticleRecord) -> bool:
+        if article.article_stage == ArticleStage.completed:
+            return False
+        platform_modes = [
+            (WECHAT_PLATFORM, "draft"),
+            *((platform, "publish") for platform in BROWSER_PLATFORMS_TUPLE),
+        ]
+        return any(
+            self._needs_processing(article, platform, mode)
+            for platform, mode in platform_modes
+        )
+
+    def _refresh_article_stages(self) -> None:
+        for identity in self._batch_identities:
+            article = self._articles.get(identity)
+            if article is None or article.article_stage == ArticleStage.needs_review:
+                continue
+            if is_article_completed(article, list(BROWSER_PLATFORMS_TUPLE)):
+                article.article_stage = ArticleStage.completed
+                article.completed_at = datetime.now(timezone.utc).isoformat()
 
     def _record_error(self, identity, platform, mode, error):
         prec = PlatformRecord(stage=PlatformStage.failed_before_draft, error=error)

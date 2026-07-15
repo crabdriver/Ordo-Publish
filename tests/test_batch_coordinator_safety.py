@@ -298,3 +298,29 @@ def test_batch_summary_includes_only_touched_platform(tmp_path):
 
     platforms = coordinator._build_summary()["articles"]["article-1"]["platforms"]
     assert set(platforms) == {"wechat:draft"}
+
+
+def test_refresh_marks_fully_terminal_article_completed(tmp_path):
+    coordinator = _coordinator(tmp_path)
+    platforms = {
+        "wechat": {
+            "draft": PlatformRecord(stage=PlatformStage.draft_saved),
+        },
+        **{
+            platform: {
+                "publish": PlatformRecord(stage=PlatformStage.published),
+            }
+            for platform in pipeline_module.BROWSER_PLATFORMS_TUPLE
+        },
+    }
+    coordinator._articles["article-1"] = ArticleRecord(
+        article_id="article-1",
+        platforms=platforms,
+    )
+    coordinator._batch_identities = {"article-1"}
+
+    coordinator._refresh_article_stages()
+
+    article = coordinator._articles["article-1"]
+    assert article.article_stage == ArticleStage.completed
+    assert article.completed_at

@@ -396,6 +396,50 @@ class MonitorPublishTests(unittest.TestCase):
 
             coordinator.assert_not_called()
 
+    def test_scan_skips_pending_article_when_all_platforms_are_protected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            article = root / "a.md"
+            article.write_text(
+                "---\narticle_id: stable-a\ntitle: A\n---\nBody\n",
+                encoding="utf-8",
+            )
+            state_file = root / ".ordo" / "auto_publish_state.json"
+            platforms = {
+                "wechat": {
+                    "draft": PlatformRecord(stage=PlatformStage.draft_saved),
+                },
+                **{
+                    platform: {
+                        "publish": PlatformRecord(stage=PlatformStage.manual_verify),
+                    }
+                    for platform in monitor_publish.BROWSER_PLATFORMS
+                },
+            }
+            save_v2_state(
+                {
+                    "stable-a": ArticleRecord(
+                        article_id="stable-a",
+                        source_path=str(article),
+                        article_stage=ArticleStage.pending,
+                        platforms=platforms,
+                    )
+                },
+                state_file,
+            )
+
+            with patch.object(
+                monitor_publish, "STATE_FILE", state_file
+            ), patch.object(
+                monitor_publish,
+                "PUBLISH_LOCK_FILE",
+                root / ".ordo" / "publish.lock",
+            ), patch.object(monitor_publish, "BatchCoordinator") as coordinator:
+                coordinator.return_value.needs_any_processing.return_value = False
+                self.assertEqual(monitor_publish.scan_once(root), [])
+
+            coordinator.return_value.run_batch.assert_not_called()
+
     def test_empty_queue_is_terminal_noop(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(
             monitor_publish, "PUBLISH_LOCK_FILE", Path(tmp) / ".ordo" / "publish.lock"

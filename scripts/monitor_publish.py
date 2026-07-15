@@ -170,7 +170,22 @@ def list_articles(watch_dir: Path):
     root = watch_dir.expanduser().resolve()
     if not root.is_dir():
         raise FileNotFoundError(f"监听目录不存在: {root}")
-    return sorted(item for item in root.glob("*.md") if item.is_file() and not item.name.startswith("."))
+    files = sorted(item for item in root.glob("*.md") if item.is_file() and not item.name.startswith("."))
+    stems = {f.stem for f in files}
+    # 自动跳过 -r1 中间版本：如果存在 stem 以同一天+标题为前缀
+    # 且不以 -r1 结尾的正式文件，则 r1 文件视为中间产物跳过
+    def _is_stale_r1(f: Path) -> bool:
+        stem = f.stem
+        if not stem.endswith("-r1"):
+            return False
+        base = stem[:-3]  # 去掉 -r1
+        # 检查是否有与该 -r1 同前缀的正式版本存在
+        return any(s != stem and s.startswith(base) and not s.endswith("-r1") for s in stems)
+    filtered = [f for f in files if not _is_stale_r1(f)]
+    if len(filtered) != len(files):
+        removed = len(files) - len(filtered)
+        print(f"[INFO] 自动跳过 {removed} 个 -r1 中间版本文件（已有正式版本）")
+    return filtered
 
 
 def record_matches_article(row, article: Path, *, article_id=None, identity=None):
@@ -478,19 +493,31 @@ def scan_once(watch_dir: Path, *, force=False, dry_run=False, default_template_t
             except StateCorruptionError as exc:
                 raise AutoPublishStateError(str(exc)) from exc
             todo = []
+            coordinator = None
             for article in list_articles(watch_dir):
                 identity = stable_article_id(article, watch_dir=watch_dir)
                 existing = state.get(identity)
-                if existing is None or existing.article_stage != ArticleStage.completed:
+                if existing is None:
+                    todo.append(article)
+                    continue
+                if existing.article_stage == ArticleStage.completed:
+                    continue
+                if coordinator is None:
+                    coordinator = BatchCoordinator(
+                        base_dir=BASE_DIR,
+                        watch_dir=watch_dir,
+                    )
+                if coordinator.needs_any_processing(existing):
                     todo.append(article)
             if not todo:
                 print("[INFO] 没有未处理文章")
                 return []
 
-            coordinator = BatchCoordinator(
-                base_dir=BASE_DIR,
-                watch_dir=watch_dir,
-            )
+            if coordinator is None:
+                coordinator = BatchCoordinator(
+                    base_dir=BASE_DIR,
+                    watch_dir=watch_dir,
+                )
             if dry_run:
                 print("[DRY-RUN] 以下文章将处理:", [a.name for a in todo])
                 return todo
