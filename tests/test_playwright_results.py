@@ -454,6 +454,26 @@ def test_rate_limit_is_retryable_next_run():
     assert is_retryable_error(ErrorType.RATE_LIMITED)
 
 
+def test_pre_submit_publish_limit_returns_structured_limit_result(tmp_path):
+    exception_type = getattr(base_publisher_module, "PublishLimitReached", None)
+    assert exception_type is not None, "PublishLimitReached must exist"
+
+    class LimitedPublisher(StatefulPublisher):
+        def configure_settings(self, _article):
+            raise exception_type("已达到当日投稿上限")
+
+    article = tmp_path / "limited.md"
+    article.write_text("正文", encoding="utf-8")
+    publisher = LimitedPublisher(MagicMock(base_dir=tmp_path))
+    publisher.engine.screenshot.return_value = None
+
+    result = publisher.publish(payload(article, force_republish=True), "publish")
+
+    assert result.status == "limit_reached"
+    assert result.page_state == "limit_reached"
+    assert "投稿上限" in result.error
+
+
 class StatefulPublisher(PlaywrightBasePublisher):
     platform = "stub"
 

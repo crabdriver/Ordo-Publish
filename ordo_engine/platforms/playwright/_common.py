@@ -412,10 +412,17 @@ def _raise_if_submit_failed(
     feedback: str,
     failure_markers: Optional[list],
     platform: str,
+    *,
+    page: Optional[Page] = None,
+    locator: Optional[Locator] = None,
 ) -> None:
     if failure_markers and _has_feedback_phrase(feedback, failure_markers):
+        diagnostics = ""
+        if page is not None and locator is not None:
+            diagnostics = f"; diagnostics: {_locator_diagnostics(page, locator)}"
         raise PublishClickNoEffect(
             f"{platform}提交出现明确失败反馈: {feedback.strip()[:500]}"
+            f"{diagnostics}"
         )
 
 
@@ -435,7 +442,13 @@ def _wait_for_submit_effect(
     deadline = time.monotonic() + max(0, timeout_seconds)
     while True:
         current_feedback = _feedback_text(page)
-        _raise_if_submit_failed(current_feedback, failure_markers, platform)
+        _raise_if_submit_failed(
+            current_feedback,
+            failure_markers,
+            platform,
+            page=page,
+            locator=publish_btn,
+        )
 
         confirm = _find_scoped_confirm(
             page,
@@ -474,7 +487,13 @@ def _wait_for_confirm_effect(
     deadline = time.monotonic() + max(0, timeout_seconds)
     while True:
         current_feedback = _feedback_text(page)
-        _raise_if_submit_failed(current_feedback, failure_markers, platform)
+        _raise_if_submit_failed(
+            current_feedback,
+            failure_markers,
+            platform,
+            page=page,
+            locator=confirm_btn,
+        )
         if (
             (page.url or "") != pre_url
             or (current_feedback and current_feedback != pre_feedback)

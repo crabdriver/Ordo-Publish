@@ -26,6 +26,10 @@ class PublishClickNoEffect(RuntimeError):
     """发布控件没有产生任何可观察提交过渡。"""
 
 
+class PublishLimitReached(RuntimeError):
+    """平台明确报告当前发布配额已耗尽。"""
+
+
 class PublishState(str, Enum):
     INIT = "init"
     EDITOR_READY = "editor_ready"
@@ -304,6 +308,24 @@ class PlaywrightBasePublisher(ABC):
             self._persist_result(result, mode)
             return result
 
+        except PublishLimitReached as exc:
+            self.state = PublishState.ERROR
+            message = f"rate_limited: {exc}"
+            self._emit_state(
+                "limit_reached",
+                page_state="limit_reached",
+                error=message,
+            )
+            self._take_screenshot("limit_reached")
+            return PublishResult(
+                platform=self.platform,
+                status="limit_reached",
+                page_state="limit_reached",
+                current_url=self.page.url if self.page else "",
+                smoke_step="limit_reached",
+                error=message,
+                screenshots=list(self._screenshots),
+            )
         except PublishClickNoEffect as exc:
             self.state = PublishState.ERROR
             message = f"publish_click_no_effect: {exc}"

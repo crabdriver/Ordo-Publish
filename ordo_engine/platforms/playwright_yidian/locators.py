@@ -31,6 +31,7 @@ class YidianLocators:
         '[role="dialog"]:visible, .el-dialog__wrapper:visible, '
         '.el-message-box__wrapper:visible'
     )
+    SUBMIT_FAILURE_MARKERS = ["发布失败", "提交失败", "保存失败"]
     SAVE_DRAFT_TEXTS = ["存草稿", "保存草稿", "保存"]
 
     AI_DECLARATION_TEXT = "内容由AI生成"

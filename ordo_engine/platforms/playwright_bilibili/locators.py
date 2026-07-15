@@ -35,7 +35,11 @@ class BilibiliLocators:
 
     PUBLISH_BUTTON_TEXTS = ["发布"]
     PUBLISH_BUTTON_CLASS = "vui_button--blue"
-    CONFIRM_PUBLISH_TEXTS = ["确认发布", "确定"]
+    CONFIRM_PUBLISH_TEXTS = ["确认发布"]
+    CONFIRM_DIALOG_SELECTOR = (
+        '[role="dialog"]:visible, .vui_dialog:visible, .vui_modal:visible'
+    )
+    SUBMIT_FAILURE_MARKERS = ["发布失败", "提交失败", "保存失败"]
     SAVE_DRAFT_TEXTS = ["保存为草稿"]
     # 注意："保存为草稿" 不是 "保存草稿"
 
@@ -44,6 +48,7 @@ class BilibiliLocators:
     PUBLISH_SUCCESS_MARKERS = ["发布成功", "已发布"]
     DRAFT_SUCCESS_MARKERS = ["已保存", "保存成功", "草稿"]
     LIMIT_MARKERS = ["达到发布上限", "已达到当日投稿上限", "发布上限", "频率限制"]
+    LIMIT_BANNER_MARKERS = ["已达到当日投稿上限", "达到发布上限"]
 
     # iframe 匹配规则
     IFRAME_SRC_PATTERN = "read-editor"

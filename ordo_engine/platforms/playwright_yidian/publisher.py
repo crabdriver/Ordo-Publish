@@ -116,6 +116,7 @@ class YidianPlaywrightPublisher(PlaywrightBasePublisher):
             YidianLocators.CONFIRM_PUBLISH_TEXTS,
             "一点号",
             confirm_scope_selector=YidianLocators.CONFIRM_DIALOG_SELECTOR,
+            failure_markers=YidianLocators.SUBMIT_FAILURE_MARKERS,
         )
 
     def save_draft(self):

@@ -10,9 +10,14 @@ except ImportError:
 
 from markdown_utils import render_markdown_plain_text, should_declare_ai
 from ordo_engine.platforms.playwright.base_publisher import (
-    ArticlePayload, DraftCheckpoint, PlaywrightBasePublisher, PublishResult,
+    ArticlePayload, DraftCheckpoint, PlaywrightBasePublisher,
+    PublishLimitReached, PublishResult,
 )
-from ordo_engine.platforms.playwright._common import verify_result_common, find_visible_button
+from ordo_engine.platforms.playwright._common import (
+    _locator_diagnostics,
+    click_publish_with_evidence,
+    verify_result_common,
+)
 from ordo_engine.platforms.playwright_bilibili.locators import BilibiliLocators
 
 
@@ -229,17 +234,33 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
 
     def configure_settings(self, article: ArticlePayload):
         self._expand_settings_in_frame()
-        frame_text = self._ef().evaluate("() => document.body?.innerText || ''")
-        for marker in BilibiliLocators.LIMIT_MARKERS:
-            if marker in frame_text:
-                raise RuntimeError(f"达到发布上限: {marker}")
+        surfaces = [self._ef()]
+        if getattr(self, "page", None) is not None:
+            surfaces.append(self.page)
+        for marker in BilibiliLocators.LIMIT_BANNER_MARKERS:
+            for surface in surfaces:
+                try:
+                    notice = surface.locator(f':text("{marker}")')
+                    if any(
+                        notice.nth(index).is_visible()
+                        for index in range(min(notice.count(), 8))
+                    ):
+                        raise PublishLimitReached(f"达到发布上限: {marker}")
+                except PublishLimitReached:
+                    raise
+                except Exception:
+                    pass
         publish_btn = self._ef().locator(
             'button.vui_button--blue:visible:has-text("发布")'
         ).first
         if publish_btn.count() == 0:
             raise RuntimeError("未找到B站发布按钮")
         if not publish_btn.is_enabled():
-            raise RuntimeError("B站发布按钮仍不可用，请检查封面或必填发布设置")
+            diagnostics = _locator_diagnostics(self._ef(), publish_btn)
+            raise RuntimeError(
+                "B站发布按钮仍不可用，请检查必填发布设置; "
+                f"diagnostics: {diagnostics}"
+            )
 
     def _expand_settings_in_frame(self):
         """在 iframe 内展开发布设置面板"""
@@ -259,30 +280,15 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
 
     def click_publish(self):
         ef = self._ef()
-        # 使用 find_visible_button 精确匹配发布按钮（避免匹配到"定时发布"等）
-        btn = find_visible_button(ef, BilibiliLocators.PUBLISH_BUTTON_TEXTS, BilibiliLocators.PUBLISH_BUTTON_CLASS)
-        if not btn:
-            raise RuntimeError("未找到B站发布按钮")
-
-        pre_url = self.page.url
-        print("[INFO] B站发布按钮已点击")
-        btn.click()
-        time.sleep(2)
-
-        confirm_btn = find_visible_button(ef, BilibiliLocators.CONFIRM_PUBLISH_TEXTS)
-        if not confirm_btn:
-            confirm_btn = find_visible_button(self.page, BilibiliLocators.CONFIRM_PUBLISH_TEXTS)
-        if confirm_btn:
-            print("[INFO] 点击B站确认发布...")
-            confirm_btn.click()
-            time.sleep(2)
-
-        # 等待页面跳转或成功反馈（最多 20 秒）
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            if (self.page.url or "") != pre_url:
-                break
-            time.sleep(1)
+        click_publish_with_evidence(
+            ef,
+            BilibiliLocators.PUBLISH_BUTTON_TEXTS,
+            BilibiliLocators.CONFIRM_PUBLISH_TEXTS,
+            "B站",
+            confirm_scope_selector=BilibiliLocators.CONFIRM_DIALOG_SELECTOR,
+            allow_unscoped_confirm=True,
+            failure_markers=BilibiliLocators.SUBMIT_FAILURE_MARKERS,
+        )
 
     def save_draft(self):
         ef = self._ef()

@@ -32,6 +32,10 @@ class JianshuLocators:
 
     PUBLISH_BUTTON_TEXTS = ["发布文章"]
     CONFIRM_PUBLISH_TEXTS = ["直接发布", "确定发布", "确认发布"]
+    CONFIRM_DIALOG_SELECTOR = (
+        '[role="dialog"]:visible, .modal:visible, .dialog:visible'
+    )
+    SUBMIT_FAILURE_MARKERS = ["发布失败", "提交失败"]
     SAVE_DRAFT_TEXTS = ["保存", "存草稿"]
 
     PUBLISH_SUCCESS_MARKERS = ["发布成功，点击查看文章", "发布成功", "已发布"]

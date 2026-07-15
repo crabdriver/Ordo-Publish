@@ -15,7 +15,7 @@ from ordo_engine.platforms.playwright.base_publisher import (
 )
 from ordo_engine.platforms.playwright._common import (
     fill_title_common, fill_body_common, upload_cover_common,
-    click_publish_common, save_draft_common, verify_result_common,
+    click_publish_with_evidence, save_draft_common, verify_result_common,
 )
 from ordo_engine.platforms.playwright_jianshu.locators import JianshuLocators
 
@@ -107,11 +107,14 @@ class JianshuPlaywrightPublisher(PlaywrightBasePublisher):
         pass
 
     def click_publish(self):
-        click_publish_common(
-            self.human, self.page,
+        click_publish_with_evidence(
+            self.page,
             JianshuLocators.PUBLISH_BUTTON_TEXTS,
             JianshuLocators.CONFIRM_PUBLISH_TEXTS,
             "简书",
+            confirm_scope_selector=JianshuLocators.CONFIRM_DIALOG_SELECTOR,
+            allow_unscoped_confirm=True,
+            failure_markers=JianshuLocators.SUBMIT_FAILURE_MARKERS,
         )
 
     def save_draft(self):

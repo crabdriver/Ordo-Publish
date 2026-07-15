@@ -5,7 +5,10 @@ import pytest
 
 from ordo_engine.platforms.playwright import _common as common_module
 from ordo_engine.platforms.playwright._common import find_visible_button, upload_cover_common
-from ordo_engine.platforms.playwright.base_publisher import PublishClickNoEffect
+from ordo_engine.platforms.playwright.base_publisher import (
+    PublishClickNoEffect,
+    PublishLimitReached,
+)
 from ordo_engine.platforms.playwright_bilibili.publisher import BilibiliPlaywrightPublisher
 from ordo_engine.platforms.playwright_bilibili.locators import BilibiliLocators
 from ordo_engine.platforms.playwright_jianshu.publisher import JianshuPlaywrightPublisher
@@ -293,6 +296,42 @@ def test_toutiao_save_failure_stops_before_confirmation():
     assert confirm.clicked == 0
 
 
+def test_explicit_submit_failure_includes_visible_validation_diagnostics():
+    publish = Locator(text="预览并发布")
+    feedback = Locator(text="保存失败", count=0)
+    validation_selector = (
+        ':invalid, [aria-invalid="true"], .is-error, .has-error, '
+        '.el-form-item__error, .error-message'
+    )
+    validation = Locator(text="请选择投放广告方式", count=0)
+    page = MappingPage({
+        'button:visible:has-text("预览并发布")': publish,
+        common_module.FEEDBACK_SELECTOR: feedback,
+        validation_selector: validation,
+    })
+
+    def fail_save():
+        feedback._count = 1
+        validation._count = 1
+
+    publish.on_click = fail_save
+
+    with pytest.raises(PublishClickNoEffect) as exc_info:
+        _evidence_click()(
+            page,
+            ToutiaoLocators.PUBLISH_BUTTON_TEXTS,
+            ToutiaoLocators.CONFIRM_PUBLISH_TEXTS,
+            "头条号",
+            confirm_scope_selector=ToutiaoLocators.CONFIRM_DIALOG_SELECTOR,
+            allow_unscoped_confirm=True,
+            failure_markers=ToutiaoLocators.SUBMIT_FAILURE_MARKERS,
+            timeout_seconds=0,
+        )
+
+    assert "保存失败" in str(exc_info.value)
+    assert "请选择投放广告方式" in str(exc_info.value)
+
+
 def test_no_effect_error_contains_bounded_button_diagnostics():
     publish = Locator(
         text="发文章",
@@ -432,6 +471,9 @@ def test_yidian_publish_uses_evidence_click_path():
         publisher.click_publish()
 
     click.assert_called_once()
+    assert click.call_args.kwargs["failure_markers"] == (
+        YidianLocators.SUBMIT_FAILURE_MARKERS
+    )
     assert YidianLocators.CONFIRM_PUBLISH_TEXTS == ["确认发布"]
     assert YidianLocators.CONFIRM_DIALOG_SELECTOR
 
@@ -525,6 +567,24 @@ def test_bilibili_disabled_publish_button_fails_pre_submit():
         publisher.configure_settings(object())
 
 
+def test_bilibili_publish_uses_strict_evidence_click_path():
+    frame = MappingPage({})
+    publisher = object.__new__(BilibiliPlaywrightPublisher)
+    publisher._editor_frame = frame
+    publisher.page = MappingPage({})
+
+    with patch(
+        "ordo_engine.platforms.playwright_bilibili.publisher.click_publish_with_evidence",
+        create=True,
+    ) as click:
+        publisher.click_publish()
+
+    click.assert_called_once()
+    assert click.call_args.args[0] is frame
+    assert click.call_args.kwargs["allow_unscoped_confirm"] is True
+    assert BilibiliLocators.CONFIRM_PUBLISH_TEXTS == ["确认发布"]
+
+
 def test_jianshu_clicks_image_tool_then_uploads_cover(tmp_path):
     image_tool = Locator()
     file_input = Locator()
@@ -550,12 +610,16 @@ def test_jianshu_clicks_publish_article_instead_of_collection_submit():
     publisher.human = Human()
 
     with patch(
-        "ordo_engine.platforms.playwright_jianshu.publisher.click_publish_common"
+        "ordo_engine.platforms.playwright_jianshu.publisher.click_publish_with_evidence"
     ) as click:
         publisher.click_publish()
 
     assert collection_submit.clicked == 0
     click.assert_called_once()
+    assert click.call_args.kwargs["allow_unscoped_confirm"] is True
+    assert click.call_args.kwargs["confirm_scope_selector"] == (
+        JianshuLocators.CONFIRM_DIALOG_SELECTOR
+    )
     assert JianshuLocators.PUBLISH_BUTTON_TEXTS[0] == "发布文章"
     assert "提交" not in JianshuLocators.PUBLISH_BUTTON_TEXTS
 
@@ -657,10 +721,52 @@ def test_bilibili_reports_daily_limit_before_generic_disabled_button_error():
     disabled = Locator(enabled=False)
     frame = MappingPage({
         'button.vui_button--blue:visible:has-text("发布")': disabled,
+        ':text("已达到当日投稿上限")': Locator(text="已达到当日投稿上限，只能保存草稿哦~"),
     })
-    frame.evaluate = lambda _script: "已达到当日投稿上限，只能保存草稿哦~"
+    frame.evaluate = lambda _script: ""
     publisher = object.__new__(BilibiliPlaywrightPublisher)
     publisher._editor_frame = frame
 
     with pytest.raises(RuntimeError, match="达到发布上限"):
+        publisher.configure_settings(object())
+
+
+def test_bilibili_reports_daily_limit_from_main_page_banner():
+    disabled = Locator(enabled=False)
+    frame = MappingPage({
+        'button.vui_button--blue:visible:has-text("发布")': disabled,
+    })
+    frame.evaluate = lambda _script: ""
+    page = MappingPage({
+        ':text("已达到当日投稿上限")': Locator(text="已达到当日投稿上限，只能保存草稿哦~"),
+    })
+    page.evaluate = lambda _script: "发布帮助可能提到发布上限，但不是当前限额证据"
+    publisher = object.__new__(BilibiliPlaywrightPublisher)
+    publisher._editor_frame = frame
+    publisher.page = page
+
+    with pytest.raises(PublishLimitReached, match="当日投稿上限"):
+        publisher.configure_settings(object())
+
+
+def test_bilibili_disabled_button_reports_visible_validation_text():
+    disabled = Locator(
+        text="发布",
+        enabled=False,
+        attrs={"class": "vui_button--disabled"},
+    )
+    validation_selector = (
+        ':invalid, [aria-invalid="true"], .is-error, .has-error, '
+        '.el-form-item__error, .error-message'
+    )
+    frame = MappingPage({
+        'button.vui_button--blue:visible:has-text("发布")': disabled,
+        validation_selector: Locator(text="请选择文集"),
+    })
+    frame.evaluate = lambda _script: ""
+    publisher = object.__new__(BilibiliPlaywrightPublisher)
+    publisher._editor_frame = frame
+    publisher.page = MappingPage({})
+
+    with pytest.raises(RuntimeError, match="请选择文集"):
         publisher.configure_settings(object())
