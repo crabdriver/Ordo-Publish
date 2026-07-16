@@ -361,6 +361,36 @@ class YidianStrictSettingTests(unittest.TestCase):
 
 
 class WechatCoverResolutionTests(unittest.TestCase):
+    def test_draft_list_failure_blocks_duplicate_check(self):
+        publisher = wechat_publisher.WeChatPublisher("app-id", "secret")
+        publisher.batch_get_drafts = MagicMock(
+            side_effect=RuntimeError("draft list unavailable")
+        )
+        publisher.batch_get_published = MagicMock(
+            return_value={"item": [], "item_count": 0, "total_count": 0}
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "draft list unavailable"):
+            publisher.get_existing_titles()
+
+        publisher.batch_get_published.assert_not_called()
+
+    def test_published_list_48001_degrades_to_draft_titles(self):
+        publisher = wechat_publisher.WeChatPublisher("app-id", "secret")
+        publisher.batch_get_drafts = MagicMock(
+            return_value={
+                "item": [{"title": "Existing Draft"}],
+                "item_count": 1,
+                "total_count": 1,
+            }
+        )
+        publisher.batch_get_published = MagicMock(
+            side_effect=RuntimeError("48001 api unauthorized")
+        )
+
+        self.assertEqual(publisher.get_existing_titles(), {"Existing Draft"})
+
+
     def test_create_ai_cover_falls_back_to_listenhub_env_when_project_config_is_placeholder(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)

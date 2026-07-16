@@ -402,7 +402,10 @@ class WeChatPublisher:
             return set(self._existing_titles_cache)
 
         titles = set()
-        for getter in (self.batch_get_drafts, self.batch_get_published):
+        for getter, optional in (
+            (self.batch_get_drafts, False),
+            (self.batch_get_published, True),
+        ):
             offset = 0
             try:
                 while True:
@@ -417,6 +420,8 @@ class WeChatPublisher:
                     if offset >= total_count:
                         break
             except Exception as e:
+                if not optional:
+                    raise
                 print(f"[WARN] 获取已有文章列表时部分接口不可用，已跳过: {e}")
 
         self._existing_titles_cache = set(filter(None, titles))

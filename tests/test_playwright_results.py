@@ -161,6 +161,7 @@ def test_direct_published_url_is_terminal_success():
 @pytest.mark.parametrize(
     ("url", "pattern"),
     [
+        ("https://zhuanlan.zhihu.com/p/2061078746753503863/edit", ZhihuLocators.PUBLISHED_URL_PATTERN),
         ("https://mp.yidianzixun.com/#/ArticleManual/original/review", YidianLocators.PUBLISHED_URL_PATTERN),
         ("https://member.bilibili.com/platform/upload/text/new-edit", BilibiliLocators.PUBLISHED_URL_PATTERN),
         ("https://www.jianshu.com/writer#/notebooks/1/notes/2", JianshuLocators.PUBLISHED_URL_PATTERN),
