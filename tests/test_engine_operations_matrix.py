@@ -28,6 +28,25 @@ class OperationsMatrixTests(unittest.TestCase):
         self.assertEqual(queue[0]["status"], "blocked_preflight")
         self.assertEqual(queue[1]["platform"], "zhihu")
 
+    def test_build_retry_queue_includes_success_unknown(self):
+        queue = build_retry_queue(
+            publish_result={
+                "mode": "draft",
+                "results": [
+                    {
+                        "platform": "wechat",
+                        "status": "success_unknown",
+                        "returncode": 0,
+                        "summary": "process exited without terminal marker",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(len(queue), 1)
+        self.assertEqual(queue[0]["platform"], "wechat")
+        self.assertEqual(queue[0]["status"], "fatal_failed")
+
     def test_write_operations_matrix_persists_json_bundle(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

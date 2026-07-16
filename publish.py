@@ -38,6 +38,7 @@ from ordo_engine.results.publish_records import (
     PUBLISH_RECORD_FIELDNAMES,
     append_publish_record_at_path,
 )
+from ordo_engine.run_lock import InvalidInheritedLock, RunAlreadyActive, run_lock
 from ordo_engine.models.workbench import CoverAssignment
 from ordo_engine.runner.pipeline import run_platform_task, run_publish_pipeline
 
@@ -49,6 +50,7 @@ WORKBENCH_FILE = BASE_DIR / ".publish-workbench.json"
 PUBLISH_OPTION_MODES = ("auto", "force_on", "force_off", "random")
 COVERS_DIR = BASE_DIR / "covers"
 PUBLISH_RECORDS_FILE = BASE_DIR / "publish_records.csv"
+PUBLISH_LOCK_FILE = BASE_DIR / ".ordo" / "publish.lock"
 BROWSER_SESSION_DIR = BASE_DIR / ".ordo" / "browser-session"
 BROWSER_SESSION_STATE_FILE = BROWSER_SESSION_DIR / "state.json"
 PUBLISH_CONSOLE_DIR = BASE_DIR / ".ordo" / "publish-console"
@@ -739,50 +741,6 @@ def run_preflight_checks(
                 }
         if not wechat["appid_ready"] or not wechat["secret_ready"]:
             blockers.append("微信公众号缺少 `WECHAT_APPID` 或 `WECHAT_SECRET`，请先配置 `secrets.env`")
-        else:
-            # 实时检查微信外网 IP 白名单配置
-            try:
-                env = load_simple_env_file(root / "secrets.env")
-                vps_ip = env.get("VPS_IP")
-                if vps_ip:
-                    # 在 VPS 上远程执行微信 Access Token 验证检查，检测白名单状态
-                    vps_port = env.get("VPS_PORT", "22")
-                    vps_user = env.get("VPS_USER", "root")
-                    vps_ssh_key = env.get("VPS_SSH_KEY")
-                    appid = env.get("WECHAT_APPID") or os.environ.get("WECHAT_APPID")
-                    secret = env.get("WECHAT_SECRET") or os.environ.get("WECHAT_SECRET")
-
-                    ssh_opts = ["-p", vps_port, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"]
-                    if vps_ssh_key:
-                        ssh_opts.extend(["-i", str(Path(vps_ssh_key).expanduser())])
-
-                    test_cmd = (
-                        f"cd ~/ordo-publish && "
-                        f"unset WECHAT_PROXY HTTP_PROXY HTTPS_PROXY http_proxy https_proxy && "
-                        f"export ORDO_WORKER=1 && "
-                        f"if [ -f .venv/bin/python ]; then python_bin=.venv/bin/python; else python_bin=python3; fi; "
-                        f"$python_bin -c 'from wechat_publisher import WeChatPublisher; p = WeChatPublisher(\"{appid}\", \"{secret}\"); p.ensure_access_token()'"
-                    )
-                    chk_cmd = ["ssh"] + ssh_opts + [f"{vps_user}@{vps_ip}", test_cmd]
-                    res = subprocess.run(chk_cmd, capture_output=True, text=True, timeout=30)
-                    if res.returncode != 0:
-                        err_msg = res.stderr.strip() or res.stdout.strip()
-                        raise Exception(f"VPS 上的微信接口预检失败：{err_msg}")
-                else:
-                    blockers.append("微信公众号发布必须走 VPS：secrets.env 缺少 `VPS_IP`，已拒绝本地发送。")
-
-            except Exception as exc:
-                err_str = str(exc)
-                if "IP白名单未配置" in err_str or "40164" in err_str:
-                    import re
-                    m = re.search(r"invalid ip ([\d.]+)", err_str)
-                    ip_str = m.group(1) if m else "未知IP"
-                    blockers.append(
-                        f"微信公众号 IP 白名单校验失败！您的当前网络外网 IP 「{ip_str}」 未加入微信公众平台白名单。请先登录微信后台将该 IP 添加到白名单中！"
-                    )
-                else:
-                    blockers.append(f"微信公众号 API 预检失败：{exc}")
-
         if not article_paths:
             if not wechat["covers_ready"] and not wechat["ai_cover_ready"]:
                 blockers.append("微信公众号缺少可用封面：请提供合格的发布包 `cover.png` 或配置 AI 封面")
@@ -813,44 +771,23 @@ def run_preflight_checks(
             except Exception as e:
                 warnings.append(f"文章 《{path.name}》 标题预检读取异常: {e}")
 
-    if mode == "publish" and "jianshu" in platforms:
-        jianshu_target = workbench.get("jianshu")
-        if jianshu_target:
-            try:
-                body = get_page_text_snippet(jianshu_target, limit=3000)
-                if "每天只能发布 2 篇公开文章" in body:
-                    warnings.append("简书今天已达到公开文章发布上限（每天最多 2 篇），本轮将自动降级为保存草稿执行。")
-            except subprocess.CalledProcessError:
-                warnings.append("简书预检读取失败，发布时再做实际判断")
+    browser_platforms = [
+        platform for platform in platforms if platform in BROWSER_PLATFORMS
+    ]
+    if browser_platforms:
+        from ordo_engine.platforms.playwright.engine import PlaywrightEngine
 
-    missing_browser_targets = []
-    for platform in platforms:
-        if platform in BROWSER_PLATFORMS and not workbench.get(platform):
-            missing_browser_targets.append(platform)
-            blockers.append(f"未找到 `{platform}` 的可用标签页，请先在当前远程调试 Chrome 中打开并登录")
-
-    for platform in platforms:
-        if platform in BROWSER_PLATFORMS and workbench.get(platform):
-            label = BROWSER_PLATFORM_LABELS.get(platform, platform)
-            try:
-                state = inspect_browser_platform_state(platform, workbench[platform])
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
-                warnings.append(f"{label}预检读取失败，发布时再做实际判断")
-            else:
-                persist_browser_session_health(root, platform, state, cdp_connection=cdp_connection)
-                if not state.get("editor_ready"):
-                    detail = state.get("detail") or "页面未进入可写编辑器态"
-                    current_url = state.get("current_url") or ""
-                    location_detail = f" 当前页面：{current_url}" if current_url else ""
-                    if state.get("page_state") == "login_required":
-                        blockers.append(f"{label}预检未通过（需重新登录）：{detail}.{location_detail}".strip())
-                    else:
-                        warnings.append(f"{label}当前未就绪，脚本将尝试自动导航/切换进入编辑器页：{detail}.{location_detail}".strip())
-
-    if cdp_connection and any(platform in BROWSER_PLATFORMS for platform in platforms):
-        detail = cdp_connection.get("detail")
-        if detail:
-            warnings.append(detail)
+        try:
+            engine = PlaywrightEngine(base_dir=root, headless=True)
+            initialized = engine.profile_is_initialized
+        except RuntimeError as exc:
+            blockers.append(f"standalone 浏览器 profile 不安全：{exc}")
+        else:
+            if not initialized:
+                blockers.append(
+                    "standalone 浏览器 profile 尚未初始化；"
+                    "请运行 publish.py --bootstrap-browser"
+                )
 
     non_wechat_cover_platforms = [p for p in platforms if p in COVER_PLATFORMS_SET]
     if non_wechat_cover_platforms and not article_paths:
@@ -1289,7 +1226,11 @@ def warm_platforms(platforms):
 
 
 def resolve_wechat_theme_mode(args, available_themes):
-    if args.wechat_theme_mode in {"fixed", "console"}:
+    if args.wechat_theme_mode == "console":
+        raise RuntimeError(
+            "wechat_theme_mode=console 已禁用；请改用 fixed/random"
+        )
+    if args.wechat_theme_mode == "fixed":
         return args.wechat_theme_mode
     return "random"
 
@@ -1408,6 +1349,11 @@ def wait_for_console_confirmation(target_id, expected_index, timeout_seconds=Non
 
 
 def run_console_queue(args, platforms, article_paths, available_themes):
+    raise RuntimeError(
+        "浏览器发布主控台已禁用；请改用 wechat_theme_mode=fixed/random"
+    )
+
+    # Legacy implementation retained temporarily for record compatibility.
     args_mode = getattr(args, "mode", "draft")
     args_wechat_theme = getattr(args, "wechat_theme", "chinese")
     args_no_auto_launch = getattr(args, "no_auto_launch", False)
@@ -1575,6 +1521,12 @@ def parse_args(argv=None):
         help="仅跑「选择器存活探针」：检查各平台关键选择器是否还在，不真正发布",
     )
     parser.add_argument(
+        "--bootstrap-browser",
+        action="store_true",
+        default=False,
+        help="启动仓库隔离 profile 的有头浏览器，人工登录确认后初始化自动发布环境",
+    )
+    parser.add_argument(
         "--platform",
         default="all",
         help="平台列表，逗号分隔，可选 wechat,zhihu,toutiao,jianshu,yidian 或 all",
@@ -1657,7 +1609,7 @@ def parse_args(argv=None):
     parser.add_argument(
         "--remote",
         choices=["local", "vps"],
-        default=None,
+        default="local",
         help="运行模式：local 本地直接执行；vps 上传到 VPS 异步托管执行",
     )
     parser.add_argument(
@@ -1679,6 +1631,16 @@ def parse_args(argv=None):
         "--skip-published",
         action="store_true",
         help="读取 Ordo_Scribe_AI创作看板.md，跳过看板中已发表的文章",
+    )
+    parser.add_argument(
+        "--force-republish",
+        action="store_true",
+        help="显式清除本次文章/平台/mode 的幂等终态并重发；默认关闭",
+    )
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="调用方生成的单次命令 UUID，用于精确归属 publish_records 结果",
     )
     parser.add_argument(
         "--assume-yes",
@@ -1704,9 +1666,41 @@ def parse_args(argv=None):
         help="standalone 模式下使用无头浏览器（默认行为，后台静默）",
     )
     args = parser.parse_args(argv)
-    if args.remote is None:
-        args.remote = "vps" if args.mode == "publish" else "local"
     return args
+
+
+def bootstrap_browser_profile(
+    base_dir,
+    platforms,
+    *,
+    engine_factory=None,
+    input_fn=input,
+):
+    """显式初始化仓库专用浏览器 profile；不会读取默认 Chrome profile。"""
+    from ordo_engine.platforms.playwright.engine import PlaywrightEngine
+
+    selected = [platform for platform in platforms if platform in BROWSER_PLATFORMS]
+    if not selected:
+        raise ValueError("--bootstrap-browser 至少需要一个浏览器平台")
+
+    factory = engine_factory or PlaywrightEngine
+    engine = factory(mode="standalone", headless=False, base_dir=Path(base_dir))
+    confirmed = False
+    try:
+        engine.connect()
+        for platform in selected:
+            engine.get_page_for_platform(platform)
+        answer = input_fn(
+            "请在隔离浏览器中完成登录。确认全部完成后输入 YES："
+        ).strip()
+        if answer != "YES":
+            raise RuntimeError("未收到明确确认，浏览器 profile 未标记为已初始化")
+        confirmed = True
+    finally:
+        engine.close()
+
+    if confirmed:
+        engine.mark_profile_initialized()
 
 
 def apply_vps_config_defaults(args, base_dir=BASE_DIR):
@@ -1722,6 +1716,21 @@ def apply_vps_config_defaults(args, base_dir=BASE_DIR):
     return args
 
 
+def require_local_standalone_engine(args, base_dir=BASE_DIR):
+    if getattr(args, "remote", None) != "local":
+        return
+    if not any(
+        platform in BROWSER_PLATFORMS
+        for platform in parse_platforms(getattr(args, "platform", "all"))
+    ):
+        return
+    if getattr(args, "engine", "standalone") != "standalone":
+        raise SystemExit("[BLOCK] 本地浏览器发布仅允许 standalone 隔离引擎")
+    configured = load_engine_config(base_dir).project_config.get("engine", "standalone")
+    if configured != "standalone":
+        raise SystemExit("[BLOCK] config.json 的本地浏览器引擎必须为 standalone")
+
+
 def run_remote_cdp_preflight(remote_executor):
     cmd = [
         "bash",
@@ -1735,9 +1744,12 @@ def run_remote_cdp_preflight(remote_executor):
     return res
 
 
-def main():
-    args = parse_args()
+def _main(args):
+    if args.bootstrap_browser:
+        bootstrap_browser_profile(BASE_DIR, parse_platforms(args.platform))
+        return
     args = apply_vps_config_defaults(args)
+    require_local_standalone_engine(args, BASE_DIR)
 
     # 选择器存活探针模式：只检查不发布
     if getattr(args, "probe", False):
@@ -1861,7 +1873,7 @@ def main():
             print("[SUCCESS] 任务包上传成功！")
         except Exception as e:
             print(f"[ERROR] 上传任务包失败: {e}")
-            return
+            return 1
         finally:
             if local_bundle_path.exists():
                 local_bundle_path.unlink()
@@ -1917,67 +1929,9 @@ def main():
     print(f"[INFO] 本次文章数量: {len(article_paths)}")
 
     browser_platforms = [platform for platform in platforms if platform in BROWSER_PLATFORMS]
-    tabs = []
-    cdp_connection = None
-
-    # 解析引擎类型：优先 CLI 参数，其次 config.json
-    from ordo_engine.platforms.registry import _resolve_engine_type
-    engine_type = _resolve_engine_type(BASE_DIR)
-    is_standalone = engine_type == "standalone"
-
-    if is_standalone:
-        # standalone 模式：启动独立无头浏览器，不需要 CDP 前置检查
+    if browser_platforms:
         print("[INFO] 使用 standalone 引擎：独立无头浏览器模式，跳过 CDP 前置检查")
-    elif browser_platforms:
-        if args.no_auto_launch:
-            tabs = list_tabs_or_none()
-        else:
-            tabs, launched_app = ensure_chrome_ready(browser_platforms)
-            if launched_app:
-                print(f"[INFO] 已自动启动浏览器: {launched_app}")
-        cdp_connection = get_cdp_connection_metadata()
-
-        if not tabs:
-            raise RuntimeError("没有检测到可用的 Chrome 标签页，请先打开 Chrome 并启用远程调试")
-
-    if not is_standalone:
-        if not args.no_auto_open:
-            opened = open_missing_platform_tabs(platforms, auto_launch=not args.no_auto_launch)
-            if opened:
-                print(f"[INFO] 已自动打开平台标签页: {', '.join(opened)}")
-            if browser_platforms:
-                tabs = list_tabs()
-
-        if args.rebind_workbench and WORKBENCH_FILE.exists():
-            WORKBENCH_FILE.unlink()
-
-        workbench = bind_workbench(platforms, tabs)
-        bound_platforms = [platform for platform in platforms if workbench.get(platform)]
-        if bound_platforms:
-            print(f"[INFO] 已绑定固定工作台标签页: {', '.join(bound_platforms)}")
-
-        if not args.no_warmup:
-            warmed = warm_platforms(platforms)
-            if warmed:
-                print(f"[INFO] 已自动预热平台标签页: {', '.join(warmed)}")
-
-        blockers, warnings = run_preflight_checks(
-            platforms,
-            args.mode,
-            workbench,
-            cdp_connection=cdp_connection,
-            cover_mode=args.cover_mode,
-            article_paths=article_paths,
-            cover_override=Path(args.cover).expanduser().resolve() if args.cover else None,
-        )
-        for warning in warnings:
-            print(f"[WARN] {warning}")
-        for blocker in blockers:
-            print(f"[BLOCK] {blocker}")
-        if blockers:
-            raise SystemExit(1)
-    else:
-        workbench = {}
+    workbench = {}
 
     theme_mode = "fixed"
     available_themes = []
@@ -2053,5 +2007,29 @@ def main():
         raise SystemExit(1)
 
 
+def _inherited_publish_lock_fd():
+    raw = os.getenv("ORDO_PUBLISH_LOCK_FD")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise InvalidInheritedLock("继承发布锁无效") from exc
+
+
+def main():
+    args = parse_args()
+    try:
+        with run_lock(
+            PUBLISH_LOCK_FILE,
+            inherited_fd=_inherited_publish_lock_fd(),
+        ):
+            return _main(args)
+    except RunAlreadyActive as exc:
+        raise SystemExit("[BLOCK] 已有发表任务正在执行，本次发布已阻断。") from exc
+    except InvalidInheritedLock as exc:
+        raise SystemExit("[BLOCK] 继承发布锁无效，本次发布已阻断。") from exc
+
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

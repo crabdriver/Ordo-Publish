@@ -10,9 +10,10 @@ iframe src 含 'read-editor'。所有操作需通过 frame_locator 或 frame 对
 
 class BilibiliLocators:
     EDITOR_URL = "https://member.bilibili.com/platform/upload/text/new-edit"
-    MANAGEMENT_URL = "https://member.bilibili.com/platform/upload/text/manage"
-    DRAFT_MANAGEMENT_URL = "https://member.bilibili.com/platform/upload/text/manage?tab=draft"
-    PUBLISHED_URL_PATTERN = r"member\.bilibili\.com/(?:platform/upload/text/(?:manage|new-edit)|opus)"
+    # 该页面混合草稿与已发布内容，标题命中不能证明正式发布。
+    MANAGEMENT_URL = None
+    DRAFT_MANAGEMENT_URL = None
+    PUBLISHED_URL_PATTERN = r"^https?://(?:www\.)?bilibili\.com/(?:read/cv\d+|opus/\d+)(?:[/?#]|$)"
 
     # 标题框在 iframe 内：<textarea class="title-input__inner" placeholder="请输入标题（建议30字以内）">
     TITLE_INPUT = (
@@ -30,10 +31,15 @@ class BilibiliLocators:
 
     # 封面上传（在 iframe 内）
     COVER_FILE_INPUT = 'input[type="file"][accept*="image"]'
+    COVER_UPLOAD_SUCCESS = 'img[alt="封面图片"]'
 
     PUBLISH_BUTTON_TEXTS = ["发布"]
     PUBLISH_BUTTON_CLASS = "vui_button--blue"
-    CONFIRM_PUBLISH_TEXTS = ["确认发布", "确定"]
+    CONFIRM_PUBLISH_TEXTS = ["确认发布"]
+    CONFIRM_DIALOG_SELECTOR = (
+        '[role="dialog"]:visible, .vui_dialog:visible, .vui_modal:visible'
+    )
+    SUBMIT_FAILURE_MARKERS = ["发布失败", "提交失败", "保存失败"]
     SAVE_DRAFT_TEXTS = ["保存为草稿"]
     # 注意："保存为草稿" 不是 "保存草稿"
 
@@ -41,7 +47,8 @@ class BilibiliLocators:
 
     PUBLISH_SUCCESS_MARKERS = ["发布成功", "已发布"]
     DRAFT_SUCCESS_MARKERS = ["已保存", "保存成功", "草稿"]
-    LIMIT_MARKERS = ["达到发布上限", "发布上限", "频率限制"]
+    LIMIT_MARKERS = ["达到发布上限", "已达到当日投稿上限", "发布上限", "频率限制"]
+    LIMIT_BANNER_MARKERS = ["已达到当日投稿上限", "达到发布上限"]
 
     # iframe 匹配规则
     IFRAME_SRC_PATTERN = "read-editor"

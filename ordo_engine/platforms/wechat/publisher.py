@@ -1,29 +1,33 @@
 import os
+import re
 import shlex
 import subprocess
+import tempfile
+import time
+import uuid
 from pathlib import Path
 
-from ordo_engine.platforms.base import SubprocessPlatformAdapter
+from ordo_engine.platforms.base import SubprocessPlatformAdapter, _extract_smoke_state
 
 
 def load_vps_config(base_dir: Path) -> dict:
-    env_path = base_dir / "secrets.env"
+    env_path = Path(base_dir) / "secrets.env"
     config = {}
-    if env_path.exists():
-        try:
-            for line in env_path.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                config[k.strip()] = v.strip().strip('"').strip("'")
-        except Exception:
-            pass
+    if not env_path.exists():
+        return config
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        config[key.strip()] = value.strip().strip('"').strip("'")
     return config
 
 
 class WeChatPlatformAdapter(SubprocessPlatformAdapter):
-    def __init__(self, base_dir: Path):
+    """本机只负责任务传输；微信 API 必须由 VPS worker 调用。"""
+
+    def __init__(self, base_dir: Path, executor=None):
         super().__init__(
             base_dir=base_dir,
             platform="wechat",
@@ -31,161 +35,345 @@ class WeChatPlatformAdapter(SubprocessPlatformAdapter):
             supports_theme=True,
             supports_cover=True,
             supports_cover_mode=True,
+            executor=executor,
         )
+        self._control_path: str | None = None
+        self._master_ssh_options: list[str] = []
+        self._master_target: str | None = None
+
+    def close_batch(self) -> None:
+        control_path = self._control_path
+        target = self._master_target
+        try:
+            if control_path and target:
+                subprocess.run(
+                    [
+                        "ssh",
+                        *self._master_ssh_options,
+                        "-S",
+                        control_path,
+                        "-O",
+                        "exit",
+                        target,
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+        finally:
+            if control_path:
+                Path(control_path).unlink(missing_ok=True)
+            self._control_path = None
+            self._master_ssh_options = []
+            self._master_target = None
 
     def publish(self, prepared_context):
-        import os
-        if os.environ.get("ORDO_WORKER") == "1":
+        if (
+            os.environ.get("ORDO_WORKER") == "1"
+            and os.environ.get("ORDO_WECHAT_VPS_WORKER") == "1"
+        ):
             return super().publish(prepared_context)
 
-        vps_cfg = load_vps_config(self.base_dir)
-        vps_ip = vps_cfg.get("VPS_IP")
+        config = load_vps_config(self.base_dir)
+        vps_ip = config.get("VPS_IP") or config.get("VPS_HOST")
         if not vps_ip:
-            return {
-                "platform": self.platform,
-                "command": " ".join(prepared_context["command"]),
-                "returncode": 2,
-                "stdout": "",
-                "stderr": "微信公众号发布必须走 VPS：secrets.env 缺少 VPS_IP，已拒绝本地发送。",
-            }
+            return self._blocked(
+                prepared_context,
+                "微信公众号发布必须走 VPS：secrets.env 缺少 VPS_IP/VPS_HOST，已拒绝本机发送。",
+            )
 
-        vps_port = vps_cfg.get("VPS_PORT", "22")
-        vps_user = vps_cfg.get("VPS_USER", "root")
-        vps_ssh_key = vps_cfg.get("VPS_SSH_KEY")
+        vps_port = config.get("VPS_PORT", "22")
+        vps_user = config.get("VPS_USER", "root")
+        vps_path = config.get("VPS_PATH", "/root/ordo-publish").rstrip("/")
+        ssh_key = config.get("VPS_SSH_KEY")
+        ssh_options = ["-p", vps_port]
+        scp_options = ["-P", vps_port]
+        if ssh_key:
+            expanded_key = str(Path(ssh_key).expanduser())
+            ssh_options.extend(["-i", expanded_key])
+            scp_options.extend(["-i", expanded_key])
 
-        local_cmd = prepared_context["command"]
+        target = f"{vps_user}@{vps_ip}"
+        local_command = list(prepared_context["command"])
+        local_article = Path(local_command[2]).expanduser().resolve()
+        remote_temp = f"{vps_path}/temp"
+        remote_article = f"{remote_temp}/{local_article.name}"
 
-        # 1. Parse markdown file and cover paths to upload
-        # command looks like: [sys.executable, 'wechat_publisher.py', '/path/to/article.md', ...]
-        local_md_path = Path(local_cmd[2])
-        remote_md_path = f"~/ordo-publish/temp/{local_md_path.name}"
+        local_cover = None
+        remote_cover = None
+        if "--cover" in local_command:
+            cover_index = local_command.index("--cover") + 1
+            local_cover = Path(local_command[cover_index]).expanduser().resolve()
+            remote_cover = f"{remote_temp}/{local_cover.name}"
 
-        local_cover_path = None
-        remote_cover_path = None
-        if "--cover" in local_cmd:
-            idx = local_cmd.index("--cover")
-            local_cover_path = Path(local_cmd[idx + 1])
-            remote_cover_path = f"~/ordo-publish/temp/{local_cover_path.name}"
-
-        # 2. Configure SSH/SCP options
-        ssh_opts = ["-p", vps_port]
-        scp_opts = ["-P", vps_port]
-        if vps_ssh_key:
-            expanded_key = str(Path(vps_ssh_key).expanduser())
-            ssh_opts.extend(["-i", expanded_key])
-            scp_opts.extend(["-i", expanded_key])
-
-        # Automatically skip host key check to avoid interactive prompts
-        ssh_opts.extend(["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"])
-        scp_opts.extend(["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null"])
-
-        # 3. Create temp dir and upload files via SCP
         try:
-            mkdir_cmd = ["ssh"] + ssh_opts + [f"{vps_user}@{vps_ip}", "mkdir -p ~/ordo-publish/temp"]
-            subprocess.run(mkdir_cmd, check=True, capture_output=True)
-
-            scp_md_cmd = ["scp"] + scp_opts + [str(local_md_path), f"{vps_user}@{vps_ip}:{remote_md_path}"]
-            subprocess.run(scp_md_cmd, check=True, capture_output=True)
-
-            if local_cover_path:
-                scp_cover_cmd = ["scp"] + scp_opts + [str(local_cover_path), f"{vps_user}@{vps_ip}:{remote_cover_path}"]
-                subprocess.run(scp_cover_cmd, check=True, capture_output=True)
-
-            # Upload referenced local images
-            import re
-            md_content = local_md_path.read_text(encoding="utf-8")
-            img_paths = re.findall(r'!\[[^\]]*\]\(([^)]+)\)', md_content)
-            for img_path in img_paths:
-                img_path = img_path.strip()
-                if img_path.startswith(("http://", "https://")):
-                    continue
-                abs_img_path = (local_md_path.parent / img_path).resolve()
-                if abs_img_path.is_file():
-                    remote_img_path = f"~/ordo-publish/temp/{img_path}"
-                    remote_dir = os.path.dirname(remote_img_path)
-                    mkdir_img_cmd = ["ssh"] + ssh_opts + [f"{vps_user}@{vps_ip}", f"mkdir -p {remote_dir}"]
-                    subprocess.run(mkdir_img_cmd, check=True, capture_output=True)
-                    scp_img_cmd = ["scp"] + scp_opts + [str(abs_img_path), f"{vps_user}@{vps_ip}:{remote_img_path}"]
-                    subprocess.run(scp_img_cmd, check=True, capture_output=True)
+            self._run_pre_worker(
+                lambda control: [
+                    "ssh",
+                    *ssh_options,
+                    *self._control_options(control),
+                    target,
+                    f"mkdir -p {shlex.quote(remote_temp)}",
+                ],
+                ssh_options,
+                target,
+            )
+            self._run_pre_worker(
+                lambda control: [
+                    "scp",
+                    *scp_options,
+                    *self._control_options(control),
+                    str(local_article),
+                    f"{target}:{remote_article}",
+                ],
+                ssh_options,
+                target,
+            )
+            if local_cover is not None:
+                self._run_pre_worker(
+                    lambda control: [
+                        "scp",
+                        *scp_options,
+                        *self._control_options(control),
+                        str(local_cover),
+                        f"{target}:{remote_cover}",
+                    ],
+                    ssh_options,
+                    target,
+                )
+            self._upload_referenced_images(
+                local_article,
+                target,
+                remote_temp,
+                ssh_options,
+                scp_options,
+            )
         except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or "").strip()
-            return {
-                "platform": self.platform,
-                "command": " ".join(local_cmd),
-                "returncode": exc.returncode,
-                "stdout": "",
-                "stderr": f"Failed to upload draft/cover/images to VPS via SCP: {stderr}",
-            }
+            stderr = self._subprocess_error(exc)
+            return self._failed(prepared_context, exc.returncode, f"微信任务上传 VPS 失败: {stderr}")
 
-        # 4. Construct remote args
         remote_args = []
-        for arg in local_cmd[1:]:  # skip local python path
-            if arg == str(local_md_path):
-                remote_args.append(remote_md_path)
-            elif local_cover_path and arg == str(local_cover_path):
-                remote_args.append(remote_cover_path)
+        for arg in local_command[1:]:
+            if arg == str(local_article):
+                remote_args.append(remote_article)
+            elif local_cover is not None and arg == str(local_cover):
+                remote_args.append(remote_cover)
             elif arg == str(self.script_path):
                 remote_args.append(self.script_name)
             else:
                 remote_args.append(arg)
-
-        # Build remote shell command: checks for virtual env python, else falls back to python3
-        quoted_remote_args = " ".join(shlex.quote(arg) for arg in remote_args)
-        remote_shell_cmd = (
+        quoted_args = " ".join(shlex.quote(arg) for arg in remote_args)
+        remote_shell = (
             "unset WECHAT_PROXY HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; "
-            "export ORDO_WORKER=1; "
-            f"if [ -f ~/ordo-publish/.venv/bin/python ]; then "
-            f"~/ordo-publish/.venv/bin/python {quoted_remote_args}; "
-            f"else python3 {quoted_remote_args}; fi"
+            "export ORDO_WORKER=1 ORDO_WECHAT_VPS_WORKER=1; "
+            f"cd {shlex.quote(vps_path)} && "
+            f"if [ -x .venv312/bin/python ]; then .venv312/bin/python {quoted_args}; "
+            f"elif [ -x .venv/bin/python ]; then .venv/bin/python {quoted_args}; "
+            f"else python3 {quoted_args}; fi"
         )
-        ssh_exec_cmd = ["ssh"] + ssh_opts + [f"{vps_user}@{vps_ip}", f"cd ~/ordo-publish && {remote_shell_cmd}"]
+        try:
+            self._ensure_master(ssh_options, target)
+        except subprocess.CalledProcessError as exc:
+            stderr = self._subprocess_error(exc)
+            return self._failed(
+                prepared_context,
+                exc.returncode,
+                f"微信任务上传 VPS 失败: {stderr}",
+            )
+        ssh_command = [
+            "ssh",
+            *ssh_options,
+            *self._control_options(self._control_path),
+            target,
+            remote_shell,
+        ]
 
-        # 5. Execute command on VPS
-        timeout_seconds = 180
         try:
             result = subprocess.run(
-                ssh_exec_cmd,
-                text=True,
+                ssh_command,
                 capture_output=True,
-                timeout=timeout_seconds,
+                text=True,
+                timeout=300,
             )
         except subprocess.TimeoutExpired as exc:
-            # Cleanup remote files
-            cleanup_cmd = ["ssh"] + ssh_opts + [f"{vps_user}@{vps_ip}", "rm -rf ~/ordo-publish/temp"]
-            subprocess.run(cleanup_cmd, capture_output=True)
-
+            self._cleanup_remote(target, remote_temp, ssh_options)
             stdout = (exc.stdout or exc.output or "").strip()
             stderr = (exc.stderr or "").strip()
-            timeout_message = f"Remote process timed out after {timeout_seconds} seconds"
             return {
                 "platform": self.platform,
-                "command": " ".join(local_cmd),
+                "command": " ".join(local_command),
                 "returncode": 124,
                 "stdout": stdout,
-                "stderr": f"{timeout_message}\n{stderr}" if stderr else timeout_message,
+                "stderr": f"VPS 微信 worker 超时（300s）{': ' + stderr if stderr else ''}",
                 "timed_out": True,
+                "remote_started": True,
             }
 
-        # Cleanup remote files
-        cleanup_cmd = ["ssh"] + ssh_opts + [f"{vps_user}@{vps_ip}", "rm -rf ~/ordo-publish/temp"]
-        subprocess.run(cleanup_cmd, capture_output=True)
-
-        from ordo_engine.platforms.base import _extract_smoke_state
-        stdout, stdout_state = _extract_smoke_state(result.stdout.strip())
-        stderr, stderr_state = _extract_smoke_state(result.stderr.strip())
+        self._cleanup_remote(target, remote_temp, ssh_options)
+        stdout, stdout_state = _extract_smoke_state((result.stdout or "").strip())
+        stderr, stderr_state = _extract_smoke_state((result.stderr or "").strip())
         smoke_state = {}
         if stdout_state:
             smoke_state.update(stdout_state)
         if stderr_state:
             smoke_state.update(stderr_state)
-
         return {
             "platform": self.platform,
-            "command": " ".join(local_cmd),
+            "command": " ".join(local_command),
             "returncode": result.returncode,
             "stdout": stdout,
             "stderr": stderr,
             "current_url": str(smoke_state.get("current_url", "")),
             "page_state": str(smoke_state.get("page_state", "")),
             "smoke_step": str(smoke_state.get("smoke_step", "")),
+            "remote_started": True,
+        }
+
+    def _upload_referenced_images(
+        self,
+        article: Path,
+        target: str,
+        remote_temp: str,
+        ssh_options: list[str],
+        scp_options: list[str],
+    ) -> None:
+        content = article.read_text(encoding="utf-8")
+        for raw_path in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", content):
+            image_path = raw_path.strip()
+            if image_path.startswith(("http://", "https://")):
+                continue
+            local_image = (article.parent / image_path).resolve()
+            if not local_image.is_file():
+                continue
+            remote_image = f"{remote_temp}/{image_path}"
+            remote_dir = str(Path(remote_image).parent)
+            self._run_pre_worker(
+                lambda control: [
+                    "ssh",
+                    *ssh_options,
+                    *self._control_options(control),
+                    target,
+                    f"mkdir -p {shlex.quote(remote_dir)}",
+                ],
+                ssh_options,
+                target,
+            )
+            self._run_pre_worker(
+                lambda control: [
+                    "scp",
+                    *scp_options,
+                    *self._control_options(control),
+                    str(local_image),
+                    f"{target}:{remote_image}",
+                ],
+                ssh_options,
+                target,
+            )
+
+    def _run_pre_worker(self, command_factory, ssh_options, target):
+        for attempt in range(3):
+            self._ensure_master(ssh_options, target)
+            command = command_factory(self._control_path)
+            try:
+                return subprocess.run(
+                    command,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError as exc:
+                if attempt == 2 or not self._is_transport_error(exc):
+                    raise
+                self.close_batch()
+                time.sleep(2**attempt)
+        raise AssertionError("unreachable")
+
+    def _ensure_master(self, ssh_options, target) -> None:
+        if self._control_path:
+            return
+        control_path = str(
+            Path(tempfile.gettempdir())
+            / f"ordo-wechat-{os.getpid()}-{uuid.uuid4().hex[:8]}.sock"
+        )
+        command = [
+            "ssh",
+            *ssh_options,
+            "-M",
+            "-N",
+            "-f",
+            "-o",
+            "ControlMaster=yes",
+            "-o",
+            "ControlPersist=60",
+            "-o",
+            f"ControlPath={control_path}",
+            target,
+        ]
+        for attempt in range(3):
+            try:
+                subprocess.run(
+                    command,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                self._control_path = control_path
+                self._master_ssh_options = list(ssh_options)
+                self._master_target = target
+                return
+            except subprocess.CalledProcessError as exc:
+                if attempt == 2 or not self._is_transport_error(exc):
+                    raise
+                time.sleep(2**attempt)
+
+    @staticmethod
+    def _control_options(control_path: str | None) -> list[str]:
+        if not control_path:
+            raise RuntimeError("VPS SSH ControlMaster 尚未建立")
+        return [
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            f"ControlPath={control_path}",
+        ]
+
+    @staticmethod
+    def _is_transport_error(exc: subprocess.CalledProcessError) -> bool:
+        stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        output = f"{stdout}\n{stderr}".lower()
+        return any(
+            marker in output
+            for marker in (
+                "connection closed",
+                "connection reset",
+                "broken pipe",
+                "control socket connect",
+                "mux_client_request_session",
+            )
+        )
+
+    @staticmethod
+    def _cleanup_remote(target: str, remote_temp: str, ssh_options: list[str]) -> None:
+        subprocess.run(
+            ["ssh", *ssh_options, target, f"rm -rf {shlex.quote(remote_temp)}"],
+            capture_output=True,
+            text=True,
+        )
+
+    @staticmethod
+    def _subprocess_error(exc: subprocess.CalledProcessError) -> str:
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        return stderr.strip() or str(exc)
+
+    def _blocked(self, prepared_context, message):
+        return self._failed(prepared_context, 2, message)
+
+    def _failed(self, prepared_context, returncode, message):
+        return {
+            "platform": self.platform,
+            "command": " ".join(prepared_context["command"]),
+            "returncode": returncode,
+            "stdout": "",
+            "stderr": message,
+            "remote_started": False,
         }

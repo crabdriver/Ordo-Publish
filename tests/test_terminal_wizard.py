@@ -241,6 +241,39 @@ class TerminalWizardTests(unittest.TestCase):
             self.assertIn("知乎预检未通过", output.getvalue())
             self.assertIn("python3 scripts/terminal_wizard.py", output.getvalue())
 
+    def test_prepare_browser_context_never_touches_legacy_browser(self):
+        from ordo_engine.workbench.terminal_service import prepare_browser_context
+
+        forbidden = (
+            "ensure_chrome_ready",
+            "open_missing_platform_tabs",
+            "list_tabs",
+            "list_tabs_or_none",
+            "launch_chrome",
+            "run_cdp",
+        )
+        patches = [
+            patch(
+                f"ordo_engine.workbench.terminal_service.publish.{name}",
+                side_effect=AssertionError(f"forbidden helper called: {name}"),
+            )
+            for name in forbidden
+        ]
+        mocks = [item.start() for item in patches]
+        self.addCleanup(lambda: [item.stop() for item in patches])
+
+        context = prepare_browser_context(
+            Path("/tmp/repo"), ("wechat", "zhihu"), output=lambda _text: None
+        )
+
+        self.assertEqual(context["tabs"], [])
+        self.assertEqual(context["workbench"], {})
+        self.assertIsNone(context["cdp_connection"])
+        self.assertEqual(context["browser_mode"], "standalone")
+        self.assertTrue(context["profile_dir"].endswith(".ordo/automation-profile"))
+        for mock in mocks:
+            mock.assert_not_called()
+
     def test_execute_publish_flow_runs_publish_job_and_reports_summary(self):
         from ordo_engine.workbench.terminal_wizard import TerminalWizardSettings, execute_publish_flow
 

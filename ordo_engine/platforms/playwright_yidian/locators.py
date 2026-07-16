@@ -7,7 +7,7 @@ class YidianLocators:
     EDITOR_URL = "https://mp.yidianzixun.com/#/Writing/articleEditor"
     MANAGEMENT_URL = "https://mp.yidianzixun.com/#/ArticleManual/original/article"
     DRAFT_MANAGEMENT_URL = "https://mp.yidianzixun.com/#/ArticleManual/original/draft"
-    PUBLISHED_URL_PATTERN = r"mp\.yidianzixun\.com/#/ArticleManual"
+    PUBLISHED_URL_PATTERN = r"^https?://(?:www\.)?yidianzixun\.com/article/[A-Za-z0-9_-]+(?:[/?#]|$)"
 
     TITLE_INPUT = (
         'input.post-title, '
@@ -21,11 +21,17 @@ class YidianLocators:
     EDITOR_AREA_MIN_WIDTH = 300
     EDITOR_AREA_MIN_HEIGHT = 100
 
-    COVER_FILE_INPUT = "input.upload-input"
+    COVER_PICKER = ".article-cover-container .cover-setter:not([style*='display: none']) .cover-item"
     COVER_SINGLE_TEXT = "单图"
+    COVER_DEFAULT_SELECTOR = '.cover-type .item:has-text("默认")'
 
     PUBLISH_BUTTON_TEXTS = ["发文章", "发布"]
-    CONFIRM_PUBLISH_TEXTS = ["确认发布", "确定", "发布"]
+    CONFIRM_PUBLISH_TEXTS = ["确认发布"]
+    CONFIRM_DIALOG_SELECTOR = (
+        '[role="dialog"]:visible, .el-dialog__wrapper:visible, '
+        '.el-message-box__wrapper:visible'
+    )
+    SUBMIT_FAILURE_MARKERS = ["发布失败", "提交失败", "保存失败"]
     SAVE_DRAFT_TEXTS = ["存草稿", "保存草稿", "保存"]
 
     AI_DECLARATION_TEXT = "内容由AI生成"

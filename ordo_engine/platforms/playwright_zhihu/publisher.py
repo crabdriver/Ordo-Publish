@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import time
 from pathlib import Path
 
@@ -12,11 +11,16 @@ except ImportError:
 from markdown_utils import render_markdown_plain_text, should_declare_ai
 from ordo_engine.platforms.playwright.base_publisher import (
     ArticlePayload,
+    DraftCheckpoint,
     PlaywrightBasePublisher,
     PublishResult,
 )
 from ordo_engine.platforms.playwright.engine import PlaywrightEngine
 from ordo_engine.platforms.playwright.human import HumanBehavior
+from ordo_engine.platforms.playwright._common import (
+    fill_title_common, fill_body_common, upload_cover_common,
+    click_publish_common, verify_result_common, find_visible_button,
+)
 from ordo_engine.platforms.playwright_zhihu.locators import ZhihuLocators
 
 
@@ -71,73 +75,20 @@ class ZhihuPlaywrightPublisher(PlaywrightBasePublisher):
         return page
 
     def fill_title(self, title: str):
-        """人像化输入标题"""
-        title_locator = self.page.locator(ZhihuLocators.TITLE_INPUT).first
-        self.human.human_click(title_locator)
-        time.sleep(0.3)
-
-        # Playwright fill() handles React controlled inputs correctly
-        title_locator.fill("")
-        time.sleep(0.2)
-
-        # Type character by character for human-like effect
-        self.human.human_type(title, speed="normal")
-
-        # Verify
-        has_value = title_locator.evaluate("el => 'value' in el")
-        actual = title_locator.input_value() if has_value else title_locator.inner_text()
-        print(f"[INFO] 知乎标题已输入: 《{actual[:50]}》")
+        fill_title_common(self.human, self.page, title, ZhihuLocators.TITLE_INPUT, "知乎")
 
     def fill_body(self, body: str):
-        """填写正文（纯文本）"""
-        plain_body = render_markdown_plain_text(body)
-
-        editor = self._find_editor_element()
-        self.human.human_click(editor)
-        time.sleep(0.5)
-
-        # Clear existing content
-        mod = self.human._modifier
-        self.page.keyboard.press(f"{mod}+a")
-        self.page.keyboard.press("Delete")
-        time.sleep(0.3)
-
-        if len(plain_body) > 500:
-            print(f"[INFO] 正文较长 ({len(plain_body)} 字)，使用剪贴板粘贴")
-            self.human.human_paste_without_select(plain_body)
-        else:
-            print(f"[INFO] 正文较短 ({len(plain_body)} 字)，模拟打字输入")
-            self.human.human_type(plain_body, speed="fast")
-
-        time.sleep(0.5)
-
-        body_length = self.page.evaluate(
-            """
-            () => {
-                const editor = document.querySelector(
-                    '.public-DraftEditor-content, .ProseMirror, '
-                    + '[data-lexical-editor="true"], [contenteditable="true"]'
-                );
-                return (editor?.innerText || '').trim().length;
-            }
-            """
+        fill_body_common(
+            self.human, self.page, body,
+            ZhihuLocators.EDITOR_AREA, "知乎",
+            ZhihuLocators.EDITOR_AREA_MIN_WIDTH, ZhihuLocators.EDITOR_AREA_MIN_HEIGHT,
         )
-        print(f"[INFO] 知乎正文已写入，编辑器字数: {body_length}")
 
     def upload_cover(self, cover_path: Path):
-        """上传封面"""
-        path = Path(cover_path).expanduser().resolve()
-        if not path.is_file():
-            raise RuntimeError(f"封面文件不存在: {path}")
-
-        file_input = self.page.locator(ZhihuLocators.COVER_FILE_INPUT)
-        if file_input.count() == 0:
-            print("[WARN] 未找到知乎封面上传 input，跳过封面")
-            return
-
-        file_input.set_input_files(str(path))
-        print(f"[INFO] 知乎封面已上传: {path.name}")
-        time.sleep(2)
+        upload_cover_common(
+            self.page, cover_path, ZhihuLocators.COVER_FILE_INPUT, "知乎",
+            success_selector=ZhihuLocators.COVER_UPLOAD_SUCCESS,
+        )
         self.human.human_wait(0.5, 1.0)
 
     def configure_settings(self, article: ArticlePayload):
@@ -179,27 +130,16 @@ class ZhihuPlaywrightPublisher(PlaywrightBasePublisher):
             print(f"[WARN] 设置知乎 AI 创作声明失败: {exc}")
 
     def click_publish(self):
-        """点击发布按钮"""
-        publish_btn = self._find_visible_button(ZhihuLocators.PUBLISH_BUTTON_TEXTS)
-        if not publish_btn:
-            raise RuntimeError("未找到知乎发布按钮")
-
-        print("[INFO] 点击知乎发布按钮...")
-        self.human.human_click(publish_btn)
-        time.sleep(1)
-
-        # Check for confirmation dialog
-        confirm_btn = self._find_visible_button(ZhihuLocators.CONFIRM_PUBLISH_TEXTS)
-        if confirm_btn:
-            self.human.human_wait(0.5, 1.0)
-            print("[INFO] 点击知乎确认发布...")
-            self.human.human_click(confirm_btn)
-
-        time.sleep(3)
+        click_publish_common(
+            self.human, self.page,
+            ZhihuLocators.PUBLISH_BUTTON_TEXTS,
+            ZhihuLocators.CONFIRM_PUBLISH_TEXTS,
+            "知乎",
+        )
 
     def save_draft(self):
         """保存草稿"""
-        draft_btn = self._find_visible_button(ZhihuLocators.SAVE_DRAFT_TEXTS)
+        draft_btn = find_visible_button(self.page, ZhihuLocators.SAVE_DRAFT_TEXTS)
         if draft_btn:
             self.human.human_click(draft_btn)
             time.sleep(2)
@@ -210,99 +150,84 @@ class ZhihuPlaywrightPublisher(PlaywrightBasePublisher):
         print("[INFO] 知乎草稿已保存")
 
     def verify_result(self, mode: str) -> PublishResult:
-        """验证结果"""
-        current_url = self.page.url
-        page_text = self.page.evaluate("() => document.body.innerText || ''")
+        return verify_result_common(
+            self.page, "知乎", mode,
+            ZhihuLocators.PUBLISHED_URL_PATTERN,
+            ZhihuLocators.PUBLISH_SUCCESS_MARKERS,
+            ZhihuLocators.DRAFT_SUCCESS_MARKERS,
+            ZhihuLocators.LIMIT_MARKERS,
+            ZhihuLocators.MANAGEMENT_URL,
+            ZhihuLocators.DRAFT_MANAGEMENT_URL,
+            expected_title=self._article.title,
+        )
 
-        # Rate limit check
-        if any(m in page_text for m in ZhihuLocators.LIMIT_MARKERS):
-            return PublishResult(
+    # ── 草稿检查点协议 ──────────────────────────────────────
+
+    def verify_draft_checkpoint(self) -> DraftCheckpoint:
+        """核验知乎草稿：导航到创作中心草稿列表，匹配标题。
+
+        无法核验 → draft_ref 为空，调用方应处理为 manual_verify。
+        """
+        from datetime import datetime, timezone
+
+        try:
+            # 导航到草稿管理页
+            self.page.goto(
+                ZhihuLocators.DRAFT_MANAGEMENT_URL,
+                wait_until="domcontentloaded",
+                timeout=15000,
+            )
+            self.human.human_wait(1, 2)
+
+            # 尝试匹配标题
+            title = getattr(self._article, "title", "")
+            draft_ref = ""
+            if title:
+                try:
+                    link = self.page.locator(f'a[href*="/p/"]:has-text("{title}")').first
+                    if link.count() > 0:
+                        href = link.get_attribute("href") or ""
+                        if "/p/" in href:
+                            draft_ref = href.split("/p/")[-1].split("?")[0]
+                except Exception:
+                    pass
+
+            return DraftCheckpoint(
                 platform=self.platform,
-                status="limit_reached",
-                current_url=current_url,
-                page_state="limit_reached",
-                smoke_step="verify",
-                message="达到发布上限",
+                draft_ref=draft_ref,
+                draft_url=ZhihuLocators.DRAFT_MANAGEMENT_URL,
+                saved_at=datetime.now(timezone.utc).isoformat(),
+                verification_evidence={
+                    "method": "draft_list_title_match",
+                    "title_matched": bool(draft_ref),
+                    "draft_list_url": ZhihuLocators.DRAFT_MANAGEMENT_URL,
+                },
+            )
+        except Exception as exc:
+            return DraftCheckpoint(
+                platform=self.platform,
+                draft_ref="",
+                verification_evidence={
+                    "method": "draft_list_error",
+                    "error": str(exc),
+                },
             )
 
-        if mode == "publish":
-            if re.search(ZhihuLocators.PUBLISHED_URL_PATTERN, current_url):
-                print(f"[INFO] 已发布到知乎: {current_url}")
-                return PublishResult(
-                    platform=self.platform,
-                    status="published",
-                    current_url=current_url,
-                    page_state="published",
-                    smoke_step="verify",
-                    message=f"已发布到知乎: {current_url}",
-                )
+    def publish_from_draft(self, draft_ref: str) -> PublishResult:
+        """从已有草稿发布：打开草稿编辑页 → 点击发布。"""
+        draft_url = f"https://zhuanlan.zhihu.com/p/{draft_ref}/edit"
+        self.page.goto(draft_url, wait_until="domcontentloaded", timeout=15000)
+        self.human.human_wait(2, 3)
+        self._submission_started = True
+        self.click_publish()
+        return self.verify_result("publish")
 
-            if any(m in page_text for m in ZhihuLocators.PUBLISH_SUCCESS_MARKERS):
-                return PublishResult(
-                    platform=self.platform,
-                    status="published",
-                    current_url=current_url,
-                    page_state="published",
-                    smoke_step="verify",
-                )
-
-            return self._verify_in_management(mode)
-        else:
-            if any(m in page_text for m in ZhihuLocators.DRAFT_SUCCESS_MARKERS):
-                return PublishResult(
-                    platform=self.platform,
-                    status="draft_only",
-                    current_url=current_url,
-                    page_state="draft_saved",
-                    smoke_step="verify",
-                    message="已写入知乎草稿页",
-                )
-            return self._verify_in_management(mode)
-
-    def _verify_in_management(self, mode: str) -> PublishResult:
-        """跳转到管理页面验证"""
-        is_draft = mode == "draft"
-        url = (
-            ZhihuLocators.DRAFT_MANAGEMENT_URL
-            if is_draft
-            else ZhihuLocators.MANAGEMENT_URL
-        )
-        self.page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        time.sleep(3)
-
-        status = "draft_only" if is_draft else "published"
-        page_state = "draft_saved" if is_draft else "published"
-
-        return PublishResult(
-            platform=self.platform,
-            status=status,
-            current_url=self.page.url,
-            page_state=page_state,
-            smoke_step="verify",
-        )
-
-    def _find_editor_element(self):
-        """找到符合尺寸要求的编辑区域"""
-        selectors = ZhihuLocators.EDITOR_AREA.split(", ")
-        for selector in selectors:
-            elements = self.page.locator(selector.strip())
-            count = elements.count()
-            for i in range(count):
-                el = elements.nth(i)
-                box = el.bounding_box()
-                if (
-                    box
-                    and box["width"] >= ZhihuLocators.EDITOR_AREA_MIN_WIDTH
-                    and box["height"] >= ZhihuLocators.EDITOR_AREA_MIN_HEIGHT
-                ):
-                    return el
-        # Fallback
-        return self.page.locator('[contenteditable="true"]').first
-
-    def _find_visible_button(self, texts: list):
-        """查找包含指定文本的可见按钮"""
-        for text in texts:
-            btn = self.page.locator(f'button:visible:has-text("{text}")')
-            if btn.count() > 0:
-                return btn.first
-        return None
+    def verify_published(self, published_ref: str) -> bool:
+        """核验知乎是否已正式发布。"""
+        try:
+            article_url = f"https://zhuanlan.zhihu.com/p/{published_ref}"
+            self.page.goto(article_url, wait_until="domcontentloaded", timeout=10000)
+            # 如果有标题内容出现即视为已发布
+            return self.page.title() != "" and "404" not in self.page.title()
+        except Exception:
+            return False

@@ -10,10 +10,11 @@ class ErrorType(str, Enum):
     RATE_LIMITED = "rate_limited"
     TRANSIENT_ERROR = "transient_error"
     DUPLICATE_OR_SKIPPED = "duplicate_or_skipped"
+    PUBLISH_CLICK_NO_EFFECT = "publish_click_no_effect"
     UNKNOWN_ERROR = "unknown_error"
 
 
-RETRYABLE_ERRORS = {ErrorType.TRANSIENT_ERROR}
+RETRYABLE_ERRORS = {ErrorType.TRANSIENT_ERROR, ErrorType.RATE_LIMITED}
 BLOCKING_ERRORS = {ErrorType.CONFIG_ERROR, ErrorType.ENVIRONMENT_ERROR}
 
 

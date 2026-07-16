@@ -10,17 +10,12 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
+from ordo_engine.platforms.wechat.runtime import require_vps_worker
+
 REPO_DIR = Path(__file__).resolve().parents[3]
 
 # Load secret credentials from secrets.env
 load_dotenv(REPO_DIR / "secrets.env")
-
-# Apply proxy if configured
-wechat_proxy = os.getenv("WECHAT_PROXY")
-if wechat_proxy and os.environ.get("ORDO_WORKER") != "1":
-    os.environ["HTTP_PROXY"] = wechat_proxy
-    os.environ["HTTPS_PROXY"] = wechat_proxy
-
 
 def load_config():
     for name in ("config.json", "config.example.json"):
@@ -35,6 +30,7 @@ CONFIG, CONFIG_PATH = load_config()
 
 
 def get_access_token():
+    require_vps_worker()
     wechat = CONFIG.get("wechat", {})
     app_id = wechat.get("app_id")
     app_secret = wechat.get("app_secret")
@@ -65,6 +61,7 @@ def get_access_token():
 
 
 def upload_thumb_image(token, image_path):
+    require_vps_worker()
     url = (
         "https://api.weixin.qq.com/cgi-bin/material/add_material"
         f"?access_token={token}&type=image"
@@ -91,6 +88,7 @@ def upload_thumb_image(token, image_path):
 
 
 def upload_content_image(token, image_path, max_retries=3):
+    require_vps_worker()
     url = f"https://api.weixin.qq.com/cgi-bin/media/uploadimg?access_token={token}"
 
     filename = os.path.basename(image_path)
@@ -194,6 +192,7 @@ def replace_all_images(html, article_dir, token):
 
 
 def push_draft(token, title, content, thumb_media_id, author=""):
+    require_vps_worker()
     url = f"https://api.weixin.qq.com/cgi-bin/draft/add?access_token={token}"
     data = {
         "articles": [

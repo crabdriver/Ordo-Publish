@@ -58,11 +58,12 @@ class PublishParseTests(unittest.TestCase):
 
         self.assertEqual(publish.resolve_wechat_theme_mode(Args(), ["chinese", "ink"]), "random")
 
-    def test_wechat_theme_console_mode_is_preserved(self):
+    def test_wechat_theme_console_mode_is_rejected(self):
         class Args:
             wechat_theme_mode = "console"
 
-        self.assertEqual(publish.resolve_wechat_theme_mode(Args(), ["chinese", "ink"]), "console")
+        with self.assertRaisesRegex(RuntimeError, "fixed/random"):
+            publish.resolve_wechat_theme_mode(Args(), ["chinese", "ink"])
 
     def test_filter_published_articles_is_opt_in(self):
         with tempfile.TemporaryDirectory() as tmpdir:

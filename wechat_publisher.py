@@ -1,5 +1,6 @@
 from pathlib import Path
 from dotenv import load_dotenv
+import base64
 import uuid
 import mimetypes
 import time
@@ -14,7 +15,7 @@ import markdown
 
 from markdown_utils import render_markdown_plain_text, render_markdown_soup
 from scripts.format import convert_image_captions, convert_lists_to_sections
-from ordo_engine.config import load_engine_config
+from ordo_engine.config import load_engine_config, load_simple_env_file
 from ordo_engine.importers.normalize import strip_title_marker
 from ordo_engine.assignment.cover_contract import (
     CoverContractError,
@@ -22,6 +23,7 @@ from ordo_engine.assignment.cover_contract import (
     resolve_publication_cover,
     validate_cover,
 )
+from ordo_engine.platforms.wechat.runtime import require_vps_worker
 
 BASE_DIR = Path(os.path.dirname(os.path.abspath(__file__)))
 
@@ -30,12 +32,6 @@ load_dotenv(BASE_DIR / "secrets.env")
 
 APPID = os.getenv("WECHAT_APPID")
 SECRET = os.getenv("WECHAT_SECRET")
-
-# Apply proxy if configured
-wechat_proxy = os.getenv("WECHAT_PROXY")
-if wechat_proxy and os.environ.get("ORDO_WORKER") != "1":
-    os.environ["HTTP_PROXY"] = wechat_proxy
-    os.environ["HTTPS_PROXY"] = wechat_proxy
 
 WECHAT_MARKDOWN_EXTENSIONS = ["extra", "sane_lists"]
 
@@ -327,6 +323,7 @@ class WeChatPublisher:
         self._existing_titles_cache = None
 
     def get_access_token(self):
+        require_vps_worker()
         url = f"https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={self.appid}&secret={self.secret}"
         response = requests.get(url, timeout=30).json()
         if 'access_token' in response:
@@ -363,6 +360,7 @@ class WeChatPublisher:
                 raise Exception(f"上传封面失败: {res}")
 
     def post_json(self, url, payload, timeout=60):
+        require_vps_worker()
         response = requests.post(
             url,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -672,17 +670,75 @@ def load_single_article(markdown_path):
     return title, body, str(path)
 
 
+def _real_config_value(value):
+    placeholder_markers = ("CHANGE_ME", "your_", "你的", "example", "api_key_here")
+    return bool(value) and not any(marker.upper() in str(value).upper() for marker in placeholder_markers)
+
+
+def _listenhub_cover_settings():
+    scribe_root = Path(
+        os.environ.get("ORDO_SCRIBE_ROOT") or BASE_DIR.parent / "ordo-scribe"
+    ).expanduser()
+    shared = load_simple_env_file(scribe_root / ".env")
+
+    def value(name, default=""):
+        return (os.environ.get(name) or shared.get(name) or default).strip()
+
+    api_key = value("LISTENHUB_API_KEY")
+    if not _real_config_value(api_key):
+        return None
+    base_url = value("LISTENHUB_IMAGE_BASE_URL", "https://api.marswave.ai/openapi/v1").rstrip("/")
+    if base_url.endswith(("/images/generation", "/images/generations")):
+        endpoint = base_url
+    else:
+        endpoint = f"{base_url}/images/generation"
+    return {
+        "api_key": api_key,
+        "endpoint": endpoint,
+        "provider": value("LISTENHUB_IMAGE_PROVIDER", "openai"),
+        "model": value("LISTENHUB_IMAGE_MODEL", "gpt-image-2"),
+        "image_size": value("LISTENHUB_IMAGE_SIZE", "4K"),
+        "aspect_ratio": value("LISTENHUB_IMAGE_ASPECT_RATIO", "21:9"),
+    }
+
+
+def _generate_listenhub_cover_source(settings, prompt, source_path):
+    response = requests.post(
+        settings["endpoint"],
+        headers={
+            "Authorization": f"Bearer {settings['api_key']}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "provider": settings["provider"],
+            "model": settings["model"],
+            "prompt": prompt,
+            "imageConfig": {
+                "imageSize": settings["image_size"],
+                "aspectRatio": settings["aspect_ratio"],
+                "quality": "medium",
+            },
+        },
+        timeout=180,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    try:
+        parts = payload["candidates"][0]["content"]["parts"]
+        inline = next(part["inlineData"] for part in parts if "inlineData" in part)
+        image_bytes = base64.b64decode(inline["data"], validate=True)
+    except (KeyError, IndexError, StopIteration, ValueError) as exc:
+        raise RuntimeError("ListenHub 图片接口响应中缺少可用图片") from exc
+    source_path.write_bytes(image_bytes)
+
+
 def create_ai_cover(title, markdown_file_path):
     try:
         config_path = BASE_DIR / "config.json"
-        if not config_path.exists():
-            return None
-        with open(config_path, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        cover_cfg = cfg.get("cover", {}) if isinstance(cfg.get("cover"), dict) else {}
-        if cover_cfg.get("prefer_ai_first", True) is False:
-            return None
-        placeholder_markers = ("CHANGE_ME", "your_", "你的", "example", "api_key_here")
+        cfg = {}
+        if config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
         api_key = (
             cfg.get("secrets", {}).get("api_key")
             or cfg.get("ai", {}).get("api_key")
@@ -690,14 +746,9 @@ def create_ai_cover(title, markdown_file_path):
         )
         base_url = cfg.get("settings", {}).get("base_url")
         model = cfg.get("settings", {}).get("model")
-        if (
-            not api_key
-            or any(marker.upper() in str(api_key).upper() for marker in placeholder_markers)
-            or not base_url
-            or any(marker.upper() in str(base_url).upper() for marker in placeholder_markers)
-            or not model
-            or any(marker.upper() in str(model).upper() for marker in placeholder_markers)
-        ):
+        google_config_ready = all(_real_config_value(value) for value in (api_key, base_url, model))
+        listenhub_settings = None if google_config_ready else _listenhub_cover_settings()
+        if not google_config_ready and listenhub_settings is None:
             return None
 
         article_path = Path(markdown_file_path).expanduser().resolve()
@@ -724,16 +775,22 @@ def create_ai_cover(title, markdown_file_path):
             "距左右边缘至少350px；左右各309px只放可裁剪背景。"
             "输出高分辨率纯视觉源图，不要海报排版，不要文字堆叠。"
         )
-        cmd = [
-            sys.executable,
-            str(BASE_DIR / "scripts" / "generate.py"),
-            "--prompt", prompt,
-            "--out", str(source_path),
-            "--aspect-ratio", "21:9",
-            "--image-size", "4K",
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(BASE_DIR), timeout=120)
-        if result.returncode == 0 and source_path.exists():
+        if google_config_ready:
+            cmd = [
+                sys.executable,
+                str(BASE_DIR / "scripts" / "generate.py"),
+                "--prompt", prompt,
+                "--out", str(source_path),
+                "--aspect-ratio", "21:9",
+                "--image-size", "4K",
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(BASE_DIR), timeout=120)
+            generation_error = result.stderr[:200]
+        else:
+            _generate_listenhub_cover_source(listenhub_settings, prompt, source_path)
+            result = None
+            generation_error = ""
+        if source_path.exists():
             try:
                 normalized = normalize_cover_source(source_path, out_path)
             finally:
@@ -741,7 +798,7 @@ def create_ai_cover(title, markdown_file_path):
             print(f"  [AI封面] 成功为《{title}》生成统一封面图: {normalized.name}")
             return str(normalized)
         else:
-            print(f"  [AI封面失败] 未生成合格统一封面. 详情: {result.stderr[:200]}")
+            print(f"  [AI封面失败] 未生成合格统一封面. 详情: {generation_error}")
     except Exception as e:
         print(f"  [AI封面异常] {e}")
     return None
@@ -754,11 +811,8 @@ def select_cover_for_path(markdown_file_path, title=None, cover_override=None, c
     article_path = Path(markdown_file_path).expanduser().resolve()
     try:
         return str(resolve_publication_cover(article_path))
-    except CoverContractError as exc:
-        raw_text = article_path.read_text(encoding="utf-8")
-        frontmatter = raw_text[4:raw_text.find("\n---", 4)] if raw_text.startswith("---\n") else ""
-        if any(line.startswith("cover:") for line in frontmatter.splitlines()):
-            raise RuntimeError(f"统一封面不合格: {exc}") from exc
+    except CoverContractError:
+        pass
 
     if title:
         ai_cover = create_ai_cover(title, markdown_file_path)
@@ -775,6 +829,7 @@ def publish_one_article(
     theme_name="chinese",
     cover_path=None,
     cover_mode="auto",
+    force_republish=False,
 ):
     title, md_content, md_file_path = load_single_article(markdown_file)
 
@@ -792,7 +847,7 @@ def publish_one_article(
         return
 
     existing_titles = publisher.get_existing_titles()
-    if title in existing_titles:
+    if title in existing_titles and not force_republish:
         print(f"[SKIP] 微信草稿或已发布列表中已存在同标题文章: {title}")
         return
 
@@ -863,7 +918,13 @@ def main():
             default=None,
             help="任务级封面图策略：auto 自动；force_on 强制；force_off 禁用；random 随机（不匹配前缀和AI，直接从库中随机选择）"
         )
+        parser.add_argument(
+            "--force-republish",
+            action="store_true",
+            help="显式忽略同标题记录并重新创建草稿",
+        )
         args = parser.parse_args()
+        require_vps_worker()
 
         print("=" * 50)
         print("  ordo 微信公众号自动发布引擎 v3.0")
@@ -896,6 +957,7 @@ def main():
                 theme_name=args.theme,
                 cover_path=args.cover,
                 cover_mode=cover_mode,
+                force_republish=args.force_republish,
             )
             return
 

@@ -10,9 +10,14 @@ except ImportError:
 
 from markdown_utils import render_markdown_plain_text, should_declare_ai
 from ordo_engine.platforms.playwright.base_publisher import (
-    ArticlePayload, PlaywrightBasePublisher, PublishResult,
+    ArticlePayload, DraftCheckpoint, PlaywrightBasePublisher,
+    PublishLimitReached, PublishResult,
 )
-from ordo_engine.platforms.playwright._common import verify_result_common
+from ordo_engine.platforms.playwright._common import (
+    _locator_diagnostics,
+    click_publish_with_evidence,
+    verify_result_common,
+)
 from ordo_engine.platforms.playwright_bilibili.locators import BilibiliLocators
 
 
@@ -68,6 +73,11 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
                 txt = ""
             return any(m in txt for m in login_markers)
 
+        if self.engine.headless and not _iframe_title_ready() and _on_login_page():
+            raise RuntimeError(
+                "B站 登录已失效；请运行 publish.py --bootstrap-browser"
+            )
+
         time.sleep(5)
 
         needs_login = False
@@ -92,6 +102,9 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
         if not needs_login:
             needs_login = True
             print("[INFO] B站 停留在编辑器页但 iframe 未渲染，判定为需要登录")
+
+        if self.engine.headless:
+            raise RuntimeError("B站 登录已失效；请运行 publish.py --bootstrap-browser")
 
         print("[INFO] 检测到 B站 需要登录，请在浏览器窗口中扫码/登录...")
         print("[INFO] 等待登录完成（最多 300 秒）")
@@ -167,18 +180,87 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
 
     def upload_cover(self, cover_path: Path):
         self._expand_settings_in_frame()
+        path = Path(cover_path).expanduser().resolve()
+        if not path.is_file():
+            raise RuntimeError(f"封面文件不存在: {path}")
+
         ef = self._ef()
-        file_input = ef.locator(BilibiliLocators.COVER_FILE_INPUT)
-        if file_input.count() > 0:
-            path = Path(cover_path).expanduser().resolve()
-            file_input.set_input_files(str(path))
-            print(f"[INFO] B站封面已上传: {path.name}")
-            time.sleep(2)
+        label = ef.locator(
+            '.form-item-label:has-text("自定义封面"), label:has-text("自定义封面")'
+        ).first
+        if label.count() == 0:
+            raise RuntimeError("未找到B站自定义封面设置")
+        switch = label.locator("xpath=..").locator(".vui_switch--switch").first
+        if switch.count() == 0:
+            raise RuntimeError("未找到B站自定义封面开关")
+        if "is-checked" not in (switch.get_attribute("class") or "").split():
+            switch.click()
+            time.sleep(1)
+
+        upload = ef.locator("div.upload-button").first
+        if upload.count() == 0:
+            raise RuntimeError("未找到B站添加封面入口")
+        upload.click()
+        preview = ef.locator(BilibiliLocators.COVER_UPLOAD_SUCCESS)
+        before_sources = {
+            source for index in range(preview.count())
+            if (source := preview.nth(index).get_attribute("src"))
+        }
+        file_input = ef.locator('input[type="file"]').first
+        file_input.wait_for(state="attached", timeout=10000)
+        file_input.set_input_files(str(path))
+
+        confirm = ef.locator('button:visible:has-text("确定")').first
+        if confirm.count() == 0:
+            raise RuntimeError("未找到B站封面确认按钮")
+        confirm.click()
+        try:
+            preview.first.wait_for(state="visible", timeout=30000)
+        except Exception as exc:
+            raise RuntimeError("未找到B站封面上传完成证据") from exc
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            after_sources = {
+                source for index in range(preview.count())
+                if (source := preview.nth(index).get_attribute("src"))
+                and source.startswith(("http://", "https://", "//"))
+            }
+            if after_sources and after_sources != before_sources:
+                break
+            time.sleep(0.25)
         else:
-            print("[WARN] 未找到B站封面上传 input，跳过封面")
+            raise RuntimeError("未找到B站本次封面上传完成证据")
+        print(f"[INFO] B站封面已上传: {path.name}")
 
     def configure_settings(self, article: ArticlePayload):
         self._expand_settings_in_frame()
+        surfaces = [self._ef()]
+        if getattr(self, "page", None) is not None:
+            surfaces.append(self.page)
+        for marker in BilibiliLocators.LIMIT_BANNER_MARKERS:
+            for surface in surfaces:
+                try:
+                    notice = surface.locator(f':text("{marker}")')
+                    if any(
+                        notice.nth(index).is_visible()
+                        for index in range(min(notice.count(), 8))
+                    ):
+                        raise PublishLimitReached(f"达到发布上限: {marker}")
+                except PublishLimitReached:
+                    raise
+                except Exception:
+                    pass
+        publish_btn = self._ef().locator(
+            'button.vui_button--blue:visible:has-text("发布")'
+        ).first
+        if publish_btn.count() == 0:
+            raise RuntimeError("未找到B站发布按钮")
+        if not publish_btn.is_enabled():
+            diagnostics = _locator_diagnostics(self._ef(), publish_btn)
+            raise RuntimeError(
+                "B站发布按钮仍不可用，请检查必填发布设置; "
+                f"diagnostics: {diagnostics}"
+            )
 
     def _expand_settings_in_frame(self):
         """在 iframe 内展开发布设置面板"""
@@ -198,16 +280,15 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
 
     def click_publish(self):
         ef = self._ef()
-        # 优先用 class 精确匹配蓝色发布按钮
-        btn = ef.locator(f'button.{BilibiliLocators.PUBLISH_BUTTON_CLASS}:has-text("发布")')
-        if btn.count() == 0:
-            btn = ef.locator(f'button:has-text("发布")')
-        if btn.count() > 0:
-            btn.first.click()
-            print("[INFO] B站发布按钮已点击")
-            time.sleep(2)
-        else:
-            raise RuntimeError("未找到B站发布按钮")
+        click_publish_with_evidence(
+            ef,
+            BilibiliLocators.PUBLISH_BUTTON_TEXTS,
+            BilibiliLocators.CONFIRM_PUBLISH_TEXTS,
+            "B站",
+            confirm_scope_selector=BilibiliLocators.CONFIRM_DIALOG_SELECTOR,
+            allow_unscoped_confirm=True,
+            failure_markers=BilibiliLocators.SUBMIT_FAILURE_MARKERS,
+        )
 
     def save_draft(self):
         ef = self._ef()
@@ -233,4 +314,46 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
             BilibiliLocators.LIMIT_MARKERS,
             BilibiliLocators.MANAGEMENT_URL,
             BilibiliLocators.DRAFT_MANAGEMENT_URL,
+            expected_title=self._article.title,
         )
+
+    # ── 草稿检查点协议 ──────────────────────────────────────
+
+    def verify_draft_checkpoint(self) -> DraftCheckpoint:
+        from datetime import datetime, timezone
+        try:
+            self.page.goto(BilibiliLocators.DRAFT_MANAGEMENT_URL or BilibiliLocators.MANAGEMENT_URL,
+                           wait_until="domcontentloaded", timeout=15000)
+            self.human.human_wait(1, 2)
+            title = getattr(self._article, "title", "")
+            draft_ref = ""
+            if title:
+                try:
+                    el = self.page.locator(f'text="{title}"').first
+                    if el.count() > 0:
+                        draft_ref = self.page.url or ""
+                except Exception:
+                    pass
+            return DraftCheckpoint(
+                platform=self.platform, draft_ref=draft_ref,
+                saved_at=datetime.now(timezone.utc).isoformat(),
+                verification_evidence={"method": "draft_list_title_match",
+                                       "title_matched": bool(draft_ref)})
+        except Exception as exc:
+            return DraftCheckpoint(
+                platform=self.platform, draft_ref="",
+                verification_evidence={"method": "draft_list_error", "error": str(exc)})
+
+    def publish_from_draft(self, draft_ref: str) -> PublishResult:
+        if draft_ref:
+            self.page.goto(draft_ref, wait_until="domcontentloaded", timeout=15000)
+        self._submission_started = True
+        self.click_publish()
+        return self.verify_result("publish")
+
+    def verify_published(self, published_ref: str) -> bool:
+        try:
+            self.page.goto(published_ref, wait_until="domcontentloaded", timeout=10000)
+            return self.page.title() != "" and "404" not in self.page.title()
+        except Exception:
+            return False

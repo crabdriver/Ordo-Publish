@@ -14,7 +14,7 @@ class ZhihuLocators:
     DRAFT_MANAGEMENT_URL = (
         "https://www.zhihu.com/creator/manage/creation/draft?type=article"
     )
-    PUBLISHED_URL_PATTERN = r"zhuanlan\.zhihu\.com/p/\d+"
+    PUBLISHED_URL_PATTERN = r"^https?://zhuanlan\.zhihu\.com/p/\d+(?:[/?#]|$)"
 
     # ── 编辑器元素 ──────────────────────────────────────────
     TITLE_INPUT = 'textarea[placeholder*="标题"], input[placeholder*="标题"]'
@@ -29,10 +29,12 @@ class ZhihuLocators:
 
     # ── 封面 ────────────────────────────────────────────────
     COVER_FILE_INPUT = "input.UploadPicture-input"
+    # 实测上传完成后生成远端图片：<img alt="封面图" src="https://picx.zhimg.com/...">。
+    COVER_UPLOAD_SUCCESS = 'img[alt="封面图"]'
 
     # ── 发布按钮 ────────────────────────────────────────────
-    PUBLISH_BUTTON_TEXTS = ["发布", "Publish"]
-    CONFIRM_PUBLISH_TEXTS = ["确认发布", "立即发布", "确定"]
+    PUBLISH_BUTTON_TEXTS = ["发布文章", "立即发布", "发布"]
+    CONFIRM_PUBLISH_TEXTS = ["确认发布", "确定"]
     SAVE_DRAFT_TEXTS = ["存草稿", "保存草稿", "Save Draft"]
 
     # ── AI 创作声明 ─────────────────────────────────────────

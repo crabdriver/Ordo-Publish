@@ -41,24 +41,6 @@ class RealPublishPreflightTests(unittest.TestCase):
                     "production_strategy": {"template_mode": "custom", "manual_theme_by_article": {"a1": "alpha"}, "manual_cover_by_article_platform": {"a1:zhihu": "/tmp/c.png"}},
                 },
             ), patch(
-                "ordo_engine.workbench.preflight.publish.list_tabs_or_none",
-                return_value=[{"id": "tab-1"}],
-            ), patch(
-                "ordo_engine.workbench.preflight.publish.ensure_chrome_ready",
-                return_value=([{"id": "tab-1"}], "Google Chrome"),
-            ), patch(
-                "ordo_engine.workbench.preflight.publish.open_missing_platform_tabs",
-                return_value=["zhihu"],
-            ), patch(
-                "ordo_engine.workbench.preflight.publish.list_tabs",
-                return_value=[{"id": "tab-1"}],
-            ), patch(
-                "ordo_engine.workbench.preflight.publish.bind_workbench",
-                return_value={"zhihu": "tab-1"},
-            ), patch(
-                "ordo_engine.workbench.preflight.publish.get_cdp_connection_metadata",
-                return_value={"detail": "cdp ok"},
-            ), patch(
                 "ordo_engine.workbench.preflight.publish.run_preflight_checks",
                 return_value=(["登录失效"], ["头条标签页刚恢复"]),
             ):
@@ -81,7 +63,7 @@ class RealPublishPreflightTests(unittest.TestCase):
             on_disk = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(on_disk["report_id"], "rp-1")
 
-    def test_build_real_publish_preflight_auto_opens_browser_targets(self):
+    def test_build_real_publish_preflight_never_touches_legacy_browser(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             source_dir = base / "articles"
@@ -106,24 +88,21 @@ class RealPublishPreflightTests(unittest.TestCase):
                     "production_strategy": {"template_mode": "custom", "manual_theme_by_article": {}, "manual_cover_by_article_platform": {}},
                 },
             ), patch(
-                "ordo_engine.workbench.preflight.publish.ensure_chrome_ready",
-                return_value=([{"id": "tab-1"}], "Google Chrome"),
-            ) as ensure_ready, patch(
-                "ordo_engine.workbench.preflight.publish.open_missing_platform_tabs",
-                return_value=["zhihu", "toutiao"],
-            ) as open_tabs, patch(
-                "ordo_engine.workbench.preflight.publish.list_tabs",
-                return_value=[{"id": "tab-1"}],
-            ), patch(
-                "ordo_engine.workbench.preflight.publish.bind_workbench",
-                return_value={"zhihu": "tab-1", "toutiao": "tab-1"},
-            ), patch(
-                "ordo_engine.workbench.preflight.publish.get_cdp_connection_metadata",
-                return_value=None,
-            ), patch(
                 "ordo_engine.workbench.preflight.publish.run_preflight_checks",
                 return_value=([], []),
-            ):
+            ) as run_preflight, patch(
+                "ordo_engine.workbench.preflight.publish.ensure_chrome_ready",
+                side_effect=AssertionError("legacy Chrome called"),
+            ) as ensure_ready, patch(
+                "ordo_engine.workbench.preflight.publish.open_missing_platform_tabs",
+                side_effect=AssertionError("legacy tabs called"),
+            ) as open_tabs, patch(
+                "ordo_engine.workbench.preflight.publish.list_tabs",
+                side_effect=AssertionError("legacy list called"),
+            ) as list_tabs, patch(
+                "ordo_engine.workbench.preflight.publish.list_tabs_or_none",
+                side_effect=AssertionError("legacy list called"),
+            ) as list_tabs_or_none:
                 payload = build_real_publish_preflight(
                     base,
                     source_path=str(source_dir),
@@ -132,8 +111,14 @@ class RealPublishPreflightTests(unittest.TestCase):
                     seed=7,
                 )
 
-        ensure_ready.assert_called_once()
-        open_tabs.assert_called_once()
+        ensure_ready.assert_not_called()
+        open_tabs.assert_not_called()
+        list_tabs.assert_not_called()
+        list_tabs_or_none.assert_not_called()
+        self.assertEqual(payload["tabs"], [])
+        self.assertEqual(payload["workbench"], {})
+        self.assertEqual(run_preflight.call_args.args[2], {})
+        self.assertIsNone(run_preflight.call_args.kwargs["cdp_connection"])
         self.assertTrue(payload["ready"])
 
 

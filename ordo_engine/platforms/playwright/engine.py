@@ -30,6 +30,9 @@ PLATFORM_EDITOR_URLS: Dict[str, str] = {
     "bilibili": "https://member.bilibili.com/platform/upload/text/new-edit",
 }
 
+PROFILE_MARKER_NAME = ".ordo-profile-initialized"
+PROFILE_MARKER_CONTENT = "ordo-automation-profile-v1\n"
+
 # System Chrome path (macOS)
 SYSTEM_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
@@ -69,6 +72,20 @@ try {
 """
 
 
+class BrowserCleanupError(RuntimeError):
+    pass
+
+
+class BrowserOwnershipError(RuntimeError):
+    """无法唯一识别 owned 浏览器进程。"""
+    pass
+
+
+class BrowserProfileBusyError(RuntimeError):
+    """profile 正被其他进程使用。"""
+    pass
+
+
 class PlaywrightEngine:
     """管理 Playwright 浏览器连接（standalone 模式）
 
@@ -94,64 +111,151 @@ class PlaywrightEngine:
         # cdp 旧路径已移除，仅保留 standalone
         self.mode = "standalone"
         self.debug_port = debug_port
-        self.base_dir = base_dir or Path(__file__).resolve().parents[3]
+        self.base_dir = Path(
+            base_dir or Path(__file__).resolve().parents[3]
+        ).resolve()
         self._playwright: Optional[Playwright] = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None  # standalone 模式的 context
+        self._platform_pages: Dict[str, Page] = {}
 
         # Standalone 模式参数
         if headless is None:
-            # 默认无头；首次登录（无 profile）时自动切有头
+            # 默认无头；首次登录只能通过显式 bootstrap 完成。
             headless = True
         self.headless = headless
 
         # Profile 目录：保存登录态
-        self.profile_dir = profile_dir or (self.base_dir / ".ordo" / "automation-profile")
+        expected_profile_dir = self.base_dir / ".ordo" / "automation-profile"
+        if (
+            profile_dir is not None
+            and Path(profile_dir).resolve() != expected_profile_dir.resolve()
+        ):
+            raise ValueError(f"浏览器 profile 必须位于仓库内: {expected_profile_dir}")
+        self.profile_dir = expected_profile_dir
 
         # Chrome 路径：优先系统 Chrome，回退到 Playwright 自带的 Chromium
         self.executable_path = executable_path or (
             SYSTEM_CHROME if os.path.exists(SYSTEM_CHROME) else None
         )
 
+        # Owned-process 追踪
+        self._owned_pid: Optional[int] = None
+        self._owned_start_time: Optional[str] = None
+
     @property
     def _is_standalone(self) -> bool:
         return self.mode == "standalone"
 
     @property
-    def _has_existing_profile(self) -> bool:
-        """检查是否已有登录态（profile 目录非空）"""
-        if not self.profile_dir.exists():
+    def profile_is_initialized(self) -> bool:
+        """只接受显式 bootstrap 写入的版本化标志。"""
+        marker = self._validate_profile_paths()
+        if not marker.is_file():
             return False
-        return any(self.profile_dir.iterdir())
+        try:
+            return marker.read_text(encoding="utf-8") == PROFILE_MARKER_CONTENT
+        except OSError:
+            return False
+
+    @property
+    def _has_existing_profile(self) -> bool:
+        return self.profile_is_initialized
+
+    def mark_profile_initialized(self) -> None:
+        marker = self._validate_profile_paths()
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        marker = self._validate_profile_paths()
+        marker.write_text(
+            PROFILE_MARKER_CONTENT,
+            encoding="utf-8",
+        )
+
+    def _validate_profile_paths(self) -> Path:
+        base_dir = self.base_dir.resolve()
+        ordo_dir = base_dir / ".ordo"
+        profile_dir = ordo_dir / "automation-profile"
+        marker = profile_dir / PROFILE_MARKER_NAME
+        for path in (ordo_dir, profile_dir, marker):
+            if path.is_symlink():
+                raise RuntimeError(f"浏览器 profile 路径禁止 symlink: {path}")
+        try:
+            profile_dir.resolve(strict=False).relative_to(base_dir)
+        except ValueError as exc:
+            raise RuntimeError(f"浏览器 profile 逃逸仓库: {profile_dir}") from exc
+        return marker
 
     def connect(self):
         """启动独立浏览器"""
         self._launch_standalone()
 
-    def _cleanup_stale_lock(self):
-        """清理孤儿 SingletonLock：若锁文件存在但没有任何 Chrome 进程持有它，
-        说明上次运行硬崩溃遗留，必须清理否则后续 launch 会全部失败（雪崩）。"""
-        lock = self.profile_dir / "SingletonLock"
-        if not lock.exists():
-            return
+    def _find_profile_processes(self) -> list[dict]:
+        """通过完整命令行 `--user-data-dir=<profile>` 查找使用本 profile 的进程。
+
+        返回 list[dict]，每项含 pid, start_time, args。
+        无法唯一识别 → BrowserOwnershipError。
+        禁止按 Chrome 名称清理。
+        """
+        profile_str = str(self.profile_dir.resolve())
         try:
-            # 检查是否有 Chrome 进程在使用这个 profile
-            out = subprocess.run(
-                ["pgrep", "-f", f"user-data-dir={self.profile_dir}"],
+            result = subprocess.run(
+                ["ps", "-ww", "-eo", "pid=,ppid=,lstart=,args="],
                 capture_output=True, text=True, timeout=10,
             )
-            if out.stdout.strip():
-                # 仍有进程持有，不清理（避免误杀正在运行的浏览器）
-                return
+        except FileNotFoundError:
+            return []
         except Exception:
+            return []
+
+        if result.returncode != 0:
+            return []  # sandbox/权限限制
+
+        processes = []
+        for line in result.stdout.splitlines():
+            if f"--user-data-dir={profile_str}" in line:
+                parts = line.strip().split(None, 7)
+                if len(parts) == 8:
+                    try:
+                        pid = int(parts[0])
+                        ppid = int(parts[1])
+                    except ValueError:
+                        continue
+                    processes.append({
+                        "pid": pid,
+                        "ppid": ppid,
+                        "start_time": " ".join(parts[2:7]),
+                        "args": parts[7],
+                    })
+
+        return processes
+
+    def _cleanup_stale_lock(self):
+        """安全清理 SingletonLock。
+
+        规则：
+        - 锁存在且精确 profile 进程仍存活 → BrowserProfileBusyError，停止。
+        - 锁存在但没有任何进程使用该 profile → 允许删除孤儿锁。
+        - 禁止仅凭文件年龄判断锁已经失效。
+        """
+        lock = self.profile_dir / "SingletonLock"
+        if not lock.is_symlink():
             return
-        # 无进程持有 → 孤儿锁，清理
+
+        # 检查是否有存活进程使用这个 profile
+        processes = self._find_profile_processes()
+        if processes:
+            raise BrowserProfileBusyError(
+                f"profile 正被进程使用: PID={processes[0]['pid']} "
+                f"profile={self.profile_dir}"
+            )
+
+        # 无存活进程 → 安全删除孤儿锁
         for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
             try:
                 (self.profile_dir / name).unlink(missing_ok=True)
             except Exception:
                 pass
-        print("[engine] 检测到孤儿锁（上次异常退出遗留），已清理")
+        print("[engine] 检测到孤儿锁（无存活进程使用 profile），已清理")
 
     def _random_viewport(self) -> dict:
         """在几组常见真实分辨率间随机选择，避免固定视口形成可识别的行为画像。"""
@@ -166,21 +270,19 @@ class PlaywrightEngine:
 
     def _launch_standalone(self):
         """Standalone 模式：启动独立的无头 Chrome 实例"""
+        self._validate_profile_paths()
+        if self.headless and not self.profile_is_initialized:
+            raise RuntimeError(
+                "自动发布 profile 尚未初始化；请先运行 publish.py --bootstrap-browser"
+            )
+
         # 确保 profile 目录存在
         self.profile_dir.mkdir(parents=True, exist_ok=True)
 
         # 清理可能遗留的孤儿锁，避免后续平台全部 launch 失败
         self._cleanup_stale_lock()
 
-        # 如果无头模式但还没有登录态，自动切有头模式（首次登录需要扫码）
         effective_headless = self.headless
-        if not effective_headless and not self._has_existing_profile:
-            # 用户明确要 headed，或者首次登录 → headed
-            pass
-        elif effective_headless and not self._has_existing_profile:
-            # 无头模式但没登录态 → 自动切有头，让用户扫码
-            print("[engine] 首次使用检测到无登录态，切换为有头模式以便扫码登录")
-            effective_headless = False
 
         launch_kwargs = {
             "user_data_dir": str(self.profile_dir),
@@ -215,6 +317,9 @@ class PlaywrightEngine:
 
         mode_label = "无头" if effective_headless else "有头"
         print(f"[engine] 独立浏览器已启动 ({mode_label}模式, profile={self.profile_dir.name})")
+
+        # 识别 owned 进程：通过 --user-data-dir 命令行
+        self._capture_ownership()
 
     @property
     def browser(self) -> Browser:
@@ -255,6 +360,7 @@ class PlaywrightEngine:
             for page in ctx.pages:
                 page_url = page.url or ""
                 if any(pattern in page_url for pattern in patterns):
+                    self._platform_pages[platform] = page
                     return page
 
         # No existing tab found — open new one
@@ -267,7 +373,18 @@ class PlaywrightEngine:
             ctx = contexts[0] if contexts else self.browser.new_context()
             page = ctx.new_page()
 
-        page.goto(editor_url, wait_until="domcontentloaded", timeout=30000)
+        # 页面生命周期由 engine 拥有，导航由各平台 publisher 负责。
+        # 禁止在这里隐式导航，否则 publisher 无法按平台处理 SPA 导航超时。
+        self._platform_pages[platform] = page
+        return page
+
+    def release_page_for_platform(self, platform: str) -> Optional[Page]:
+        """释放平台 page lease；关闭失败时保留 lease 并向上抛错。"""
+        page = self._platform_pages.get(platform)
+        if page is not None:
+            page.close()
+            if self._platform_pages.get(platform) is page:
+                self._platform_pages.pop(platform, None)
         return page
 
     def screenshot(self, page: Page, platform: str, step: str) -> Optional[Path]:
@@ -282,32 +399,109 @@ class PlaywrightEngine:
         except Exception:
             return None
 
-    def close(self):
-        """关闭浏览器连接
+    def _capture_ownership(self):
+        """捕获 owned 浏览器根进程的 PID 和启动时间。
 
-        standalone 模式：关闭浏览器并释放所有内存
-        cdp 模式：仅断开连接（不关闭用户的浏览器）
+        headed 模式（bootstrap/手动登录）：跳过严格验证。
+        无法通过 ps 识别时记录告警但不阻断。
         """
+        if not self.headless:
+            print("[engine] headed 模式跳过进程所有权验证")
+            return
+
+        processes = self._find_profile_processes()
+        if not processes:
+            print("[engine] 无法通过 ps 识别浏览器进程（sandbox/权限限制），跳过所有权验证")
+            return
+        matching_pids = {proc["pid"] for proc in processes}
+        roots = [
+            proc for proc in processes
+            if proc.get("ppid") not in matching_pids
+        ]
+        if len(roots) != 1:
+            raise BrowserOwnershipError(
+                f"无法唯一识别 profile 根进程 ({self.profile_dir}): "
+                f"root_PIDs={[p['pid'] for p in roots]} "
+                f"all_PIDs={[p['pid'] for p in processes]}"
+            )
+        proc = roots[0]
+        self._owned_pid = proc["pid"]
+        self._owned_start_time = proc["start_time"]
+        print(f"[engine] owned PID={self._owned_pid}")
+
+    def verify_cleanup(self) -> dict:
+        """验证 owned 浏览器已彻底退出。
+
+        检查：
+        1. owned PID 已退出
+        2. 无其他进程使用本 profile（SingletonLock 已释放或可安全删除）
+        3. 返回验证结果 dict
+
+        即使 close() 抛异常，也必须执行此验证。
+        """
+        result = {"ok": True, "pid_exited": True, "profile_free": True, "details": []}
+
+        # 1. 验证 owned PID 退出
+        if self._owned_pid is not None:
+            try:
+                os.kill(self._owned_pid, 0)
+                result["pid_exited"] = False
+                result["ok"] = False
+                result["details"].append(f"PID {self._owned_pid} 仍存活")
+            except ProcessLookupError:
+                pass
+            except (PermissionError, OSError):
+                result["details"].append(f"无法确认 PID {self._owned_pid} 状态")
+
+        # 2. 验证 profile 无其他进程
+        processes = self._find_profile_processes()
+        if processes:
+            result["profile_free"] = False
+            result["ok"] = False
+            result["details"].append(
+                f"仍有进程使用 profile: PIDs={[p['pid'] for p in processes]}"
+            )
+
+        if result["ok"]:
+            print("[engine] 浏览器清理验证通过")
+
+        return result
+
+    def close(self):
+        """关闭浏览器并释放所有内存。
+
+        standalone 模式：关闭 page → 关闭 context → 停止 playwright。
+        关闭失败时记录错误但继续执行（调用方应随后执行 verify_cleanup）。
+        禁止按进程名清理，禁止 killall Chrome。
+        """
+        errors = []
         if self._is_standalone:
-            # 关闭所有页面
+            for platform_name in list(self._platform_pages):
+                try:
+                    self.release_page_for_platform(platform_name)
+                except Exception as exc:
+                    errors.append(exc)
             if self._context:
                 try:
-                    # 关闭 context 会关闭所有页面并释放浏览器进程
                     self._context.close()
-                except Exception:
-                    pass
-                self._context = None
+                except Exception as exc:
+                    errors.append(exc)
+                else:
+                    self._context = None
+                    self._platform_pages.clear()
         else:
-            # CDP 模式：不关闭浏览器，只断开连接
             self._browser = None
 
         if self._playwright:
             try:
                 self._playwright.stop()
-            except Exception:
-                pass
-            self._playwright = None
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                self._playwright = None
 
+        if errors:
+            raise BrowserCleanupError(f"浏览器清理失败: {errors[0]}") from errors[0]
         if self._is_standalone:
             print("[engine] 独立浏览器已关闭，内存已释放")
 

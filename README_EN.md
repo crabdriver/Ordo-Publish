@@ -1,69 +1,62 @@
 # Ordo-Publish
 
-**Ordo-Publish** is a local multi-platform publishing engine for Markdown-first Chinese-language creators. It prepares and distributes one article to WeChat, Zhihu, Toutiao, Jianshu, Yidian, Bilibili columns, and similar platforms with less repeated formatting and copy-paste work.
+**Ordo-Publish** is a locally orchestrated multi-platform publishing engine. Markdown is the single content source. WeChat must use the VPS fixed public IP for its official API; Zhihu, Toutiao, Jianshu, Yidian, and Bilibili columns use the repository-isolated local browser. The local machine must never call the WeChat API directly.
 
-The project is now **terminal / CLI first**. The historical desktop shell has been removed, and this repository no longer targets a macOS / Windows desktop product. Some internal modules still use the `workbench` name because the terminal TUI and engine reuse those import, planning, preflight, and recovery utilities.
-
-Automation boundary: Ordo assumes the user already has valid platform sessions. It handles article loading, content transformation, editor injection, draft or publish actions, result recording, and failure recovery. It does not promise automatic login, CAPTCHA handling, or anti-risk bypass behavior.
+The project is terminal / CLI first. Automation loads content, injects it into platforms, saves drafts or publishes, records typed outcomes, and supports safe recovery. It does not automate login, CAPTCHAs, or risk-control bypasses.
 
 [中文说明](README.md)
 
-## Why It Is Useful
+## Safety Boundary
 
-- One Markdown source for multiple platforms
-- WeChat themes are random by default, so articles do not all share the same visual style
-- Covers are random by default from the cover pool
-- Cover assignment supports WeChat, Zhihu, Toutiao, Yidian, and Bilibili columns
-- Browser platforms reuse an Ordo-managed Chrome profile after first login
-- Browser-platform tasks can choose `cover / AI declaration`: `auto` / `force_on` / `force_off`
-- Toutiao publish mode supports scheduled publishing
-- VPS-managed publishing supports a task queue, platform-limit deferral, and daemon-based auto resume
-- Comment auto-reply remains an independent tool
+- Local browser jobs use only `.ordo/automation-profile`; they never read the user's primary Chrome profile.
+- Headless is the default. One run creates one browser context, with one page per browser platform.
+- Local jobs do not scan `DevToolsActivePort`, connect through CDP, or fall back to primary Chrome or another normal browser session.
+- An uninitialized profile or expired login stops the run. It never triggers a browser fallback.
+- `.ordo/publish.lock` prevents overlapping runs and profile contention.
+- WeChat always goes through the dedicated SSH/SCP adapter and VPS worker. Missing VPS configuration blocks the task; there is no local fallback.
+- `--remote vps` controls emergency whole-batch hosting only. It does not change the VPS-only WeChat rule.
 
-## Included Tools
+## Entry Points
 
-- `ordo`: Homebrew-style fullscreen terminal publishing entry
+- `ordo`: terminal TUI
 - `scripts/terminal_wizard.py`: source-tree compatibility launcher
-- `publish.py`: unified multi-platform entry
-- `ordo_engine/`: core local publishing engine
-- `wechat_publisher.py`: WeChat publishing
-- `zhihu_publisher.py`: Zhihu publishing
-- `toutiao_publisher.py`: Toutiao publishing
-- `jianshu_publisher.py`: Jianshu publishing
-- `yidian_publisher.py`: Yidian publishing
-- `bilibili_publisher.py`: Bilibili column publishing
-- `ordo_worker.py`: VPS task queue, deferred publishing, daemon, and status report
-- `scripts/format.py`: WeChat formatting, preview, and theme gallery
-- `scripts/publish.py`: push formatted output to WeChat drafts
-- `scripts/generate.py`: AI image generation
-- `reply_comments.py`: WeChat comment auto-reply
-- `live_cdp.mjs`: CDP browser bridge
+- `publish.py`: unified single-file or directory entry
+- `scripts/monitor_publish.py`: local scheduled-run entry
+- `wechat_publisher.py`: WeChat official-API publisher for VPS workers only
+- `ordo_worker.py`: manual VPS emergency queue tool
+
+Supported platforms: WeChat, Zhihu, Toutiao, Jianshu, Yidian, and Bilibili columns. Jianshu remains experimental because `403 Forbidden` and platform risk controls may block access.
 
 ## Install
 
-Install the terminal command:
+Python 3.12+:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+The project declares one browser runtime: `patchright==1.61.2`. Install Patchright Chromium only when the machine has no usable Chrome / Chromium:
+
+```bash
+.venv/bin/python -m patchright install chromium
+```
+
+Install the terminal command if wanted:
 
 ```bash
 bash scripts/install_ordo.sh
 ```
 
-or directly:
+or:
 
 ```bash
 brew install --formula ./Formula/ordo.rb
 ```
 
-For source-tree development:
-
-```bash
-python3 -m pip install -r requirements.txt
-```
-
-Chrome or Chromium is required for browser-platform publishing.
-
 ## Configuration
 
-WeChat credentials:
+Copy the credential template:
 
 ```bash
 cp secrets.env.example secrets.env
@@ -73,76 +66,130 @@ cp secrets.env.example secrets.env
 WECHAT_APPID=your_appid
 WECHAT_SECRET=your_secret
 WECHAT_AUTHOR=your_author_name
+VPS_IP=your_fixed_public_ip
+VPS_USER=root
+VPS_PATH=/root/ordo-publish
 ```
 
-AI and toolchain:
+Optional project configuration:
 
 ```bash
 cp config.example.json config.json
 ```
 
-Managed browser session defaults:
-
-- profile: `.ordo/browser-session/profile`
-- debug port: `9333`
-- state file: `.ordo/browser-session/state.json`
-
-Override in `config.json`:
-
-```json
-{
-  "browser_session": {
-    "enabled": true,
-    "remind_after_days": 5,
-    "profile_dir": ".ordo/browser-session/profile",
-    "debug_port": 9333
-  }
-}
-```
-
-## Random Themes And Covers
-
-Default publishing behavior:
-
-- WeChat theme: random by default; use `--wechat-theme-mode fixed --wechat-theme chinese` to pin it
-- Cover: use only `assets/<article_id>/cover.png` from the `ordo-scribe` publication package; all six platforms use the same file
-- The file must be PNG, embedded sRGB, exactly `2538x1080` at `2.35:1`, and no larger than `5 MB`
-- The centered `1920x1080` region is the 16:9 safe area; the centered `1600x800` region is the core safe area; each `309 px` side margin is crop-safe, and the main subject stays at least `350 px` from either edge
-- No title, logo, watermark, numbers, letters, or any visible text; never upscale a low-resolution image, and only crop/downsample a larger source
-- Cover-capable platforms: WeChat, Zhihu, Toutiao, Yidian, Bilibili
-- `--cover-mode force_off` skips cover setup
-- `--cover-mode force_on` fails early when the canonical cover is missing or invalid
-- `--cover PATH` accepts only a compliant file named `cover.png`
-
-The legacy `covers/` pool is no longer the default publication path. Preflight rejects noncompliant covers and never stretches or swaps them automatically.
-
-## Quick Start
-
-Launch the TUI:
+`config.json` is local configuration, not a security-default source. A fresh clone defaults to local standalone, headless, and the isolated profile. `wechat_theme_mode=console` is disabled; use `fixed` or `random`:
 
 ```bash
-ordo
+python3 publish.py article.md --platform wechat --mode draft \
+  --wechat-theme-mode fixed --wechat-theme chinese
 ```
 
-Publish one file:
+## First Login
+
+Before the first browser-platform run, explicitly open a temporary headed isolated browser:
 
 ```bash
-python3 publish.py "./my_articles/example.md" --platform all --mode draft
+python3 publish.py --bootstrap-browser --platform zhihu,toutiao,jianshu,yidian,bilibili
 ```
 
-Batch publish a directory:
+This command opens only `.ordo/automation-profile`. Log in, then enter `YES` at the terminal prompt. Later automation reuses that profile in a headless context. Rerun bootstrap after login expires. Automatic publishing never launches normal Chrome.
+
+WeChat uses its API from the VPS worker and needs no browser login. Direct local execution of `wechat_publisher.py` is rejected.
+
+## Manual Local Publishing
+
+Save drafts:
 
 ```bash
-python3 publish.py "./my_articles" --platform all --mode publish --continue-on-error
+python3 publish.py article.md --platform all --mode draft
 ```
 
-VPS-managed publishing:
+Publish:
 
 ```bash
-python3 publish.py "./my_articles" --platform all --mode publish --remote vps --vps-host 203.0.113.10 --vps-user root --vps-path /root/ordo-publish
+python3 publish.py article.md --platform all --mode publish --continue-on-error
 ```
 
-VPS task status and auto-resume:
+Local execution is the default for browser platforms, so these commands are equivalent:
+
+```bash
+python3 publish.py article.md --platform zhihu --mode publish
+python3 publish.py article.md --platform zhihu --mode publish --remote local
+```
+
+`limit_reached`, `submitted_unverified`, `unknown`, and expired login are not success. They return nonzero and preserve state to prevent automatic resubmission. Only a mode-matching terminal outcome succeeds: `draft_only` / `draft_saved` for draft mode, `published` / `scheduled` for publish mode, and explicit `skipped_existing` for a skip.
+
+## Local Scheduled Publishing
+
+One portable scan:
+
+```bash
+.venv/bin/python scripts/monitor_publish.py --once --watch-dir /path/to/polished --template-theme sspai
+```
+
+One article:
+
+```bash
+.venv/bin/python scripts/monitor_publish.py --article /path/to/article.md --template-theme sspai
+```
+
+Daemon scan:
+
+```bash
+.venv/bin/python scripts/monitor_publish.py --daemon --watch-dir /path/to/polished --interval 300 --template-theme sspai
+```
+
+Each pending article uses at most two groups:
+
+1. One WeChat VPS API `draft` group, with no browser. The local machine only packages and transfers files over SSH/SCP.
+2. One `publish` group containing every pending browser platform, sharing one browser context.
+
+Each group gets its own `run_id`; only matching `publish_records.csv` rows count for that group. `.ordo/auto_publish_state.json` and `publish_records.csv` jointly enforce idempotency. `[INFO] 没有未处理文章` is a safe no-op.
+
+Monitor reports five typed categories:
+
+- success: explicit terminal outcome and return code 0
+- skipped: `skipped_existing` or an existing explicit terminal outcome
+- rate-limited: `limit_reached` / `rate_limited`, retried by a later scheduled run
+- pending verification: `submitted_unverified`, requiring human review and blocking resubmission
+- failed: all other errors, missing records, and nonzero terminal mismatches
+
+`--force` explicitly resends and is high risk. Use it only for narrow recovery after human verification, never for normal scheduled runs.
+
+## Canonical Cover
+
+An `ordo-scribe` publication package uses only `assets/<article_id>/cover.png`; all six platforms reuse the same file:
+
+- PNG, embedded sRGB, exactly `2538x1080` at `2.35:1`, no larger than `5 MB`
+- centered `1920x1080` 16:9 safe area and centered approximately `1600x800` core safe area
+- each `309 px` side margin contains crop-safe background only; main subject stays at least `350 px` from either edge
+- no title, logo, watermark, letters, numbers, or any visible text
+- never upscale low-resolution images; crop and downsample only from a larger source
+
+`--cover-mode force_off` skips the cover. `force_on` fails if the canonical cover is absent or invalid. `--cover PATH` accepts only a compliant file named `cover.png`.
+
+## Structured Results
+
+Each platform emits `[META]` JSON and writes `publish_records.csv`. Key fields include:
+
+- `run_id`, `article`, `article_id`, `platform`, `mode`
+- `status`, `error_type`, `returncode`
+- `theme_name`, `template_mode`, `cover_path`
+- `current_url`, `page_state`, `smoke_step`
+
+Outcome handling trusts typed status and records for the current run. Process exit or generic log text alone never proves publication success.
+
+## Manual VPS Emergency Mode
+
+Whole-batch VPS hosting remains an emergency option and monitor never invokes it. It is separate from the dedicated WeChat VPS API route. Use whole-batch hosting only after confirming remote version, browser/CDP, and login state:
+
+```bash
+python3 publish.py article.md --platform all --mode publish \
+  --remote vps --vps-host 203.0.113.10 --vps-user root \
+  --vps-path /root/ordo-publish
+```
+
+Emergency worker commands:
 
 ```bash
 .venv/bin/python ordo_worker.py status
@@ -150,102 +197,15 @@ VPS task status and auto-resume:
 .venv/bin/python ordo_worker.py resume
 ```
 
-When a platform returns daily-limit text such as “publish limit reached” or “try again tomorrow”, the VPS worker records that platform task as `deferred_limit`, stores `next_run_at`, and lets the daemon resume it when due.
+A remote failure never falls back to the user's primary browser. Repair the remote environment, verify it, then retry manually.
 
-To skip articles already marked as published in `Ordo_Scribe_AI创作看板.md`, opt in explicitly:
+## Not Promised
 
-```bash
-python3 publish.py "./my_articles" --platform all --mode publish --skip-published
-```
-
-Pin a WeChat theme:
-
-```bash
-python3 publish.py "./my_articles" --platform wechat --mode draft --wechat-theme-mode fixed --wechat-theme chinese
-```
-
-Force random WeChat themes:
-
-```bash
-python3 publish.py "./my_articles" --platform wechat --mode draft --wechat-theme-mode random
-```
-
-Open theme gallery:
-
-```bash
-python3 scripts/format.py --input "./my_articles/example.md" --gallery
-```
-
-Dry-run comment replies:
-
-```bash
-python3 reply_comments.py --dry-run
-```
-
-## Browser Workflow
-
-Recommended flow:
-
-1. Let Ordo launch its managed browser profile, or open the same profile yourself
-2. Log in to Zhihu, Toutiao, Jianshu, Yidian, and Bilibili there
-3. Reuse the same profile afterward
-4. Start with `--mode draft`
-5. Switch to `--mode publish`
-
-The main entry tries to connect to Chrome, open missing tabs, reuse bound targets, run preflight checks, use the publication-package cover first, fall back to random covers for supported platforms, and then run each platform adapter.
-
-Smoke records:
-
-- `docs/manual-validation/2026-03-28-browser-smoke.md`
-- `docs/manual-validation/2026-03-28-browser-session.md`
-- `docs/manual-validation/2026-03-28-functional-freeze-checklist.md`
-
-## Structured Results
-
-Each platform step prints one `[META]` JSON line with `article_id`, `theme_name`, `template_mode`, `cover_path`, `platform`, `status`, `error_type`, `current_url`, `page_state`, and `smoke_step`.
-
-`publish_records.csv` writes the same fields. Older 8-column CSV files migrate on first append.
-
-## VPS Mode
-
-VPS mode keeps publishing traffic on the VPS IP and is the recommended path for production use.
-
-Common commands:
-
-```bash
-python3 ordo_worker.py start-browser --xvfb
-python3 ordo_worker.py run-job /root/ordo-publish/data/inbox/bundle.zip
-python3 ordo_worker.py daemon
-python3 ordo_worker.py status
-```
-
-Deployment helper:
-
-```bash
-bash scripts/deploy_vps.sh
-```
-
-## Not Done / Not Promised
-
-- Jianshu is experimental because real access may be blocked by `403 Forbidden` or platform risk controls
-- Local `publish.py` mode records CSV results but does not auto-resume the next day; automatic deferral belongs to the VPS job queue
-- Product-grade web console, desktop app, multi-account hosting, and queue concurrency are not implemented
-- Automatic login, CAPTCHA/slider handling, and risk-control bypass are out of scope
-- Secret and local-data hardening: `secrets.env`, `config.json`, and `publish_records.csv` are still local plaintext
-- Long soak and batch stress testing with real logged-in accounts still need more time
-
-## Useful CDP Commands
-
-```bash
-node live_cdp.mjs list
-node live_cdp.mjs warmall
-node live_cdp.mjs eval <target> "document.title"
-node live_cdp.mjs pastehtml <target> "<p>Hello</p>"
-node live_cdp.mjs setfile <target> "<css-selector>" "/path/to/local/file"
-node live_cdp.mjs snap <target>
-node live_cdp.mjs stop
-```
+- automatic login, CAPTCHA / slider handling, or risk-control bypass
+- product-grade web console, desktop app, multi-account hosting, or concurrent queues
+- permanent compatibility with live platform rules
+- extra secret management for plaintext `secrets.env`, `config.json`, or `publish_records.csv`
 
 ## Disclaimer
 
-This project is for content workflow automation and technical research. Platform review, risk control, login, and API behavior can change at any time. Use it at your own discretion.
+This project is for content workflow automation and technical research. Platform review, risk controls, login behavior, and APIs may change. Evaluate account and publishing risk before use.

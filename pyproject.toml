@@ -15,6 +15,7 @@ dependencies = [
   "python-dotenv==1.2.1",
   "Pillow==10.2.0",
   "pypdf==6.9.2",
+  "patchright==1.61.2",
   "python-docx",
   "textual",
 ]

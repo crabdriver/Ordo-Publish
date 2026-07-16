@@ -9,8 +9,11 @@ class InstallPathTests(unittest.TestCase):
         text = formula_path.read_text(encoding="utf-8")
         self.assertIn('depends_on "python@3.12"', text)
         self.assertIn('depends_on "node"', text)
+        self.assertIn("venv = virtualenv_create", text)
+        self.assertIn("venv.pip_install buildpath", text)
         self.assertIn('ORDO_REPO_TEMPLATE_ROOT', text)
-        self.assertIn('bin.install', text)
+        self.assertIn('bin.install libexec/"bin/ordo"', text)
+        self.assertNotIn('(libexec/"bin/ordo").write', text)
         self.assertNotIn("tw93/mole", text)
 
     def test_local_installer_uses_formula_install_flow(self):
@@ -24,6 +27,11 @@ class InstallPathTests(unittest.TestCase):
         self.assertIn("python@3.12", text)
         self.assertIn("node", text)
         self.assertIn("tar -czf", text)
+        self.assertIn("venv = virtualenv_create", text)
+        self.assertIn("venv.pip_install buildpath", text)
+        self.assertIn('bin.install libexec/"bin/ordo"', text)
+        self.assertNotIn('(libexec/"bin/ordo").write', text)
+        self.assertNotIn('-m pip install "$ROOT_DIR"', text)
 
 
 if __name__ == "__main__":

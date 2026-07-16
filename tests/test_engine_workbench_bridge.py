@@ -3,11 +3,15 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from PIL import Image
 
 from ordo_engine.platforms.base import BasePlatformAdapter
+from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
+from ordo_engine.platforms.playwright.base_publisher import PublishResult
+from ordo_engine.run_lock import run_lock
+from ordo_engine.run_state import article_key, is_done, state_file_for
 
 
 class DummyAdapter(BasePlatformAdapter):
@@ -70,6 +74,11 @@ class DummyAdapter(BasePlatformAdapter):
         )
 
 
+class UnknownSuccessAdapter(DummyAdapter):
+    def verify(self, process_result, mode):
+        return "success_unknown"
+
+
 class WorkbenchBridgeTests(unittest.TestCase):
     def setUp(self):
         self._environ_patcher = patch.dict(
@@ -89,6 +98,150 @@ class WorkbenchBridgeTests(unittest.TestCase):
 
     def _write_cover(self, path: Path, size=(1280, 720)):
         Image.new("RGB", size, color=(23, 45, 67)).save(path)
+
+    def _minimal_plan(self, base: Path, platforms):
+        article = base / "article.md"
+        article.write_text("# 标题\n\n正文", encoding="utf-8")
+        return {
+            "publish_job": {
+                "job_id": "shared-browser-job",
+                "article_ids": ["article"],
+                "platforms": list(platforms),
+                "status": "pending",
+                "current_step": "",
+                "success_count": 0,
+                "failure_count": 0,
+                "skip_count": 0,
+                "recoverable": True,
+                "error_summary": "",
+            },
+            "mode": "draft",
+            "continue_on_error": True,
+            "drafts": [{"article_id": "article", "title": "标题"}],
+            "staged_articles": [
+                {"article_id": "article", "markdown_path": str(article)}
+            ],
+            "context_map": [
+                {
+                    "article_id": "article",
+                    "platform": platform,
+                    "markdown_path": str(article),
+                    "cover_mode": "force_off",
+                }
+                for platform in platforms
+            ],
+        }
+
+    def test_run_publish_job_shares_one_engine_across_five_browser_adapters(self):
+        from ordo_engine.workbench.bridge import run_publish_job
+
+        class Publisher:
+            engines = []
+            page = None
+
+            def __init__(self, engine):
+                self.__class__.engines.append(engine)
+
+            def publish(self, _article, _mode):
+                return PublishResult(
+                    platform="stub", status="draft_saved", page_state="draft_saved"
+                )
+
+        platforms = ("zhihu", "toutiao", "jianshu", "yidian", "bilibili")
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            registry = {
+                platform: PlaywrightPlatformAdapter(base, platform, Publisher)
+                for platform in platforms
+            }
+            engine = MagicMock(base_dir=base)
+            factory = MagicMock(return_value=engine)
+
+            result = run_publish_job(
+                base,
+                self._minimal_plan(base, platforms),
+                registry=registry,
+                engine_factory=factory,
+            )
+
+        self.assertEqual(len(result["results"]), 5)
+        factory.assert_called_once_with(
+            mode="standalone", headless=True, base_dir=base.resolve()
+        )
+        engine.connect.assert_called_once_with()
+        engine.close.assert_called_once_with()
+        self.assertEqual(Publisher.engines, [engine] * 5)
+        for adapter in registry.values():
+            self.assertIsNone(adapter._shared_engine)
+
+    def test_run_publish_job_wechat_only_never_builds_engine(self):
+        from ordo_engine.workbench.bridge import run_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            factory = MagicMock()
+            result = run_publish_job(
+                base,
+                self._minimal_plan(base, ("wechat",)),
+                registry={"wechat": DummyAdapter(base, "wechat", stdout="ok")},
+                engine_factory=factory,
+            )
+
+        self.assertEqual(result["publish_job"]["success_count"], 1)
+        factory.assert_not_called()
+
+    def test_run_publish_job_engine_connect_failure_aborts_without_adapter_fallback(self):
+        from ordo_engine.workbench.bridge import run_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            publisher = MagicMock()
+            adapter = PlaywrightPlatformAdapter(base, "zhihu", publisher)
+            engine = MagicMock()
+            engine.connect.side_effect = RuntimeError("connect failed")
+
+            with self.assertRaisesRegex(RuntimeError, "connect failed"):
+                run_publish_job(
+                    base,
+                    self._minimal_plan(base, ("zhihu",)),
+                    registry={"zhihu": adapter},
+                    engine_factory=MagicMock(return_value=engine),
+                )
+
+        self.assertIsNone(adapter._shared_engine)
+        publisher.assert_not_called()
+        engine.close.assert_called_once_with()
+
+    def test_run_publish_job_engine_close_failure_overrides_success(self):
+        from ordo_engine.workbench.bridge import run_publish_job
+
+        class Publisher:
+            page = None
+
+            def __init__(self, _engine):
+                pass
+
+            def publish(self, _article, _mode):
+                return PublishResult(
+                    platform="stub", status="draft_saved", page_state="draft_saved"
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            adapter = PlaywrightPlatformAdapter(base, "zhihu", Publisher)
+            engine = MagicMock(base_dir=base)
+            engine.close.side_effect = RuntimeError("close failed")
+
+            with self.assertRaisesRegex(RuntimeError, "close failed"):
+                run_publish_job(
+                    base,
+                    self._minimal_plan(base, ("zhihu",)),
+                    registry={"zhihu": adapter},
+                    engine_factory=MagicMock(return_value=engine),
+                )
+
+        self.assertIsNone(adapter._shared_engine)
+        engine.close.assert_called_once_with()
 
     def test_import_sources_supports_file_folder_and_paste(self):
         from ordo_engine.workbench.bridge import import_sources
@@ -136,8 +289,8 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(payload["job"]["failures"][0]["source_kind"], "bin")
         self.assertIn("unsupported", payload["job"]["failures"][0]["message"])
 
-    def test_run_publish_job_rejects_when_publish_lock_exists(self):
-        from ordo_engine.workbench.bridge import WORKBENCH_ROOT, run_publish_job
+    def test_run_publish_job_rejects_when_canonical_publish_lock_is_held(self):
+        from ordo_engine.workbench.bridge import run_publish_job
 
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -145,9 +298,7 @@ class WorkbenchBridgeTests(unittest.TestCase):
             staged_dir.mkdir(parents=True, exist_ok=True)
             markdown_path = staged_dir / "a1.md"
             markdown_path.write_text("# 标题\n\n正文", encoding="utf-8")
-            lock_path = base / WORKBENCH_ROOT / "publish.lock"
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            lock_path.write_text("busy", encoding="utf-8")
+            lock_path = base / ".ordo" / "publish.lock"
             plan = {
                 "publish_job": {
                     "job_id": "job-1",
@@ -193,8 +344,77 @@ class WorkbenchBridgeTests(unittest.TestCase):
                 ],
             }
 
-            with self.assertRaisesRegex(RuntimeError, "已有发布任务正在执行"):
-                run_publish_job(base, plan, registry={})
+            with run_lock(lock_path):
+                with self.assertRaisesRegex(RuntimeError, "已有发布任务正在执行"):
+                    run_publish_job(base, plan, registry={})
+
+    def test_run_publish_job_is_idempotent_and_does_not_start_browser_when_all_done(self):
+        from ordo_engine.workbench.bridge import run_publish_job
+
+        class Publisher:
+            publish_calls = 0
+            page = None
+
+            def __init__(self, _engine):
+                pass
+
+            def publish(self, _article, _mode):
+                self.__class__.publish_calls += 1
+                return PublishResult(
+                    platform="zhihu", status="draft_saved", page_state="draft_saved"
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            plan = self._minimal_plan(base, ("zhihu",))
+            adapter = PlaywrightPlatformAdapter(base, "zhihu", Publisher)
+            first_engine = MagicMock(base_dir=base)
+            factory = MagicMock(side_effect=AssertionError("browser must not start for all-skip run"))
+
+            first = run_publish_job(
+                base,
+                plan,
+                registry={"zhihu": adapter},
+                engine_factory=MagicMock(return_value=first_engine),
+            )
+            with patch(
+                "ordo_engine.platforms.registry.build_platform_registry",
+                side_effect=AssertionError("adapter registry must not load for all-skip run"),
+            ):
+                second = run_publish_job(
+                    base, plan, registry=None, engine_factory=factory
+                )
+
+            identity = article_key(plan["context_map"][0]["markdown_path"])
+            self.assertTrue(is_done(identity, "zhihu", "draft", state_file=state_file_for(base)))
+            self.assertEqual(first["results"][0]["status"], "draft_saved")
+            self.assertEqual(second["results"][0]["status"], "skipped_existing")
+            self.assertEqual(second["publish_job"]["skip_count"], 1)
+            self.assertEqual(Publisher.publish_calls, 1)
+            factory.assert_not_called()
+
+    def test_run_publish_job_idempotency_is_mode_scoped_and_failures_are_not_done(self):
+        from ordo_engine.workbench.bridge import run_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            draft_plan = self._minimal_plan(base, ("wechat",))
+            publish_plan = {**draft_plan, "mode": "publish"}
+            adapter = DummyAdapter(base, "wechat", stdout="ok")
+            adapter.publish = MagicMock(wraps=adapter.publish)
+
+            run_publish_job(base, draft_plan, registry={"wechat": adapter})
+            run_publish_job(base, publish_plan, registry={"wechat": adapter})
+            self.assertEqual(adapter.publish.call_count, 2)
+
+            failed_plan = self._minimal_plan(base, ("toutiao",))
+            failed_adapter = DummyAdapter(base, "toutiao", returncode=1, stderr="failed")
+            failed_adapter.publish = MagicMock(wraps=failed_adapter.publish)
+            run_publish_job(base, failed_plan, registry={"toutiao": failed_adapter})
+            run_publish_job(base, failed_plan, registry={"toutiao": failed_adapter})
+            identity = article_key(failed_plan["context_map"][0]["markdown_path"])
+            self.assertFalse(is_done(identity, "toutiao", "draft", state_file=state_file_for(base)))
+            self.assertEqual(failed_adapter.publish.call_count, 2)
 
     def test_discover_resources_returns_theme_and_cover_pool_details(self):
         from ordo_engine.workbench.bridge import discover_resources
@@ -451,6 +671,22 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(result["publish_job"]["success_count"], 1)
         self.assertEqual(result["results"][0]["status"], "draft_only")
 
+    def test_run_publish_job_treats_success_unknown_as_failed(self):
+        from ordo_engine.workbench.bridge import run_publish_job
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            plan = self._minimal_plan(base, ["wechat"])
+            registry = {
+                "wechat": UnknownSuccessAdapter(base, "wechat", returncode=0),
+            }
+
+            result = run_publish_job(base, plan, registry=registry)
+
+        self.assertEqual(result["publish_job"]["status"], "failed")
+        self.assertEqual(result["publish_job"]["success_count"], 0)
+        self.assertEqual(result["publish_job"]["failure_count"], 1)
+
     def test_run_publish_job_supports_sparse_context_map_for_retry_plans(self):
         from ordo_engine.workbench.bridge import run_publish_job
 
@@ -692,6 +928,50 @@ class WorkbenchBridgeTests(unittest.TestCase):
         self.assertEqual(history["last_plan"]["publish_job"]["job_id"], "plan-1")
         self.assertEqual(history["last_result"]["publish_job"]["status"], "failed")
         self.assertEqual(history["recovery"]["status"], "recoverable")
+
+    def test_read_recent_history_treats_success_unknown_as_failed_result(self):
+        from ordo_engine.workbench.bridge import read_recent_history
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            article = base / "article.md"
+            article.write_text("# Article", encoding="utf-8")
+            workbench_dir = base / ".ordo" / "workbench"
+            workbench_dir.mkdir(parents=True)
+            plan = {
+                "publish_job": {"job_id": "plan-unknown"},
+                "mode": "draft",
+                "staged_articles": [
+                    {"article_id": "article", "markdown_path": str(article)}
+                ],
+            }
+            (workbench_dir / "last-plan.json").write_text(
+                json.dumps(plan), encoding="utf-8"
+            )
+            (workbench_dir / "last-result.json").write_text(
+                json.dumps(
+                    {
+                        "publish_job": {
+                            "job_id": "plan-unknown",
+                            "failure_count": 0,
+                        },
+                        "mode": "draft",
+                        "results": [
+                            {
+                                "article_id": "article",
+                                "platform": "wechat",
+                                "status": "success_unknown",
+                                "returncode": 0,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            history = read_recent_history(base, limit=5)
+
+        self.assertTrue(history["recovery"]["can_restore_failures"])
 
     def test_read_recent_history_tolerates_corrupt_snapshots_and_reports_state(self):
         from ordo_engine.workbench.bridge import read_recent_history

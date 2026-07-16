@@ -17,11 +17,10 @@
 
 ### 最小成功路径
 
-1. 运行单篇 dry-run：
-   `python3 wechat_publisher.py "./my_articles/example.md" --dry-run --theme chinese`
-2. 确认本地生成 `.preview.html`
-3. 运行单篇草稿发布：
-   `python3 wechat_publisher.py "./my_articles/example.md" --mode draft --theme chinese`
+1. 确认 `secrets.env` 已配置 `VPS_IP`、`VPS_USER`、`VPS_PATH`。
+2. 本机不得直接运行 `wechat_publisher.py`。
+3. 通过统一入口运行单篇草稿发布：
+   `python3 publish.py "./my_articles/example.md" --platform wechat --mode draft --wechat-theme chinese`
 4. 确认输出包含 `已写入微信公众号草稿`
 
 ### 失败诊断路径

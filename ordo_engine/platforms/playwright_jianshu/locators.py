@@ -5,9 +5,10 @@ from __future__ import annotations
 
 class JianshuLocators:
     EDITOR_URL = "https://www.jianshu.com/writer#/"
-    MANAGEMENT_URL = "https://www.jianshu.com/writer#/notebooks"
+    # 写作页同时展示草稿和已发布文章，不能作为正式发布证据。
+    MANAGEMENT_URL = None
     DRAFT_MANAGEMENT_URL = "https://www.jianshu.com/writer#/notebooks"
-    PUBLISHED_URL_PATTERN = r"jianshu\.com/(?:p|writer)/\w+"
+    PUBLISHED_URL_PATTERN = r"^https?://(?:www\.)?jianshu\.com/p/[A-Za-z0-9_-]+(?:[/?#]|$)"
 
     TITLE_INPUT = (
         'input._24i7u, '
@@ -26,9 +27,15 @@ class JianshuLocators:
     EDITOR_AREA_MIN_HEIGHT = 100
 
     COVER_FILE_INPUT = 'input[type="file"][accept*="image"]'
+    # writer 页的哈希 class submit 属于“新建文集”，不是文章发布按钮。
+    PUBLISH_BUTTON_SELECTOR = "button.dwU8Q._3zXcJ._3QfkW:visible"
 
-    PUBLISH_BUTTON_TEXTS = ["发布文章", "发布"]
-    CONFIRM_PUBLISH_TEXTS = ["确认发布", "确定", "发布"]
+    PUBLISH_BUTTON_TEXTS = ["发布文章"]
+    CONFIRM_PUBLISH_TEXTS = ["直接发布", "确定发布", "确认发布"]
+    CONFIRM_DIALOG_SELECTOR = (
+        '[role="dialog"]:visible, .modal:visible, .dialog:visible'
+    )
+    SUBMIT_FAILURE_MARKERS = ["发布失败", "提交失败"]
     SAVE_DRAFT_TEXTS = ["保存", "存草稿"]
 
     PUBLISH_SUCCESS_MARKERS = ["发布成功，点击查看文章", "发布成功", "已发布"]

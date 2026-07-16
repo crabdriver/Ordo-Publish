@@ -39,9 +39,9 @@ class PublishConsoleStateTests(unittest.TestCase):
         )
 
         mark_publishing(session, 0)
-        record_platform_result(session, 0, {"platform": "wechat", "status": "published", "stdout": "", "stderr": ""})
+        record_platform_result(session, 0, {"platform": "wechat", "status": "published", "returncode": 0, "stdout": "", "stderr": ""})
         record_platform_result(session, 0, {"platform": "zhihu", "status": "failed", "stdout": "", "stderr": "boom"})
-        record_platform_result(session, 0, {"platform": "toutiao", "status": "draft_only", "stdout": "", "stderr": ""})
+        record_platform_result(session, 0, {"platform": "toutiao", "status": "draft_only", "returncode": 0, "stdout": "", "stderr": ""})
 
         article_status = finalize_article(session, 0)
 
@@ -79,7 +79,7 @@ class PublishConsoleStateTests(unittest.TestCase):
         )
 
         mark_publishing(session, 0)
-        record_platform_result(session, 0, {"platform": "wechat", "status": "published", "stdout": "", "stderr": ""})
+        record_platform_result(session, 0, {"platform": "wechat", "status": "draft_only", "returncode": 0, "stdout": "", "stderr": ""})
         finalize_article(session, 0)
 
         moved = advance_after_success(session, 0)
@@ -146,6 +146,7 @@ class PublishConsoleStateTests(unittest.TestCase):
             {
                 "platform": "wechat",
                 "status": "skipped_existing",
+                "returncode": 0,
                 "stdout": "已存在同标题文章",
                 "stderr": "",
             },
@@ -165,8 +166,8 @@ class PublishConsoleStateTests(unittest.TestCase):
         )
 
         mark_publishing(session, 0)
-        record_platform_result(session, 0, {"platform": "wechat", "status": "skipped_existing", "stdout": "", "stderr": ""})
-        record_platform_result(session, 0, {"platform": "zhihu", "status": "published", "stdout": "", "stderr": ""})
+        record_platform_result(session, 0, {"platform": "wechat", "status": "skipped_existing", "returncode": 0, "stdout": "", "stderr": ""})
+        record_platform_result(session, 0, {"platform": "zhihu", "status": "published", "returncode": 0, "stdout": "", "stderr": ""})
 
         article_status = finalize_article(session, 0)
 
@@ -184,7 +185,7 @@ class PublishConsoleStateTests(unittest.TestCase):
         )
 
         mark_publishing(session, 0)
-        record_platform_result(session, 0, {"platform": "wechat", "status": "published", "stdout": "", "stderr": ""})
+        record_platform_result(session, 0, {"platform": "wechat", "status": "published", "returncode": 0, "stdout": "", "stderr": ""})
         record_platform_result(session, 0, {"platform": "zhihu", "status": "limit_reached", "stdout": "", "stderr": "今天已达上限"})
         finalize_article(session, 0)
 

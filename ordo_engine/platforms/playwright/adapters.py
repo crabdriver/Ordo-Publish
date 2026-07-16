@@ -7,8 +7,24 @@ from pathlib import Path
 from typing import Optional
 
 from ordo_engine.platforms.base import BasePlatformAdapter, classify_process_result, infer_error_type
+from ordo_engine.platforms.base import is_terminal_outcome
+from ordo_engine.platforms.playwright.engine import BrowserCleanupError
 from ordo_engine.results.errors import is_retryable_error
 from ordo_engine.results.record import ExecutionResult
+
+
+def _frontmatter_title(raw_text: str) -> str | None:
+    if not raw_text.startswith("---\n"):
+        return None
+    end = raw_text.find("\n---", 4)
+    if end == -1:
+        return None
+    for line in raw_text[4:end].splitlines():
+        if line.startswith((" ", "\t")) or not line.startswith("title:"):
+            continue
+        title = line.split(":", 1)[1].strip().strip("\"'")
+        return title or None
+    return None
 
 
 class PlaywrightPlatformAdapter(BasePlatformAdapter):
@@ -87,6 +103,7 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
         # 共享引擎模式：复用 pipeline 创建的单个 context，不自行启停
         shared = self._shared_engine is not None
         engine = self._shared_engine if shared else None
+        publisher = None
 
         try:
             article = self._load_article(prepared_context)
@@ -107,9 +124,28 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
                 publisher = self.publisher_class(engine)
                 result = publisher.publish(article, prepared_context["mode"])
             finally:
+                cleanup_errors = []
+                leased_page = None
+                try:
+                    leased_page = engine.release_page_for_platform(self.platform)
+                except Exception as exc:
+                    cleanup_errors.append(exc)
+                page = getattr(publisher, "page", None)
+                if page is not None and page is not leased_page:
+                    try:
+                        page.close()
+                    except Exception as exc:
+                        cleanup_errors.append(exc)
                 # 仅当引擎为自身创建时才关闭；共享引擎由 pipeline 统一关闭
                 if not shared:
-                    engine.close()
+                    try:
+                        engine.close()
+                    except Exception as exc:
+                        cleanup_errors.append(exc)
+                if cleanup_errors:
+                    raise BrowserCleanupError(
+                        f"浏览器清理失败: {cleanup_errors[0]}"
+                    ) from cleanup_errors[0]
 
             sys.stdout = old_stdout
             stdout_text = captured_stdout.getvalue()
@@ -117,7 +153,10 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
             return {
                 "platform": self.platform,
                 "command": f"playwright:{self.platform}",
-                "returncode": 0 if result.status not in ("failed",) else 1,
+                "returncode": 0 if is_terminal_outcome(
+                    result.status, prepared_context["mode"]
+                ) else 1,
+                "outcome_status": result.status,
                 "stdout": stdout_text,
                 "stderr": result.error or "",
                 "current_url": result.current_url,
@@ -125,6 +164,8 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
                 "smoke_step": result.smoke_step,
             }
 
+        except BrowserCleanupError:
+            raise
         except Exception as exc:
             sys.stdout = old_stdout
             tb = traceback.format_exc()
@@ -141,6 +182,18 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
             }
 
     def verify(self, process_result, mode):
+        outcome_status = process_result.get("outcome_status")
+        if outcome_status in {
+            "published", "scheduled", "draft_only", "draft_saved", "skipped_existing",
+        } and not is_terminal_outcome(outcome_status, mode):
+            if mode == "publish" and outcome_status in {"draft_only", "draft_saved"}:
+                return "draft_only"
+            return "failed"
+        if outcome_status in {
+            "published", "scheduled", "draft_only", "draft_saved", "skipped_existing",
+            "limit_reached", "submitted_unverified", "unknown", "failed",
+        }:
+            return outcome_status
         return classify_process_result(self.platform, mode, process_result)
 
     def collect_result(self, process_result, mode):
@@ -179,16 +232,22 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
         markdown_path = Path(ctx["markdown_file"])
         raw_text = markdown_path.read_text(encoding="utf-8")
 
-        title = strip_title_marker(markdown_path.stem)
+        # 剥离 YAML frontmatter（--- 包裹的元数据块），避免泄漏到正文
         body = raw_text
+        if raw_text.startswith("---"):
+            parts = raw_text.split("---", 2)
+            if len(parts) >= 3:
+                body = parts[2].lstrip()
 
-        for line in raw_text.splitlines():
+        title = strip_title_marker(_frontmatter_title(raw_text) or markdown_path.stem)
+
+        for line in body.splitlines():
             stripped = line.strip()
             if stripped.startswith("# ") or (
                 stripped.startswith("## ") and not stripped.startswith("###")
             ):
                 title = strip_title_marker(stripped.lstrip("#").strip())
-                body = raw_text.replace(line, "", 1).lstrip()
+                body = body.replace(line, "", 1).lstrip()
                 break
 
         title = title[:100]
@@ -208,6 +267,7 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
             cover_mode=ctx.get("cover_mode"),
             ai_declaration_mode=ctx.get("ai_declaration_mode"),
             scheduled_publish_at=ctx.get("scheduled_publish_at"),
+            force_republish=bool(ctx.get("force_republish", False)),
         )
 
 

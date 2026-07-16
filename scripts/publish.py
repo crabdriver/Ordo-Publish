@@ -311,6 +311,7 @@ from ordo_engine.platforms.wechat.api import (  # noqa: E402
     upload_content_image as shared_upload_content_image,
     upload_thumb_image as shared_upload_thumb_image,
 )
+from ordo_engine.platforms.wechat.runtime import require_vps_worker  # noqa: E402
 
 get_access_token = shared_get_access_token
 upload_thumb_image = shared_upload_thumb_image
@@ -336,6 +337,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true",
                         help="只做排版和图片上传，不推送草稿箱（用于测试）")
     args = parser.parse_args()
+    require_vps_worker()
 
     if CONFIG_PATH.name == "config.example.json":
         raise SystemExit("请先复制 config.example.json 为 config.json，再运行 scripts/publish.py")

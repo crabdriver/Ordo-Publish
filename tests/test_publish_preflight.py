@@ -5,20 +5,39 @@ import tempfile
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from PIL import Image, ImageCms
 
 import publish
+from ordo_engine.run_lock import run_lock
 
 
 class PublishPreflightTests(unittest.TestCase):
+    @staticmethod
+    def _draw_cover_detail(image):
+        from PIL import ImageDraw
+
+        draw = ImageDraw.Draw(image)
+        for x in range(120, image.width - 120, 120):
+            draw.line((x, 100, x, image.height - 100), fill=(220, 180, 100), width=8)
+        for y in range(100, image.height - 100, 100):
+            draw.line((120, y, image.width - 120, y), fill=(120, 180, 220), width=8)
+        return image
+
+    def _initialize_browser_profile(self, base: Path):
+        profile = base / ".ordo" / "automation-profile"
+        profile.mkdir(parents=True, exist_ok=True)
+        (profile / ".ordo-profile-initialized").write_text(
+            "ordo-automation-profile-v1\n", encoding="utf-8"
+        )
+
     def _write_cover(self, path: Path, size=(1280, 720)):
         Image.new("RGB", size, color=(23, 45, 67)).save(path)
 
     def _write_canonical_cover(self, path: Path):
         profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
-        Image.new("RGB", (2538, 1080), color=(23, 45, 67)).save(
+        self._draw_cover_detail(Image.new("RGB", (2538, 1080), color=(23, 45, 67))).save(
             path,
             format="PNG",
             icc_profile=profile,
@@ -29,7 +48,7 @@ class PublishPreflightTests(unittest.TestCase):
         cover = root / relative
         cover.parent.mkdir(parents=True)
         profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
-        Image.new("RGB", cover_size, color=(23, 45, 67)).save(
+        self._draw_cover_detail(Image.new("RGB", cover_size, color=(23, 45, 67))).save(
             cover,
             format="PNG",
             icc_profile=profile,
@@ -110,13 +129,10 @@ class PublishPreflightTests(unittest.TestCase):
 
         self.assertFalse(any("封面池" in item for item in blockers), blockers)
 
-    @patch("wechat_publisher.WeChatPublisher")
-    def test_wechat_preflight_does_not_require_legacy_pool_for_valid_publication_cover(self, mock_publisher):
-        mock_publisher.return_value.ensure_access_token.return_value = None
+    def test_wechat_preflight_does_not_require_legacy_pool_for_valid_publication_cover(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             article, _cover = self._write_publication_package(root)
-            (root / "secrets.env").write_text("VPS_IP=203.0.113.10\n", encoding="utf-8")
             with patch.object(
                 publish,
                 "get_wechat_config_status",
@@ -126,11 +142,7 @@ class PublishPreflightTests(unittest.TestCase):
                     "covers_ready": False,
                     "ai_cover_ready": False,
                 },
-            ), patch.object(
-                publish.subprocess,
-                "run",
-                return_value=CompletedProcess(["ssh"], 0, stdout="", stderr=""),
-            ):
+            ), patch.object(publish.subprocess, "run") as run:
                 blockers, _warnings = publish.run_preflight_checks(
                     platforms=["wechat"],
                     mode="publish",
@@ -140,15 +152,221 @@ class PublishPreflightTests(unittest.TestCase):
                 )
 
         self.assertFalse(any("缺少可用封面" in item for item in blockers), blockers)
+        run.assert_not_called()
 
-    def test_publish_mode_defaults_to_vps_remote(self):
+    def test_publish_mode_defaults_to_local_remote(self):
         args = publish.parse_args(["article.md", "--mode", "publish"])
-        self.assertEqual(args.remote, "vps")
+        self.assertEqual(args.remote, "local")
         self.assertFalse(args.assume_yes)
+
+    def test_explicit_vps_remote_remains_available_for_manual_emergency_use(self):
+        args = publish.parse_args(["article.md", "--mode", "publish", "--remote", "vps"])
+        self.assertEqual(args.remote, "vps")
+
+    def test_force_republish_is_explicit_and_defaults_off(self):
+        self.assertFalse(publish.parse_args(["article.md"]).force_republish)
+        self.assertTrue(publish.parse_args(["article.md", "--force-republish"]).force_republish)
 
     def test_draft_mode_defaults_to_local_remote(self):
         args = publish.parse_args(["article.md", "--mode", "draft"])
         self.assertEqual(args.remote, "local")
+
+    def test_bootstrap_browser_uses_only_repo_profile_and_marks_after_confirmation(self):
+        class FakeEngine:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.profile_dir = kwargs["base_dir"] / ".ordo" / "automation-profile"
+                self.opened = []
+                self.closed = False
+
+            def connect(self):
+                pass
+
+            def get_page_for_platform(self, platform):
+                self.opened.append(platform)
+
+            def close(self):
+                self.closed = True
+
+            def mark_profile_initialized(self):
+                self.profile_dir.mkdir(parents=True, exist_ok=True)
+                (self.profile_dir / ".ordo-profile-initialized").write_text(
+                    "ordo-automation-profile-v1\n", encoding="utf-8"
+                )
+
+        made = []
+
+        def factory(**kwargs):
+            engine = FakeEngine(**kwargs)
+            made.append(engine)
+            return engine
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            publish.bootstrap_browser_profile(
+                base_dir,
+                ["wechat", "zhihu", "jianshu"],
+                engine_factory=factory,
+                input_fn=lambda _prompt: "YES",
+            )
+            marker = base_dir / ".ordo" / "automation-profile" / ".ordo-profile-initialized"
+            self.assertTrue(marker.is_file())
+
+        self.assertEqual(made[0].kwargs, {"mode": "standalone", "headless": False, "base_dir": base_dir})
+        self.assertEqual(made[0].opened, ["zhihu", "jianshu"])
+        self.assertTrue(made[0].closed)
+
+    def test_bootstrap_failure_does_not_write_initialized_marker(self):
+        class FailingEngine:
+            def __init__(self, **kwargs):
+                self.profile_dir = kwargs["base_dir"] / ".ordo" / "automation-profile"
+
+            def connect(self):
+                raise RuntimeError("boom")
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                publish.bootstrap_browser_profile(
+                    base_dir,
+                    ["zhihu"],
+                    engine_factory=FailingEngine,
+                    input_fn=lambda _prompt: "YES",
+                )
+
+            marker = base_dir / ".ordo" / "automation-profile" / ".ordo-profile-initialized"
+            self.assertFalse(marker.exists())
+
+    def test_bootstrap_close_failure_does_not_mark_profile(self):
+        class Engine:
+            def __init__(self, **_kwargs):
+                self.mark_profile_initialized = MagicMock()
+
+            def connect(self):
+                pass
+
+            def get_page_for_platform(self, _platform):
+                pass
+
+            def close(self):
+                raise RuntimeError("context close failed")
+
+        engine = Engine()
+        with self.assertRaisesRegex(RuntimeError, "context close failed"):
+            publish.bootstrap_browser_profile(
+                Path("/tmp/repo"),
+                ["zhihu"],
+                engine_factory=lambda **_kwargs: engine,
+                input_fn=lambda _prompt: "YES",
+            )
+
+        engine.mark_profile_initialized.assert_not_called()
+
+    def test_local_playwright_engine_is_rejected_before_legacy_browser_access(self):
+        legacy_names = (
+            "ensure_chrome_ready",
+            "list_tabs_or_none",
+            "open_missing_platform_tabs",
+            "launch_chrome",
+        )
+        patches = [patch.object(publish, name) for name in legacy_names]
+        mocks = [item.start() for item in patches]
+        self.addCleanup(lambda: [item.stop() for item in patches])
+
+        with patch.object(
+            publish.sys,
+            "argv",
+            ["publish.py", "missing.md", "--remote", "local", "--engine", "playwright"],
+        ):
+            with self.assertRaisesRegex(SystemExit, "standalone"):
+                publish.main()
+
+        for mock in mocks:
+            mock.assert_not_called()
+
+    def test_local_config_playwright_is_rejected_before_legacy_browser_access(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            (base_dir / "config.json").write_text(
+                '{"engine": "playwright"}', encoding="utf-8"
+            )
+            with patch.object(publish, "BASE_DIR", base_dir), patch.object(
+                publish.sys,
+                "argv",
+                ["publish.py", "missing.md", "--remote", "local"],
+            ), patch.object(publish, "ensure_chrome_ready") as ensure, patch.object(
+                publish, "list_tabs_or_none"
+            ) as list_tabs, patch.object(
+                publish, "open_missing_platform_tabs"
+            ) as open_tabs:
+                with self.assertRaisesRegex(SystemExit, "standalone"):
+                    publish.main()
+
+            ensure.assert_not_called()
+            list_tabs.assert_not_called()
+            open_tabs.assert_not_called()
+
+    def test_wechat_only_does_not_consult_legacy_browser_engine_config(self):
+        args = publish.parse_args(
+            ["article.md", "--remote", "local", "--platform", "wechat"]
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            (base_dir / "config.json").write_text(
+                '{"engine": "playwright"}', encoding="utf-8"
+            )
+
+            publish.require_local_standalone_engine(args, base_dir)
+
+    def test_parse_bootstrap_browser_does_not_require_markdown_path(self):
+        args = publish.parse_args(["--bootstrap-browser", "--platform", "zhihu"])
+        self.assertTrue(args.bootstrap_browser)
+        self.assertIsNone(args.markdown_path)
+
+    def test_main_rejects_overlap_before_bootstrap_probe_or_publish(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / ".ordo" / "publish.lock"
+            with run_lock(lock_path), patch.object(
+                publish, "PUBLISH_LOCK_FILE", lock_path, create=True
+            ), patch.object(
+                publish.sys, "argv", ["publish.py", "--bootstrap-browser", "--platform", "zhihu"]
+            ), patch.object(publish, "bootstrap_browser_profile") as bootstrap:
+                with self.assertRaisesRegex(SystemExit, "已有发表任务"):
+                    publish.main()
+            bootstrap.assert_not_called()
+
+    def test_main_rejects_fake_inherited_lock_fd(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            lock_path = root / ".ordo" / "publish.lock"
+            other = root / "other.lock"
+            other.touch()
+            with other.open("r") as handle, patch.object(
+                publish, "PUBLISH_LOCK_FILE", lock_path, create=True
+            ), patch.dict(
+                "os.environ", {"ORDO_PUBLISH_LOCK_FD": str(handle.fileno())}, clear=False
+            ), patch.object(
+                publish.sys, "argv", ["publish.py", "--bootstrap-browser", "--platform", "zhihu"]
+            ), patch.object(publish, "bootstrap_browser_profile") as bootstrap:
+                with self.assertRaisesRegex(SystemExit, "继承发布锁无效"):
+                    publish.main()
+            bootstrap.assert_not_called()
+
+    def test_main_accepts_valid_inherited_lock_for_monitor_child(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            lock_path = Path(tmpdir) / ".ordo" / "publish.lock"
+            with run_lock(lock_path) as lock_fd, patch.object(
+                publish, "PUBLISH_LOCK_FILE", lock_path, create=True
+            ), patch.dict(
+                "os.environ", {"ORDO_PUBLISH_LOCK_FD": str(lock_fd)}, clear=False
+            ), patch.object(
+                publish.sys, "argv", ["publish.py", "--bootstrap-browser", "--platform", "zhihu"]
+            ), patch.object(publish, "bootstrap_browser_profile") as bootstrap:
+                publish.main()
+            bootstrap.assert_called_once()
 
     def test_get_cdp_runtime_env_uses_managed_browser_session_port(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -188,19 +406,26 @@ class PublishPreflightTests(unittest.TestCase):
 
         self.assertEqual(res["returncode"], 0)
 
-    def test_run_preflight_checks_warns_with_cdp_connection_source(self):
-        blockers, warnings = publish.run_preflight_checks(
-            platforms=["zhihu"],
-            mode="draft",
-            workbench={"zhihu": "target-1"},
-            cdp_connection={
-                "source": "windows_devtools_port_file",
-                "detail": "当前 CDP 连接来源：LOCALAPPDATA/Google/Chrome/User Data/DevToolsActivePort",
-            },
-        )
+    def test_run_preflight_checks_ignores_cdp_connection_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._initialize_browser_profile(base)
+            with patch.object(
+                publish,
+                "inspect_browser_platform_state",
+                side_effect=AssertionError("CDP inspection called"),
+            ):
+                blockers, warnings = publish.run_preflight_checks(
+                    platforms=["zhihu"],
+                    mode="draft",
+                    workbench={"zhihu": "target-1"},
+                    base_dir=base,
+                    cover_mode="force_off",
+                    cdp_connection={"detail": "legacy CDP"},
+                )
 
         self.assertEqual(blockers, [])
-        self.assertTrue(any("当前 CDP 连接来源" in item for item in warnings))
+        self.assertFalse(any("CDP" in item for item in warnings))
 
     def test_run_preflight_checks_warns_when_config_json_invalid(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -209,6 +434,7 @@ class PublishPreflightTests(unittest.TestCase):
             covers = base / "covers"
             covers.mkdir()
             self._write_cover(covers / "cover_1.png")
+            self._initialize_browser_profile(base)
 
             blockers, warnings = publish.run_preflight_checks(
                 platforms=["zhihu"],
@@ -304,7 +530,7 @@ class PublishPreflightTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual(blockers, [])
 
-    def test_run_preflight_checks_blocks_wechat_without_vps_ip(self):
+    def test_run_preflight_checks_allows_local_wechat_without_vps_ip_or_network(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             (base / "covers").mkdir()
@@ -318,7 +544,7 @@ class PublishPreflightTests(unittest.TestCase):
                     "covers_ready": True,
                     "ai_cover_ready": False,
                 },
-            ):
+            ), patch.object(publish.subprocess, "run") as run:
                 blockers, warnings = publish.run_preflight_checks(
                     platforms=["wechat"],
                     mode="publish",
@@ -327,193 +553,82 @@ class PublishPreflightTests(unittest.TestCase):
                 )
 
         self.assertEqual(warnings, [])
-        self.assertTrue(any("必须走 VPS" in item for item in blockers), blockers)
+        self.assertEqual(blockers, [])
+        run.assert_not_called()
 
-    def test_run_preflight_checks_requires_browser_tabs_for_browser_platforms(self):
-        with patch.object(
-            publish,
-            "get_wechat_config_status",
-            return_value={
-                "appid_ready": True,
-                "secret_ready": True,
-                "covers_ready": True,
-                "ai_cover_ready": False,
-            },
-        ):
+    def test_run_preflight_checks_does_not_require_browser_tabs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._initialize_browser_profile(base)
             blockers, _warnings = publish.run_preflight_checks(
                 platforms=["zhihu", "toutiao"],
                 mode="draft",
                 workbench={"zhihu": "target-1"},
-            )
-
-        self.assertIn("未找到 `toutiao` 的可用标签页，请先在当前远程调试 Chrome 中打开并登录", blockers)
-
-    def test_run_preflight_checks_still_inspects_existing_tabs_when_some_targets_missing(self):
-        with patch.object(
-            publish,
-            "inspect_browser_platform_state",
-            return_value={
-                "editor_ready": False,
-                "page_state": "login_required",
-                "current_url": "https://www.zhihu.com/signin",
-                "detail": "当前标签页仍处于登录或校验状态",
-            },
-        ), patch.object(
-            publish,
-            "persist_browser_session_health",
-            return_value={},
-        ):
-            blockers, warnings = publish.run_preflight_checks(
-                platforms=["zhihu", "toutiao"],
-                mode="draft",
-                workbench={"zhihu": "target-1"},
-            )
-
-        self.assertEqual(warnings, [])
-        self.assertTrue(any("未找到 `toutiao`" in item for item in blockers))
-        self.assertTrue(any("知乎预检未通过" in item for item in blockers))
-
-    def test_run_preflight_checks_blocks_when_browser_page_is_not_editor_ready(self):
-        with patch.object(
-            publish,
-            "inspect_browser_platform_state",
-            return_value={
-                "editor_ready": False,
-                "page_state": "login_required",
-                "current_url": "https://www.zhihu.com/signin",
-                "detail": "当前标签页不在知乎写作页",
-            },
-        ), patch.object(
-            publish,
-            "discover_cover_pool_status",
-            return_value={"ok": True, "cover_dir": "/tmp/covers", "error": None},
-        ):
-            blockers, warnings = publish.run_preflight_checks(
-                platforms=["zhihu"],
-                mode="draft",
-                workbench={"zhihu": "target-1"},
-            )
-
-        self.assertEqual(warnings, [])
-        self.assertTrue(any("知乎预检未通过" in item for item in blockers))
-        self.assertTrue(any("https://www.zhihu.com/signin" in item for item in blockers))
-
-    def test_run_preflight_checks_warns_when_browser_preflight_cannot_read_page_state(self):
-        with patch.object(
-            publish,
-            "inspect_browser_platform_state",
-            side_effect=subprocess.CalledProcessError(1, ["node", "live_cdp.mjs"]),
-        ):
-            blockers, warnings = publish.run_preflight_checks(
-                platforms=["toutiao"],
-                mode="draft",
-                workbench={"toutiao": "target-1"},
+                base_dir=base,
+                cover_mode="force_off",
             )
 
         self.assertEqual(blockers, [])
-        self.assertTrue(any("头条号预检读取失败" in item for item in warnings))
 
-    def test_run_preflight_checks_persists_healthy_browser_session_state(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            (base / "covers").mkdir()
-            self._write_cover(base / "covers" / "cover_1.png")
-            with patch.object(
-                publish,
-                "inspect_browser_platform_state",
-                return_value={
-                    "editor_ready": True,
-                    "page_state": "editor_ready",
-                    "current_url": "https://zhuanlan.zhihu.com/write",
-                    "detail": "写作编辑器已就绪",
-                },
-            ):
-                publish.run_preflight_checks(
-                    platforms=["zhihu"],
-                    mode="draft",
-                    workbench={"zhihu": "target-1"},
-                    base_dir=base,
-                    cdp_connection={
-                        "source": "managed_browser_port",
-                        "detail": "当前 CDP 连接来源：Ordo 托管浏览器调试端口 9333",
-                    },
-                )
-
-            payload = json.loads((base / ".ordo" / "browser-session" / "state.json").read_text(encoding="utf-8"))
-
-        self.assertEqual(payload["mode"], "managed")
-        self.assertEqual(payload["platforms"]["zhihu"]["status"], "healthy")
-        self.assertEqual(payload["platforms"]["zhihu"]["page_state"], "editor_ready")
-        self.assertTrue(payload["platforms"]["zhihu"]["last_healthy_at"])
-
-    def test_run_preflight_checks_marks_browser_session_relogin_required(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            (base / "covers").mkdir()
-            self._write_cover(base / "covers" / "cover_1.png")
-            with patch.object(
-                publish,
-                "inspect_browser_platform_state",
-                return_value={
-                    "editor_ready": False,
-                    "page_state": "login_required",
-                    "current_url": "https://www.zhihu.com/signin",
-                    "detail": "需要重新登录",
-                },
-            ):
-                blockers, _warnings = publish.run_preflight_checks(
-                    platforms=["zhihu"],
-                    mode="draft",
-                    workbench={"zhihu": "target-1"},
-                    base_dir=base,
-                    cdp_connection={
-                        "source": "managed_browser_port",
-                        "detail": "当前 CDP 连接来源：Ordo 托管浏览器调试端口 9333",
-                    },
-                )
-
-            payload = json.loads((base / ".ordo" / "browser-session" / "state.json").read_text(encoding="utf-8"))
-
-        self.assertTrue(any("知乎预检未通过" in item for item in blockers))
-        self.assertEqual(payload["platforms"]["zhihu"]["status"], "expired_or_relogin_required")
-        self.assertTrue(payload["platforms"]["zhihu"]["last_relogin_required_at"])
-
-    def test_run_preflight_checks_blocks_jianshu_daily_limit(self):
-        with patch.object(
-            publish,
+    def test_standalone_preflight_only_reads_profile_marker(self):
+        forbidden = (
+            "inspect_browser_platform_state",
             "get_page_text_snippet",
-            return_value="每天只能发布 2 篇公开文章，今天已达上限",
-        ), patch.object(
-            publish,
-            "get_wechat_config_status",
-            return_value={
-                "appid_ready": True,
-                "secret_ready": True,
-                "covers_ready": True,
-                "ai_cover_ready": False,
-            },
-        ), patch.object(
-            publish,
-            "inspect_browser_platform_state",
-            return_value={
-                "editor_ready": True,
-                "page_state": "editor_ready",
-                "current_url": "https://www.jianshu.com/writer#/notebooks/1/notes/1",
-                "detail": "写作编辑器已就绪",
-            },
-        ):
-            blockers, warnings = publish.run_preflight_checks(
-                platforms=["jianshu"],
+            "ensure_chrome_ready",
+            "open_missing_platform_tabs",
+            "list_tabs",
+            "list_tabs_or_none",
+            "launch_chrome",
+            "run_cdp",
+        )
+        patches = [
+            patch.object(
+                publish,
+                name,
+                side_effect=AssertionError(f"forbidden helper called: {name}"),
+            )
+            for name in forbidden
+        ]
+        mocks = [item.start() for item in patches]
+        self.addCleanup(lambda: [item.stop() for item in patches])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            blockers, _warnings = publish.run_preflight_checks(
+                platforms=["zhihu"],
                 mode="publish",
-                workbench={"jianshu": "note-1"},
+                workbench={},
+                base_dir=Path(tmpdir),
+                cover_mode="force_off",
             )
 
+        self.assertTrue(any("--bootstrap-browser" in item for item in blockers), blockers)
+        for mock in mocks:
+            mock.assert_not_called()
+
+    def test_run_preflight_checks_does_not_probe_jianshu_page(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self._initialize_browser_profile(base)
+            with patch.object(
+                publish,
+                "get_page_text_snippet",
+                side_effect=AssertionError("CDP page text called"),
+            ):
+                blockers, warnings = publish.run_preflight_checks(
+                    platforms=["jianshu"],
+                    mode="publish",
+                    workbench={"jianshu": "note-1"},
+                    base_dir=base,
+                    cover_mode="force_off",
+                )
+
         self.assertEqual(blockers, [])
-        self.assertTrue(any("简书今天已达到公开文章发布上限" in item for item in warnings))
+        self.assertEqual(warnings, [])
 
     def test_preflight_blocks_publish_when_non_wechat_cover_pool_missing(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
+            self._initialize_browser_profile(base)
             missing_dir = base / "no_covers_here"
             with patch.object(
                 publish,
@@ -550,6 +665,7 @@ class PublishPreflightTests(unittest.TestCase):
     def test_preflight_skips_cover_pool_warning_when_cover_mode_force_off(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
+            self._initialize_browser_profile(base)
             missing_dir = base / "no_covers_here"
             with patch.object(
                 publish,
@@ -600,6 +716,7 @@ class PublishPreflightTests(unittest.TestCase):
     def test_preflight_warns_draft_when_non_wechat_cover_pool_empty_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
+            self._initialize_browser_profile(base)
             empty_covers = base / "covers"
             empty_covers.mkdir()
             with patch.object(
@@ -702,33 +819,29 @@ class PublishPreflightTests(unittest.TestCase):
             self.assertEqual(rows[0]["platform"], "zhihu")
             self.assertEqual(rows[1]["article_id"], "new-1")
 
-    def test_append_publish_record_recovers_from_corrupt_csv(self):
+    def test_append_publish_record_blocks_on_corrupt_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
             rec = Path(tmp) / "publish_records.csv"
             rec.write_bytes(b"\xff\xfe\x00broken")
             with patch.object(publish, "PUBLISH_RECORDS_FILE", rec):
-                publish.append_publish_record(
-                    {
-                        "article": "/a/b/new.md",
-                        "platform": "wechat",
-                        "mode": "draft",
-                        "status": "draft_only",
-                        "returncode": 0,
-                        "stdout": "",
-                        "stderr": "",
-                        "article_id": "new-1",
-                        "theme_name": "",
-                        "template_mode": "default",
-                        "cover_path": "",
-                        "error_type": None,
-                    }
-                )
-            backup = rec.with_name("publish_records.csv.bak")
-            self.assertTrue(backup.exists())
-            with rec.open(encoding="utf-8", newline="") as fp:
-                rows = list(csv.DictReader(fp))
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["article_id"], "new-1")
+                with self.assertRaisesRegex(RuntimeError, "损坏"):
+                    publish.append_publish_record(
+                        {
+                            "article": "/a/b/new.md",
+                            "platform": "wechat",
+                            "mode": "draft",
+                            "status": "draft_only",
+                            "returncode": 0,
+                            "stdout": "",
+                            "stderr": "",
+                            "article_id": "new-1",
+                            "theme_name": "",
+                            "template_mode": "default",
+                            "cover_path": "",
+                            "error_type": None,
+                        }
+                    )
+            self.assertEqual(rec.read_bytes(), b"\xff\xfe\x00broken")
 
     def test_print_result_emits_meta_json_line(self):
         out = []

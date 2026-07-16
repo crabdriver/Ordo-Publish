@@ -17,17 +17,19 @@ from ordo_engine.assignment.templates import assign_templates, scan_theme_pool
 from ordo_engine.config import load_engine_config
 from ordo_engine.importers.sources import UnsupportedSourceError, import_file, import_pasted_text, list_import_candidates
 from ordo_engine.models.workbench import ArticleDraft, ImportFailure, ImportJob, PublishJob
-from ordo_engine.runner.pipeline import run_platform_task
+from ordo_engine.platforms.base import is_terminal_outcome
+from ordo_engine.run_lock import RunAlreadyActive, run_lock
+from ordo_engine.run_state import article_key, is_done, mark_done, state_file_for
+from ordo_engine.runner.pipeline import _synthetic_skip, run_platform_task
 
 WORKBENCH_ROOT = Path(".ordo") / "workbench"
 IMPORT_MANIFESTS_ROOT = WORKBENCH_ROOT / "imports"
-PUBLISH_LOCK_PATH = WORKBENCH_ROOT / "publish.lock"
+PUBLISH_LOCK_PATH = Path(".ordo") / "publish.lock"
 LAST_PLAN_PATH = WORKBENCH_ROOT / "last-plan.json"
 LAST_RESULT_PATH = WORKBENCH_ROOT / "last-result.json"
 SESSION_PATH = Path(".ordo") / "publish-console" / "publish-console-session.json"
 BROWSER_SESSION_STATE_PATH = Path(".ordo") / "browser-session" / "state.json"
 RECORDS_PATH = Path("publish_records.csv")
-SUCCESS_STATUSES = {"published", "scheduled", "draft_only", "success_unknown"}
 SKIP_STATUSES = {"skipped_existing"}
 BROWSER_PLATFORMS = ("zhihu", "toutiao", "jianshu", "yidian", "bilibili")
 PUBLISH_OPTION_MODES = {"auto", "force_on", "force_off", "random"}
@@ -240,18 +242,6 @@ def _write_staged_articles(base_dir: Path, drafts: Sequence[ArticleDraft], job_i
 def _write_import_manifest(base_dir: Path, job: ImportJob) -> Path:
     path = base_dir / IMPORT_MANIFESTS_ROOT / f"{job.job_id}.json"
     _write_json_snapshot(path, job.to_dict())
-    return path
-
-
-def _acquire_publish_lock(base_dir: Path, publish_job_id: str) -> Path:
-    path = base_dir / PUBLISH_LOCK_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError as exc:
-        raise RuntimeError("已有发布任务正在执行，请等待当前任务结束后再试。") from exc
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps({"job_id": publish_job_id, "locked_at": _now_iso()}, ensure_ascii=False))
     return path
 
 
@@ -617,22 +607,41 @@ def _build_context_lookup(plan_payload):
     return mapping
 
 
-def _status_counts(results):
+def _is_skipped_result(result):
+    return result.get("returncode") == 0 and result.get("status") in SKIP_STATUSES
+
+
+def _is_success_result(result, mode):
+    return (
+        result.get("returncode") == 0
+        and result.get("status") not in SKIP_STATUSES
+        and is_terminal_outcome(str(result.get("status") or ""), mode)
+    )
+
+
+def _status_counts(results, mode):
     success = failure = skipped = 0
     recoverable = True
     for result in results:
-        status = result.get("status")
-        if status in SUCCESS_STATUSES:
-            success += 1
-        elif status in SKIP_STATUSES:
+        if _is_skipped_result(result):
             skipped += 1
+        elif _is_success_result(result, mode):
+            success += 1
         else:
             failure += 1
             recoverable = recoverable and bool(result.get("retryable", False))
     return success, failure, skipped, recoverable
 
 
-def run_publish_job(base_dir, plan_payload, *, registry=None, append_record=None, event_sink=None):
+def _run_publish_job_locked(
+    base_dir,
+    plan_payload,
+    *,
+    registry=None,
+    append_record=None,
+    event_sink=None,
+    engine_factory=None,
+):
     root = _ensure_base_dir(base_dir)
     staged_by_article = {item["article_id"]: item["markdown_path"] for item in plan_payload.get("staged_articles", [])}
     draft_by_article = {item["article_id"]: item for item in plan_payload.get("drafts", [])}
@@ -641,13 +650,59 @@ def run_publish_job(base_dir, plan_payload, *, registry=None, append_record=None
     continue_on_error = bool(plan_payload.get("continue_on_error", False))
     context_entries = list(plan_payload.get("context_map", []))
     events = []
-    lock_path = _acquire_publish_lock(root, str(publish_job.get("job_id") or "publish"))
+    selected_browser_adapters = []
+    shared_engine = None
 
     def emit(event):
         events.append(event)
         if event_sink:
             event_sink(event)
     try:
+        from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
+        from ordo_engine.platforms.playwright.engine import PlaywrightEngine
+        from ordo_engine.platforms.registry import build_platform_registry
+
+        state_file = state_file_for(root)
+        work_items = []
+        for context in context_entries:
+            identity = article_key(context["markdown_path"])
+            completed = is_done(
+                identity,
+                context["platform"],
+                mode,
+                state_file=state_file,
+            )
+            work_items.append((context, identity, completed))
+        if registry is None:
+            registry = (
+                build_platform_registry(root)
+                if any(not completed for _context, _identity, completed in work_items)
+                else {}
+            )
+
+        seen_adapters = set()
+        for context, _identity, completed in work_items:
+            if completed:
+                continue
+            adapter = registry[context["platform"]]
+            if (
+                isinstance(adapter, PlaywrightPlatformAdapter)
+                and id(adapter) not in seen_adapters
+            ):
+                seen_adapters.add(id(adapter))
+                selected_browser_adapters.append(adapter)
+
+        if selected_browser_adapters:
+            factory = engine_factory or PlaywrightEngine
+            shared_engine = factory(
+                mode="standalone",
+                headless=True,
+                base_dir=root,
+            )
+            shared_engine.connect()
+            for adapter in selected_browser_adapters:
+                adapter.set_shared_engine(shared_engine)
+
         emit(
             {
                 "type": "job_started",
@@ -659,7 +714,7 @@ def run_publish_job(base_dir, plan_payload, *, registry=None, append_record=None
         )
         results = []
         current_article_id = None
-        for context in context_entries:
+        for context, identity, completed in work_items:
             article_id = context["article_id"]
             platform = context["platform"]
             if article_id != current_article_id:
@@ -681,22 +736,41 @@ def run_publish_job(base_dir, plan_payload, *, registry=None, append_record=None
                     "platform": platform,
                 }
             )
-            result = run_platform_task(
-                base_dir=root,
-                platform=platform,
-                markdown_file=context["markdown_path"],
-                mode=mode,
-                theme_name=context.get("theme_name"),
-                cover_path=context.get("cover_path"),
-                template_mode=context.get("template_mode"),
-                article_id=article_id,
-                cover_mode=context.get("cover_mode"),
-                ai_declaration_mode=context.get("ai_declaration_mode"),
-                scheduled_publish_at=context.get("scheduled_publish_at"),
-                registry=registry,
-            )
+            if completed:
+                result = _synthetic_skip(platform, context["markdown_path"], mode)
+                result["article_id"] = article_id
+                result["theme_name"] = context.get("theme_name")
+                result["template_mode"] = context.get("template_mode")
+                result["cover_path"] = context.get("cover_path")
+                result["cover_mode"] = context.get("cover_mode")
+                result["ai_declaration_mode"] = context.get("ai_declaration_mode")
+                result["scheduled_publish_at"] = context.get("scheduled_publish_at")
+            else:
+                result = run_platform_task(
+                    base_dir=root,
+                    platform=platform,
+                    markdown_file=context["markdown_path"],
+                    mode=mode,
+                    theme_name=context.get("theme_name"),
+                    cover_path=context.get("cover_path"),
+                    template_mode=context.get("template_mode"),
+                    article_id=article_id,
+                    cover_mode=context.get("cover_mode"),
+                    ai_declaration_mode=context.get("ai_declaration_mode"),
+                    scheduled_publish_at=context.get("scheduled_publish_at"),
+                    registry=registry,
+                )
             result["article"] = context["markdown_path"]
             results.append(result)
+            if not completed and _is_success_result(result, mode):
+                mark_done(
+                    identity,
+                    platform,
+                    result["status"],
+                    mode,
+                    result.get("current_url", ""),
+                    state_file=state_file,
+                )
             if append_record:
                 append_record(result)
             emit(
@@ -711,8 +785,15 @@ def run_publish_job(base_dir, plan_payload, *, registry=None, append_record=None
             if result["returncode"] != 0 and not continue_on_error:
                 break
 
-        success_count, failure_count, skip_count, recoverable = _status_counts(results)
-        last_failed_result = next((item for item in reversed(results) if item.get("returncode") != 0), None)
+        success_count, failure_count, skip_count, recoverable = _status_counts(results, mode)
+        last_failed_result = next(
+            (
+                item
+                for item in reversed(results)
+                if not _is_skipped_result(item) and not _is_success_result(item, mode)
+            ),
+            None,
+        )
         publish_job.update(
             {
                 "status": "completed" if failure_count == 0 else "failed",
@@ -734,16 +815,56 @@ def run_publish_job(base_dir, plan_payload, *, registry=None, append_record=None
         )
         payload = {
             "publish_job": publish_job,
+            "mode": mode,
             "events": events,
             "results": results,
         }
         _write_json_snapshot(root / LAST_RESULT_PATH, payload)
         return payload
     finally:
-        try:
-            Path(lock_path).unlink()
-        except OSError:
-            pass
+        active_error = sys.exc_info()[1]
+        cleanup_error = None
+        for adapter in selected_browser_adapters:
+            try:
+                adapter.set_shared_engine(None)
+            except Exception as exc:
+                cleanup_error = cleanup_error or exc
+        if shared_engine is not None:
+            try:
+                shared_engine.close()
+            except Exception as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+                else:
+                    cleanup_error.add_note(f"共享浏览器关闭失败: {exc}")
+        if cleanup_error is not None:
+            if active_error is None:
+                raise cleanup_error
+            active_error.add_note(f"共享浏览器关闭失败: {cleanup_error}")
+
+
+def run_publish_job(
+    base_dir,
+    plan_payload,
+    *,
+    registry=None,
+    append_record=None,
+    event_sink=None,
+    engine_factory=None,
+):
+    root = _ensure_base_dir(base_dir)
+    try:
+        with run_lock(root / PUBLISH_LOCK_PATH):
+            return _run_publish_job_locked(
+                root,
+                plan_payload,
+                registry=registry,
+                append_record=append_record,
+                event_sink=event_sink,
+                engine_factory=engine_factory,
+            )
+    except RunAlreadyActive as exc:
+        raise RuntimeError("已有发布任务正在执行，请等待当前任务结束后再试。") from exc
 
 
 def read_recent_history(base_dir, *, limit: int = 20):
@@ -797,8 +918,13 @@ def read_recent_history(base_dir, *, limit: int = 20):
         recovery_status = "empty"
     can_restore_plan = bool(last_plan) and not issues and not missing_staged_articles
     failure_count = int((last_result or {}).get("publish_job", {}).get("failure_count") or 0)
+    result_mode = str(
+        (last_result or {}).get("mode")
+        or (last_plan or {}).get("mode")
+        or "draft"
+    )
     has_failed_results = failure_count > 0 or any(
-        item.get("status") not in SUCCESS_STATUSES and item.get("status") not in SKIP_STATUSES
+        not _is_skipped_result(item) and not _is_success_result(item, result_mode)
         for item in (last_result or {}).get("results", [])
     )
     return {

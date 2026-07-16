@@ -15,10 +15,19 @@ except ImportError:
 
 from ordo_engine.platforms.playwright.engine import PlaywrightEngine
 from ordo_engine.platforms.playwright.human import HumanBehavior
-from ordo_engine.run_state import record_step, article_key
+from ordo_engine.platforms.base import is_terminal_outcome
+from ordo_engine.run_state import article_key, get_record, mark_done, record_step, state_file_for
 
 
 SMOKE_STATE_PREFIX = "[SMOKE_STATE] "
+
+
+class PublishClickNoEffect(RuntimeError):
+    """发布控件没有产生任何可观察提交过渡。"""
+
+
+class PublishLimitReached(RuntimeError):
+    """平台明确报告当前发布配额已耗尽。"""
 
 
 class PublishState(str, Enum):
@@ -28,9 +37,23 @@ class PublishState(str, Enum):
     BODY_FILLED = "body_filled"
     COVER_UPLOADED = "cover_uploaded"
     SETTINGS_CONFIGURED = "settings_configured"
+    SUBMIT_STARTED = "submit_started"
     SUBMITTED = "submitted"
     VERIFIED = "verified"
     ERROR = "error"
+
+
+@dataclass
+class DraftCheckpoint:
+    """平台草稿检查点 —— 结构化数据，不是任意字符串。"""
+
+    platform: str
+    draft_ref: str          # 平台草稿 ID 或唯一标识
+    draft_url: str = ""     # 草稿编辑页 URL
+    saved_at: str = ""      # ISO 时间戳
+    verification_evidence: dict = field(default_factory=dict)
+    # verification_evidence 示例：
+    # {"method": "draft_list_match", "title_matched": True, "draft_list_url": "..."}
 
 
 @dataclass
@@ -45,6 +68,7 @@ class ArticlePayload:
     cover_mode: Optional[str] = None
     ai_declaration_mode: Optional[str] = None
     scheduled_publish_at: Optional[str] = None
+    force_republish: bool = False
 
 
 @dataclass
@@ -118,6 +142,11 @@ class PlaywrightBasePublisher(ABC):
                 txt = ""
             return any(m in txt for m in login_markers)
 
+        if self.engine.headless and not _title_ready() and _on_login_page():
+            raise RuntimeError(
+                f"{platform} 登录已失效；请运行 publish.py --bootstrap-browser"
+            )
+
         # 等待页面加载/客户端重定向稳定
         time.sleep(3)
         try:
@@ -149,6 +178,10 @@ class PlaywrightBasePublisher(ABC):
                 print(f"[INFO] {platform} 停留在编辑器页但标题框未出现，判定为需要登录")
 
         if needs_login:
+            if self.engine.headless:
+                raise RuntimeError(
+                    f"{platform} 登录已失效；请运行 publish.py --bootstrap-browser"
+                )
             print(f"[INFO] 检测到 {platform} 需要登录，请在浏览器窗口中扫码/登录...")
             print(f"[INFO] 等待登录完成（最多 300 秒）")
 
@@ -191,7 +224,29 @@ class PlaywrightBasePublisher(ABC):
         """标准发布流水线"""
         # 记录文章幂等键，使状态机每一步都持久化到运行状态文件（支撑失败可恢复）
         self._article_key = article_key(article.markdown_path)
+        self._mode = mode
+        self._article = article
+        self._submission_started = False
         try:
+            prior = get_record(
+                self._article_key,
+                self.platform,
+                mode,
+                state_file=self._state_file,
+            )
+            prior_step = (prior or {}).get("last_step") or (prior or {}).get("status")
+            if (
+                not article.force_republish
+                and prior_step in {
+                    "submit_started",
+                    "submitted",
+                    "submitted_unverified",
+                    "publish_click_no_effect",
+                    "unknown",
+                }
+            ):
+                return self._reconcile(mode)
+
             # Step 1: Navigate to editor
             self.page = self.navigate_to_editor()
             self.human = self._init_human(self.page)
@@ -228,6 +283,9 @@ class PlaywrightBasePublisher(ABC):
             self._take_screenshot("settings_configured")
 
             # Step 6: Submit
+            self.state = PublishState.SUBMIT_STARTED
+            self._emit_state("submit_started")
+            self._submission_started = True
             if mode == "publish":
                 self.click_publish()
             else:
@@ -239,14 +297,80 @@ class PlaywrightBasePublisher(ABC):
 
             # Step 7: Verify
             result = self.verify_result(mode)
+            if not self._is_terminal(result.status, mode) and result.status != "limit_reached":
+                result = self._unverified_result(result)
             self.state = PublishState.VERIFIED
-            self._emit_state("verified", page_state=result.page_state)
+            # 结果尚未落盘时保持 submitted 写前状态，避免崩溃后重复提交。
+            self._emit_state("verified", page_state=result.page_state, persist=False)
             self._take_screenshot("verified")
 
             result.screenshots = list(self._screenshots)
+            self._persist_result(result, mode)
             return result
 
+        except PublishLimitReached as exc:
+            self.state = PublishState.ERROR
+            message = f"rate_limited: {exc}"
+            self._emit_state(
+                "limit_reached",
+                page_state="limit_reached",
+                error=message,
+            )
+            self._take_screenshot("limit_reached")
+            return PublishResult(
+                platform=self.platform,
+                status="limit_reached",
+                page_state="limit_reached",
+                current_url=self.page.url if self.page else "",
+                smoke_step="limit_reached",
+                error=message,
+                screenshots=list(self._screenshots),
+            )
+        except PublishClickNoEffect as exc:
+            self.state = PublishState.ERROR
+            message = f"publish_click_no_effect: {exc}"
+            self._emit_state(
+                "publish_click_no_effect",
+                page_state="error",
+                error=message,
+            )
+            self._take_screenshot(f"error_{self.state.value}")
+            return PublishResult(
+                platform=self.platform,
+                status="failed",
+                page_state="error",
+                current_url=self.page.url if self.page else "",
+                smoke_step=self.state.value,
+                error=message,
+                screenshots=list(self._screenshots),
+            )
         except Exception as exc:
+            if self._submission_started:
+                # 点击后异常不等于已发布。先回查后台：文章可能只存成草稿，
+                # 该状态必须写入结果，不能被模糊的 submitted_unverified 覆盖。
+                try:
+                    result = self.verify_result(mode)
+                except Exception:
+                    result = None
+                if result is not None and result.status in {
+                    "draft_only", "draft_saved", "limit_reached",
+                }:
+                    result.error = result.error or str(exc)
+                    result.screenshots = list(self._screenshots)
+                    self._persist_result(result, mode)
+                    return result
+                result = PublishResult(
+                    platform=self.platform,
+                    status="submitted_unverified",
+                    page_state="submitted_unverified",
+                    current_url=self.page.url if self.page else "",
+                    smoke_step="verify",
+                    message="提交可能已发生，需要人工复核",
+                    error=str(exc),
+                    screenshots=list(self._screenshots),
+                )
+                self._emit_state("submitted_unverified", page_state="submitted_unverified", error=str(exc))
+                return result
             self.state = PublishState.ERROR
             self._emit_state("error", page_state="error", error=str(exc))
             self._take_screenshot(f"error_{self.state.value}")
@@ -260,13 +384,64 @@ class PlaywrightBasePublisher(ABC):
                 screenshots=list(self._screenshots),
             )
 
+    @property
+    def _state_file(self):
+        return state_file_for(self.engine.base_dir)
+
+    def _reconcile(self, mode: str) -> PublishResult:
+        """危险提交状态只做核验；无法确认时绝不再次提交。"""
+        self._submission_started = True
+        # 核验必须使用空白页，避免复用编辑页或无关文章页形成假阳性。
+        self.page = self.engine.context.new_page()
+        result = self.verify_result(mode)
+        if not self._is_terminal(result.status, mode):
+            result = self._unverified_result(result, reconciliation=True)
+        self._persist_result(result, mode)
+        return result
+
+    def _unverified_result(self, result: PublishResult, *, reconciliation: bool = False) -> PublishResult:
+        message = "历史提交无法确认，需要人工复核；未再次提交" if reconciliation else "提交结果无法确认，需要人工复核"
+        return PublishResult(
+            platform=self.platform,
+            status="submitted_unverified",
+            page_state="submitted_unverified",
+            current_url=result.current_url or (self.page.url if self.page else ""),
+            smoke_step="verify",
+            message=message,
+            error=result.error,
+            screenshots=list(self._screenshots),
+        )
+
+    @staticmethod
+    def _is_terminal(status: str, mode: str) -> bool:
+        return is_terminal_outcome(status, mode)
+
+    def _persist_result(self, result: PublishResult, mode: str) -> None:
+        if self._is_terminal(result.status, mode):
+            mark_done(
+                self._article_key,
+                self.platform,
+                result.status,
+                mode,
+                result.current_url,
+                state_file=self._state_file,
+            )
+            return
+        record_step(
+            self._article_key,
+            self.platform,
+            mode,
+            result.status,
+            state_file=self._state_file,
+        )
+
     def _take_screenshot(self, step: str):
         if self.page and self.engine:
             path = self.engine.screenshot(self.page, self.platform, step)
             if path:
                 self._screenshots.append(path)
 
-    def _emit_state(self, smoke_step: str, *, page_state: str = "", error: str = ""):
+    def _emit_state(self, smoke_step: str, *, page_state: str = "", error: str = "", persist: bool = True):
         """输出 smoke state JSON 到 stdout（兼容旧 pipeline），并持久化步骤到运行状态文件"""
         payload = {
             "current_url": self.page.url if self.page else "",
@@ -276,10 +451,14 @@ class PlaywrightBasePublisher(ABC):
         if error:
             payload["error"] = error
         # 状态机步骤持久化（支撑断点续跑）
-        try:
-            record_step(getattr(self, "_article_key", ""), self.platform, smoke_step)
-        except Exception:
-            pass
+        if persist:
+            record_step(
+                getattr(self, "_article_key", ""),
+                self.platform,
+                getattr(self, "_mode", "draft"),
+                smoke_step,
+                state_file=self._state_file,
+            )
         print(f"{SMOKE_STATE_PREFIX}{json.dumps(payload, ensure_ascii=False)}")
 
     # ── 子类必须实现的抽象方法 ─────────────────────────────────
@@ -323,3 +502,82 @@ class PlaywrightBasePublisher(ABC):
     def verify_result(self, mode: str) -> PublishResult:
         """验证发布/草稿结果"""
         ...
+
+    # ── 草稿检查点协议（v4.1 新增）────────────────────────
+
+    def save_draft_checkpoint(self) -> DraftCheckpoint | None:
+        """保存草稿并返回结构化的 DraftCheckpoint。
+
+        默认回退到 save_draft() + 基础验证。
+        子类应覆写以提供精确的 draft_ref。
+        无法可靠保存 → 返回 None（调用方应 marc blocked_no_draft）。
+        """
+        try:
+            self.save_draft()
+            return self.verify_draft_checkpoint()
+        except Exception:
+            return None
+
+    def verify_draft_checkpoint(self) -> DraftCheckpoint:
+        """核验草稿并返回 DraftCheckpoint（含 draft_ref）。
+
+        子类必须覆写以提供平台特定的核验逻辑。
+        默认实现返回空 checkpoint —— 调用方应处理为 manual_verify。
+        """
+        return DraftCheckpoint(
+            platform=self.platform,
+            draft_ref="",
+            verification_evidence={"method": "not_implemented"},
+        )
+
+    def publish_from_draft(self, draft_ref: str) -> PublishResult:
+        """从已核验草稿执行正式发布。
+
+        默认回退到 navigate_to_editor + 完整 publish 流程。
+        子类应覆写为：打开 draft_ref 对应的草稿页 → 点击发布。
+        """
+        self.page = self.navigate_to_editor()
+        self._submission_started = True
+        self.click_publish()
+        return self.verify_result("publish")
+
+    def verify_published(self, published_ref: str) -> bool:
+        """核验是否已正式发布（通过公开 URL 或后台已发布列表）。
+
+        子类必须覆写。
+        默认返回 False。
+        """
+        return False
+
+    # ── coordinator 友好流程：prepare → save → verify → publish ─
+
+    def prepare_draft(self, article: ArticlePayload) -> PublishResult:
+        """填写编辑器内容（标题+正文+封面+设置），不提交。"""
+        try:
+            self._article_key = article_key(article.markdown_path)
+            self._mode = "publish"
+            self._article = article
+
+            self.page = self.navigate_to_editor()
+            self.human = self._init_human(self.page)
+            self.fill_title(article.title)
+            self.human.human_wait(0.5, 1.0)
+            self.fill_body(article.body)
+            self.human.human_wait(0.5, 1.5)
+            if article.cover_path and article.cover_mode != "force_off":
+                self.upload_cover(article.cover_path)
+            self.configure_settings(article)
+            return PublishResult(
+                platform=self.platform,
+                status="draft_prepared",
+                page_state="draft_prepared",
+                smoke_step="draft_prepared",
+            )
+        except Exception as exc:
+            return PublishResult(
+                platform=self.platform,
+                status="failed",
+                page_state="error",
+                smoke_step="draft_prepared",
+                error=str(exc),
+            )

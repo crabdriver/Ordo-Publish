@@ -56,22 +56,15 @@ def build_real_publish_preflight(
         matrix_id=f"matrix-{report_id}" if report_id else None,
         cover_dir_override=cover_dir,
     )
-    browser_platforms = [platform for platform in platforms if platform in publish.BROWSER_PLATFORMS]
     tabs = []
-    if browser_platforms:
-        tabs, _launched_app = publish.ensure_chrome_ready(browser_platforms, base_dir=root)
-        publish.open_missing_platform_tabs(platforms, auto_launch=True)
-        tabs = publish.list_tabs(base_dir=root)
-    else:
-        tabs = publish.list_tabs_or_none(base_dir=root) or []
-    workbench = publish.bind_workbench(platforms, tabs)
+    workbench = {}
     blockers, warnings = publish.run_preflight_checks(
         platforms,
         "publish",
         workbench,
         base_dir=root,
         cover_dir_override=Path(cover_dir).expanduser().resolve() if cover_dir else None,
-        cdp_connection=publish.get_cdp_connection_metadata(),
+        cdp_connection=None,
         cover_mode="force_on",
     )
     resolved_report_id = report_id or f"preflight-{uuid.uuid4().hex}"

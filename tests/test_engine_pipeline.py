@@ -3,9 +3,12 @@ import tempfile
 import unittest
 from argparse import Namespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from ordo_engine.platforms.base import BasePlatformAdapter, SubprocessPlatformAdapter
+from ordo_engine.platforms.playwright.adapters import PlaywrightPlatformAdapter
+from ordo_engine.platforms.playwright.base_publisher import PublishResult
+from ordo_engine.run_state import article_key, get_record, is_done, mark_done, state_file_for
 from ordo_engine.runner.pipeline import run_platform_task, run_publish_pipeline
 
 
@@ -102,6 +105,401 @@ class EnginePipelineTests(unittest.TestCase):
         self.assertEqual(result["summary"], "ok")
         self.assertEqual(result["platform"], "wechat")
 
+    def test_wechat_only_pipeline_never_builds_engine(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            registry = {"wechat": DummyAdapter(base_dir, "wechat", stdout="ok")}
+            args = Namespace(mode="draft", continue_on_error=False)
+
+            results, exit_code = run_publish_pipeline(
+                base_dir=base_dir,
+                args=args,
+                article_paths=[article],
+                platforms=["wechat"],
+                registry=registry,
+                engine_factory=lambda **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("browser started")
+                ),
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(results), 1)
+
+    def test_browser_platforms_share_one_engine_and_close_each_page(self):
+        class ResultPublisher:
+            pages = []
+
+            def __init__(self, engine):
+                self.engine = engine
+                self.page = MagicMock()
+                self.__class__.pages.append(self.page)
+
+            def publish(self, _article, mode):
+                status = "published" if mode == "publish" else "draft_saved"
+                return PublishResult(platform="stub", status=status, page_state=status)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            adapters = {
+                name: PlaywrightPlatformAdapter(base_dir, name, ResultPublisher)
+                for name in ("zhihu", "jianshu")
+            }
+            engine = MagicMock(base_dir=base_dir)
+            engine_factory = MagicMock(return_value=engine)
+
+            def release(platform):
+                index = ("zhihu", "jianshu").index(platform)
+                page = ResultPublisher.pages[index]
+                page.close()
+                return page
+
+            engine.release_page_for_platform.side_effect = release
+
+            results, exit_code = run_publish_pipeline(
+                base_dir=base_dir,
+                args=Namespace(mode="publish", continue_on_error=False, headed=False),
+                article_paths=[article],
+                platforms=["zhihu", "jianshu"],
+                registry=adapters,
+                engine_factory=engine_factory,
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(results), 2)
+        engine_factory.assert_called_once_with(
+            mode="standalone", headless=True, base_dir=base_dir
+        )
+        engine.connect.assert_called_once_with()
+        engine.close.assert_called_once_with()
+        self.assertEqual(len(ResultPublisher.pages), 2)
+        for page in ResultPublisher.pages:
+            page.close.assert_called_once_with()
+
+    def test_continue_on_error_releases_each_failed_platform_page(self):
+        class LeaseEngine:
+            def __init__(self):
+                self.base_dir = None
+                self.leases = {}
+                self.pages = []
+                self.closed = False
+
+            def connect(self):
+                pass
+
+            def get_page_for_platform(self, platform):
+                page = MagicMock(url=f"https://example.test/{platform}")
+                self.pages.append(page)
+                self.leases[platform] = page
+                return page
+
+            def release_page_for_platform(self, platform):
+                page = self.leases.pop(platform, None)
+                if page is not None:
+                    page.close()
+                return page
+
+            def close(self):
+                self.closed = True
+
+        def failing_publisher(platform):
+            class Publisher:
+                page = None
+
+                def __init__(self, engine):
+                    self.engine = engine
+
+                def publish(self, _article, _mode):
+                    self.engine.get_page_for_platform(platform)
+                    raise RuntimeError(f"{platform} selector failed")
+
+            return Publisher
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            engine = LeaseEngine()
+            engine.base_dir = base_dir
+            adapters = {
+                platform: PlaywrightPlatformAdapter(
+                    base_dir, platform, failing_publisher(platform)
+                )
+                for platform in ("zhihu", "jianshu")
+            }
+
+            results, exit_code = run_publish_pipeline(
+                base_dir=base_dir,
+                args=Namespace(mode="publish", continue_on_error=True, headed=False),
+                article_paths=[article],
+                platforms=["zhihu", "jianshu"],
+                registry=adapters,
+                engine_factory=MagicMock(return_value=engine),
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(engine.leases, {})
+        self.assertTrue(engine.closed)
+        for page in engine.pages:
+            page.close.assert_called_once_with()
+
+    def test_cleanup_failure_aborts_pipeline_even_when_continue_enabled(self):
+        calls = []
+
+        class Publisher:
+            page = None
+
+            def __init__(self, _engine):
+                pass
+
+            def publish(self, _article, _mode):
+                calls.append("publish")
+                return PublishResult(
+                    platform="stub", status="published", page_state="published"
+                )
+
+        engine = MagicMock()
+        engine.release_page_for_platform.side_effect = RuntimeError("cleanup failed")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            engine.base_dir = base_dir
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            adapters = {
+                platform: PlaywrightPlatformAdapter(base_dir, platform, Publisher)
+                for platform in ("zhihu", "jianshu")
+            }
+
+            with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
+                run_publish_pipeline(
+                    base_dir=base_dir,
+                    args=Namespace(mode="publish", continue_on_error=True, headed=False),
+                    article_paths=[article],
+                    platforms=["zhihu", "jianshu"],
+                    registry=adapters,
+                    engine_factory=MagicMock(return_value=engine),
+                )
+
+        self.assertEqual(calls, ["publish"])
+
+    def test_shared_engine_close_failure_overrides_success(self):
+        class Publisher:
+            page = None
+
+            def __init__(self, _engine):
+                pass
+
+            def publish(self, _article, _mode):
+                return PublishResult(
+                    platform="stub", status="published", page_state="published"
+                )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            engine = MagicMock(base_dir=base_dir)
+            engine.close.side_effect = RuntimeError("context close failed")
+            adapter = PlaywrightPlatformAdapter(base_dir, "zhihu", Publisher)
+
+            with self.assertRaisesRegex(RuntimeError, "context close failed"):
+                run_publish_pipeline(
+                    base_dir=base_dir,
+                    args=Namespace(mode="publish", continue_on_error=False, headed=False),
+                    article_paths=[article],
+                    platforms=["zhihu"],
+                    registry={"zhihu": adapter},
+                    engine_factory=MagicMock(return_value=engine),
+                )
+
+        self.assertIsNone(adapter._shared_engine)
+
+    def test_shared_engine_start_failure_aborts_browser_pipeline_without_fallback(self):
+        class NeverPublisher:
+            def __init__(self, _engine):
+                raise AssertionError("publisher constructed after engine failure")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            adapter = PlaywrightPlatformAdapter(base_dir, "zhihu", NeverPublisher)
+            engine = MagicMock()
+            engine.connect.side_effect = RuntimeError("独立浏览器启动失败")
+
+            with self.assertRaisesRegex(RuntimeError, "独立浏览器启动失败"):
+                run_publish_pipeline(
+                    base_dir=base_dir,
+                    args=Namespace(mode="publish", continue_on_error=False, headed=False),
+                    article_paths=[article],
+                    platforms=["zhihu"],
+                    registry={"zhihu": adapter},
+                    engine_factory=MagicMock(return_value=engine),
+                )
+
+        engine.close.assert_called_once_with()
+        self.assertIsNone(adapter._shared_engine)
+
+    def test_completed_browser_group_does_not_start_engine(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            mark_done(
+                article_key(article),
+                "zhihu",
+                "published",
+                "publish",
+                state_file=state_file_for(base_dir),
+            )
+            adapter = PlaywrightPlatformAdapter(base_dir, "zhihu", MagicMock)
+
+            appended = []
+            printed = []
+            results, exit_code = run_publish_pipeline(
+                base_dir=base_dir,
+                args=Namespace(
+                    mode="publish", continue_on_error=False, headed=False, run_id="skip-run"
+                ),
+                article_paths=[article],
+                platforms=["zhihu"],
+                registry={"zhihu": adapter},
+                append_record=appended.append,
+                printer=printed.append,
+                engine_factory=lambda **_kwargs: (_ for _ in ()).throw(
+                    AssertionError("browser started for completed task")
+                ),
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(results[0]["status"], "skipped_existing")
+        self.assertEqual(results[0]["run_id"], "skip-run")
+        self.assertEqual(appended, results)
+        self.assertEqual(printed, results)
+
+    def test_force_republish_calls_adapter_and_success_overwrites_terminal(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            identity = article_key(article)
+            state_file = state_file_for(base_dir)
+            mark_done(identity, "wechat", "skipped_existing", "draft", state_file=state_file)
+            mark_done(identity, "wechat", "published", "publish", state_file=state_file)
+            adapter = DummyAdapter(base_dir, "wechat", stdout="ok")
+            adapter.publish = MagicMock(wraps=adapter.publish)
+            registry = {"wechat": adapter}
+
+            results, exit_code = run_publish_pipeline(
+                base_dir=base_dir,
+                args=Namespace(
+                    mode="draft", continue_on_error=False, force_republish=True
+                ),
+                article_paths=[article],
+                platforms=["wechat"],
+                registry=registry,
+            )
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(results[0]["status"], "draft_only")
+            adapter.publish.assert_called_once()
+            self.assertTrue(is_done(identity, "wechat", "draft", state_file=state_file))
+            self.assertTrue(is_done(identity, "wechat", "publish", state_file=state_file))
+            self.assertEqual(
+                get_record(identity, "wechat", "draft", state_file=state_file)["status"],
+                "draft_only",
+            )
+
+    def test_force_publish_failure_keeps_previous_terminal(self):
+        class PublishFails(DummyAdapter):
+            def publish(self, prepared_context):
+                self.called = True
+                raise RuntimeError("login failed")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            identity = article_key(article)
+            state_file = state_file_for(base_dir)
+            mark_done(identity, "wechat", "draft_only", "draft", state_file=state_file)
+            adapter = PublishFails(base_dir, "wechat")
+
+            with self.assertRaisesRegex(RuntimeError, "login failed"):
+                run_publish_pipeline(
+                    base_dir=base_dir,
+                    args=Namespace(mode="draft", continue_on_error=False, force_republish=True),
+                    article_paths=[article], platforms=["wechat"], registry={"wechat": adapter},
+                )
+
+            self.assertTrue(adapter.called)
+            self.assertTrue(is_done(identity, "wechat", "draft", state_file=state_file))
+            self.assertEqual(
+                get_record(identity, "wechat", "draft", state_file=state_file)["status"],
+                "draft_only",
+            )
+
+    def test_force_preserves_terminal_when_context_resolution_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            identity = article_key(article)
+            state_file = state_file_for(base_dir)
+            mark_done(identity, "wechat", "draft_only", "draft", state_file=state_file)
+            with self.assertRaisesRegex(RuntimeError, "context failed"):
+                run_publish_pipeline(
+                    base_dir=base_dir,
+                    args=Namespace(mode="draft", continue_on_error=False, force_republish=True),
+                    article_paths=[article], platforms=["wechat"],
+                    registry={"wechat": DummyAdapter(base_dir, "wechat")},
+                    context_resolver=lambda *_args: (_ for _ in ()).throw(RuntimeError("context failed")),
+                )
+            self.assertTrue(is_done(identity, "wechat", "draft", state_file=state_file))
+
+    def test_force_preserves_terminal_when_prepare_fails(self):
+        class PrepareFails(DummyAdapter):
+            def prepare(self, *args, **kwargs):
+                raise RuntimeError("prepare failed")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            identity = article_key(article)
+            state_file = state_file_for(base_dir)
+            mark_done(identity, "wechat", "draft_only", "draft", state_file=state_file)
+            with self.assertRaisesRegex(RuntimeError, "prepare failed"):
+                run_publish_pipeline(
+                    base_dir=base_dir,
+                    args=Namespace(mode="draft", continue_on_error=False, force_republish=True),
+                    article_paths=[article], platforms=["wechat"],
+                    registry={"wechat": PrepareFails(base_dir, "wechat")},
+                )
+            self.assertTrue(is_done(identity, "wechat", "draft", state_file=state_file))
+
+    def test_force_preserves_terminal_when_browser_engine_connect_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            identity = article_key(article)
+            state_file = state_file_for(base_dir)
+            mark_done(identity, "zhihu", "published", "publish", state_file=state_file)
+            adapter = PlaywrightPlatformAdapter(base_dir, "zhihu", MagicMock)
+            with self.assertRaisesRegex(RuntimeError, "独立浏览器启动失败"):
+                run_publish_pipeline(
+                    base_dir=base_dir,
+                    args=Namespace(mode="publish", continue_on_error=False, force_republish=True, headed=False),
+                    article_paths=[article], platforms=["zhihu"], registry={"zhihu": adapter},
+                    engine_factory=lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("connect failed")),
+                )
+            self.assertTrue(is_done(identity, "zhihu", "publish", state_file=state_file))
+
     def test_run_publish_pipeline_stops_on_first_error_when_continue_disabled(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             article_a = Path(tmpdir) / "a.md"
@@ -152,6 +550,25 @@ class EnginePipelineTests(unittest.TestCase):
 
         self.assertEqual(len(results), 4)
         self.assertEqual(exit_code, 1)
+
+    def test_run_publish_pipeline_scopes_state_to_base_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base_dir = Path(tmpdir)
+            article = base_dir / "a.md"
+            article.write_text("# A", encoding="utf-8")
+            registry = {"wechat": DummyAdapter(base_dir, "wechat", returncode=0, stdout="ok")}
+            args = Namespace(mode="draft", continue_on_error=False)
+
+            run_publish_pipeline(
+                base_dir=base_dir,
+                args=args,
+                article_paths=[article],
+                platforms=["wechat"],
+                registry=registry,
+            )
+
+            state_file = base_dir / ".ordo" / "auto_publish_state.json"
+            self.assertTrue(state_file.exists())
 
     def test_run_platform_task_passes_context_and_merges_into_payload(self):
         captured = {}
