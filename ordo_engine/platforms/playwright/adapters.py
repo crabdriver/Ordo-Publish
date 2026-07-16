@@ -214,19 +214,9 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
             retryable=is_retryable_error(error_type),
         )
 
-    def _content_variants_enabled(self) -> bool:
-        """是否对正文做按平台差异化（默认开启，可在 config.json 关闭）"""
-        try:
-            from ordo_engine.config import load_json_config
-            cfg, _ = load_json_config(self.base_dir)
-            return bool(cfg.get("content_variants", True))
-        except Exception:
-            return True
-
     def _load_article(self, ctx: dict):
         """从 prepared_context 构建 ArticlePayload"""
         from ordo_engine.platforms.playwright.base_publisher import ArticlePayload
-        from ordo_engine.platforms.playwright.content_variants import generate_variant
         from ordo_engine.importers.normalize import strip_title_marker
 
         markdown_path = Path(ctx["markdown_file"])
@@ -251,10 +241,6 @@ class PlaywrightPlatformAdapter(BasePlatformAdapter):
                 break
 
         title = title[:100]
-
-        # 按平台生成内容变体（降低全网判重/降权风险）
-        if self._content_variants_enabled():
-            title, body = generate_variant(self.platform, title, body)
 
         cover_path = Path(ctx["cover_path"]) if ctx.get("cover_path") else None
 

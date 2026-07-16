@@ -68,16 +68,10 @@ class ToutiaoPlaywrightPublisher(PlaywrightBasePublisher):
         add = self.page.locator(".article-cover-add, .article-cover-img-replace").first
         if add.count() == 0:
             raise RuntimeError("未找到头条号添加封面入口")
-        self.human.human_click(add)
-
-        # 当前头条抽屉先显示「本地上传」入口；点击后才挂载真正的 file input。
-        local_upload = self.page.locator('button:visible:has-text("本地上传")').first
-        if local_upload.count() == 0:
-            raise RuntimeError("未找到头条号本地上传入口")
-        self.human.human_click(local_upload)
+        add.click(timeout=8000)
 
         file_input = self.page.locator(
-            '#upload-drag-input, .btn-upload-handle input[type="file"], input[type="file"][accept*="image"]'
+            '.btn-upload-handle input[type="file"]'
         ).first
         file_input.wait_for(state="attached", timeout=10000)
         file_input.set_input_files(str(path))

@@ -279,16 +279,110 @@ class BilibiliPlaywrightPublisher(PlaywrightBasePublisher):
     # ── 发布/草稿（直接在 Frame 内点击按钮） ────────────────
 
     def click_publish(self):
+        """B站发布：iframe 内点击发布按钮后，检测父页面变化"""
         ef = self._ef()
-        click_publish_with_evidence(
-            ef,
-            BilibiliLocators.PUBLISH_BUTTON_TEXTS,
-            BilibiliLocators.CONFIRM_PUBLISH_TEXTS,
-            "B站",
-            confirm_scope_selector=BilibiliLocators.CONFIRM_DIALOG_SELECTOR,
-            allow_unscoped_confirm=True,
-            failure_markers=BilibiliLocators.SUBMIT_FAILURE_MARKERS,
+        import time as _time
+        from ordo_engine.platforms.playwright._common import (
+            find_visible_button, _feedback_text, _locator_diagnostics,
+            _is_interactive, _find_scoped_confirm, _raise_if_submit_failed,
         )
+        from ordo_engine.platforms.playwright.base_publisher import PublishClickNoEffect
+
+        publish_btn = find_visible_button(ef, BilibiliLocators.PUBLISH_BUTTON_TEXTS)
+        if not publish_btn or not _is_interactive(publish_btn):
+            raise PublishClickNoEffect("B站发布按钮不可交互")
+
+        # 记录 iframe 和父页面的初始状态
+        pre_parent_url = self.page.url or ""
+        pre_parent_feedback = _feedback_text(self.page)
+
+        print("[INFO] 点击B站发布按钮...")
+        clicked = False
+        # 策略1: force click（跳过 actionability 检查）
+        try:
+            publish_btn.click(force=True)
+            clicked = True
+            print("[INFO] force click 已执行")
+        except Exception as exc:
+            print(f"[WARN] force click 失败: {exc}")
+
+        # 策略2: JS MouseEvent 模拟（绕过框架事件拦截）
+        if not clicked:
+            try:
+                ef.evaluate("""() => {
+                    const btn = document.querySelector('button.vui_button--blue');
+                    if (btn) {
+                        btn.dispatchEvent(new MouseEvent('click', {bubbles: true, cancelable: true}));
+                        return 'dispatched';
+                    }
+                    return 'not_found';
+                }""")
+                clicked = True
+                print("[INFO] JS MouseEvent dispatched")
+            except Exception as exc:
+                print(f"[WARN] JS dispatch 失败: {exc}")
+
+        # 等待父页面变化（URL 变化、确认弹窗、或错误提示）
+        deadline = _time.monotonic() + 15
+        while True:
+            parent_feedback = _feedback_text(self.page)
+            parent_url = self.page.url or ""
+
+            # 检测确认弹窗（可在父页面或 iframe）
+            confirm = _find_scoped_confirm(
+                self.page,
+                BilibiliLocators.CONFIRM_DIALOG_SELECTOR,
+                BilibiliLocators.CONFIRM_PUBLISH_TEXTS,
+            )
+            if confirm is None:
+                confirm = _find_scoped_confirm(
+                    ef,
+                    BilibiliLocators.CONFIRM_DIALOG_SELECTOR,
+                    BilibiliLocators.CONFIRM_PUBLISH_TEXTS,
+                )
+            if confirm is None:
+                confirm = find_visible_button(self.page, BilibiliLocators.CONFIRM_PUBLISH_TEXTS)
+                if confirm and not _is_interactive(confirm):
+                    confirm = None
+            if confirm is None:
+                confirm = find_visible_button(ef, BilibiliLocators.CONFIRM_PUBLISH_TEXTS)
+                if confirm and not _is_interactive(confirm):
+                    confirm = None
+
+            if confirm is not None:
+                print("[INFO] 点击B站确认发布...")
+                try:
+                    confirm.click()
+                except Exception as exc:
+                    raise PublishClickNoEffect(f"B站确认发布按钮不可点击: {exc}") from exc
+                # 等待确认后的效果
+                _time.sleep(2)
+                return
+
+            # 检测错误
+            _raise_if_submit_failed(
+                parent_feedback,
+                BilibiliLocators.SUBMIT_FAILURE_MARKERS,
+                "B站",
+                page=self.page,
+                locator=publish_btn,
+            )
+
+            # 检测成功信号：URL 变化
+            if parent_url != pre_parent_url:
+                print(f"[INFO] B站父页面 URL 已变化: {parent_url}")
+                return
+
+            if parent_feedback and parent_feedback != pre_parent_feedback:
+                print(f"[INFO] B站父页面反馈已变化")
+                return
+
+            if _time.monotonic() >= deadline:
+                raise PublishClickNoEffect(
+                    f"B站发布按钮点击后页面无变化; "
+                    f"diagnostics: {_locator_diagnostics(ef, publish_btn)}"
+                )
+            _time.sleep(0.3)
 
     def save_draft(self):
         ef = self._ef()

@@ -32,6 +32,7 @@ class Locator:
         self.on_set = on_set
         self.on_click = on_click
         self.click_kwargs = []
+        self.wait_calls = []
 
     @property
     def first(self):
@@ -58,8 +59,8 @@ class Locator:
     def locator(self, selector):
         return self.children.get(selector, Locator(count=0))
 
-    def wait_for(self, **_kwargs):
-        return None
+    def wait_for(self, **kwargs):
+        self.wait_calls.append(kwargs)
 
     def set_input_files(self, value):
         self.files.append(value)
@@ -413,29 +414,36 @@ def test_bilibili_cover_success_locator_matches_confirmed_cover_image():
     assert BilibiliLocators.COVER_UPLOAD_SUCCESS == 'img[alt="封面图片"]'
 
 
-def test_toutiao_opens_cover_picker_before_setting_file(tmp_path):
+def test_toutiao_waits_for_cover_input_without_upload_button(tmp_path):
+    class RecordingHuman(Human):
+        def __init__(self):
+            self.clicked = []
+
+        def human_click(self, locator):
+            self.clicked.append(locator)
+            super().human_click(locator)
+
     radio = Locator(attrs={"class": "byte-radio-inner checked"})
     add = Locator()
-    local_upload = Locator()
     file_input = Locator()
     uploaded = Locator()
     confirm = Locator()
     page = MappingPage({
         'label:has-text("单图") .byte-radio-inner': radio,
         ".article-cover-add, .article-cover-img-replace": add,
-        'button:visible:has-text("本地上传")': local_upload,
-        '#upload-drag-input, .btn-upload-handle input[type="file"], input[type="file"][accept*="image"]': file_input,
+        '.btn-upload-handle input[type="file"]': file_input,
         ".pic-select-image-item:has(.success)": uploaded,
         '.byte-drawer-wrapper button:visible:has-text("确定")': confirm,
     })
     publisher = object.__new__(ToutiaoPlaywrightPublisher)
     publisher.page = page
-    publisher.human = Human()
+    publisher.human = RecordingHuman()
 
     publisher.upload_cover(cover(tmp_path))
 
     assert add.clicked == 1
-    assert local_upload.clicked == 1
+    assert add not in publisher.human.clicked
+    assert file_input.wait_calls == [{"state": "attached", "timeout": 10000}]
     assert file_input.files == [str(cover(tmp_path).resolve())]
     assert uploaded.clicked == 1
     assert confirm.clicked == 1
@@ -459,23 +467,28 @@ def test_toutiao_publish_uses_evidence_click_path():
     assert ToutiaoLocators.CONFIRM_DIALOG_SELECTOR
 
 
-def test_yidian_publish_uses_evidence_click_path():
+def test_yidian_publish_clicks_button_then_confirm_dialog():
+    """新 click_publish 内联证据点击：先点发布按钮，再处理「你确定要发布吗？」确认弹窗。"""
+    publish = Locator()
+    confirm = Locator(enabled=True)  # count=1, 可见且可交互
+    page = MappingPage({
+        'button:has-text("确定"), button:has-text("确认"), '
+        '.mp-dialog:visible button:has-text("确定")': confirm,
+    })
     publisher = object.__new__(YidianPlaywrightPublisher)
-    publisher.page = MappingPage({})
+    publisher.page = page
     publisher.human = object()
 
     with patch(
-        "ordo_engine.platforms.playwright_yidian.publisher.click_publish_with_evidence",
-        create=True,
-    ) as click:
+        "ordo_engine.platforms.playwright._common.find_visible_button",
+        return_value=publish,
+    ):
         publisher.click_publish()
 
-    click.assert_called_once()
-    assert click.call_args.kwargs["failure_markers"] == (
-        YidianLocators.SUBMIT_FAILURE_MARKERS
-    )
-    assert YidianLocators.CONFIRM_PUBLISH_TEXTS == ["确认发布"]
-    assert YidianLocators.CONFIRM_DIALOG_SELECTOR
+    assert publish.clicked == 1
+    assert confirm.clicked == 1
+    assert YidianLocators.CONFIRM_PUBLISH_TEXTS == ["确认", "确认发布"]
+    assert YidianLocators.REQUIRED_FIELD_MARKERS  # 必填拦截（如「请选择内容声明」）
 
 
 def test_yidian_opens_single_cover_picker_before_setting_file(tmp_path):
@@ -567,21 +580,32 @@ def test_bilibili_disabled_publish_button_fails_pre_submit():
         publisher.configure_settings(object())
 
 
-def test_bilibili_publish_uses_strict_evidence_click_path():
+def test_bilibili_publish_force_clicks_button_in_frame():
+    """新 click_publish 在 iframe 内 force-click 发布按钮，并等待父页面 URL 变化作为成功证据。"""
     frame = MappingPage({})
+    page = MappingPage({})
     publisher = object.__new__(BilibiliPlaywrightPublisher)
     publisher._editor_frame = frame
-    publisher.page = MappingPage({})
+    publisher.page = page
+
+    publish = Locator()
+    publish.on_click = lambda: setattr(page, "url", "https://example.test/published")
+
+    # find_visible_button 仅对「发布按钮」返回可交互按钮；对「确认文案」返回 None，
+    # 避免被循环里的确认弹窗分支误当成确认按钮二次点击。
+    def fake_find_visible_button(_page, texts, button_class=None):
+        if texts == BilibiliLocators.CONFIRM_PUBLISH_TEXTS:
+            return None
+        return publish
 
     with patch(
-        "ordo_engine.platforms.playwright_bilibili.publisher.click_publish_with_evidence",
-        create=True,
-    ) as click:
+        "ordo_engine.platforms.playwright._common.find_visible_button",
+        side_effect=fake_find_visible_button,
+    ):
         publisher.click_publish()
 
-    click.assert_called_once()
-    assert click.call_args.args[0] is frame
-    assert click.call_args.kwargs["allow_unscoped_confirm"] is True
+    assert publish.clicked == 1
+    assert page.url == "https://example.test/published"
     assert BilibiliLocators.CONFIRM_PUBLISH_TEXTS == ["确认发布"]
 
 
@@ -600,6 +624,44 @@ def test_jianshu_clicks_image_tool_then_uploads_cover(tmp_path):
 
     assert image_tool.clicked == 1
     assert file_input.files == [str(cover(tmp_path).resolve())]
+
+
+def test_jianshu_waits_for_new_note_route_before_title():
+    class Button:
+        first = None
+
+        def __init__(self):
+            self.first = self
+
+        def count(self):
+            return 1
+
+        def is_visible(self, **_kwargs):
+            return True
+
+        def click(self):
+            pass
+
+    class Page:
+        url = "https://www.jianshu.com/writer#/notebooks/1/notes/old"
+        route_ready = False
+
+        def get_by_text(self, *_args, **_kwargs):
+            return Button()
+
+        def wait_for_url(self, predicate, **_kwargs):
+            self.url = "https://www.jianshu.com/writer#/notebooks/1/notes/new"
+            self.route_ready = predicate(self.url)
+
+        def wait_for_selector(self, *_args, **_kwargs):
+            assert self.route_ready, "标题框检查早于新笔记路由完成"
+
+    page = Page()
+    publisher = object.__new__(JianshuPlaywrightPublisher)
+
+    publisher._open_new_article(page)
+
+    assert page.route_ready is True
 
 
 def test_jianshu_clicks_publish_article_instead_of_collection_submit():

@@ -213,19 +213,20 @@ class PlatformContractTests(unittest.TestCase):
         self.assertEqual(len(workers), 1)
         self.assertTrue(result["remote_started"])
 
-    def test_wechat_force_republish_flag_reaches_local_publisher(self):
+    def test_wechat_force_republish_stays_out_of_worker_cli(self):
         with TemporaryDirectory() as tmpdir:
             repo = Path(tmpdir)
             executor = FakeExecutor(stdout="已写入微信公众号草稿")
             registry = {"wechat": WeChatPlatformAdapter(repo, executor=executor)}
 
             with patch.dict(os.environ, {"ORDO_WORKER": "1", "ORDO_WECHAT_VPS_WORKER": "1"}):
-                run_platform_task(
+                result = run_platform_task(
                     repo, "wechat", repo / "article.md", "draft",
                     force_republish=True, registry=registry,
                 )
 
-        self.assertIn("--force-republish", executor.calls[0]["command"])
+        self.assertTrue(result["force_republish"])
+        self.assertNotIn("--force-republish", executor.calls[0]["command"])
 
     def test_wechat_draft_marker_is_terminal_success(self):
         with TemporaryDirectory() as tmpdir:
