@@ -88,8 +88,6 @@ def run_platform_task(
         scheduled_publish_at=scheduled_publish_at,
     )
     prepared["force_republish"] = bool(force_republish)
-    if force_republish and platform == "wechat" and "command" in prepared:
-        prepared["command"].append("--force-republish")
     process_result = adapter.publish(prepared)
     structured_result = adapter.collect_result(process_result, mode=mode)
     raw_returncode = process_result.get("returncode", 1)

@@ -440,8 +440,7 @@ def test_adapter_uses_frontmatter_title_instead_of_revision_filename(tmp_path):
         encoding="utf-8",
     )
 
-    adapter = PlaywrightPlatformAdapter(tmp_path, "stub", MagicMock)
-    adapter._content_variants_enabled = lambda: False
+    adapter = PlaywrightPlatformAdapter(tmp_path, "toutiao", MagicMock)
 
     loaded = adapter._load_article(adapter.prepare(article, "draft"))
 
